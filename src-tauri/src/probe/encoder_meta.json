@@ -1,0 +1,112 @@
+[
+  {
+    "codecFormat": "h264",
+    "encoder": "libx264",
+    "displayName": "x264 (Software)",
+    "description": "成熟稳定的软件 H.264 编码器，画质和兼容性都很好。",
+    "speedLevel": "medium",
+    "qualityLevel": "high",
+    "requiresHardware": false,
+    "platformHints": ["macOS", "Windows", "Linux"],
+    "notes": ["支持 CRF", "支持 2-pass"]
+  },
+  {
+    "codecFormat": "h264",
+    "encoder": "h264_videotoolbox",
+    "displayName": "Apple H.264 VideoToolbox",
+    "description": "Apple 硬件 H.264 编码，速度快、功耗低。",
+    "speedLevel": "fast",
+    "qualityLevel": "medium",
+    "requiresHardware": true,
+    "platformHints": ["macOS"],
+    "notes": ["通常不支持 CRF", "不支持 2-pass"]
+  },
+  {
+    "codecFormat": "h265",
+    "encoder": "libx265",
+    "displayName": "x265 (Software)",
+    "description": "软件 H.265 编码器，压缩效率高于 H.264。",
+    "speedLevel": "slow",
+    "qualityLevel": "high",
+    "requiresHardware": false,
+    "platformHints": ["macOS", "Windows", "Linux"],
+    "notes": ["支持 CRF", "支持 2-pass"]
+  },
+  {
+    "codecFormat": "h265",
+    "encoder": "hevc_videotoolbox",
+    "displayName": "Apple HEVC VideoToolbox",
+    "description": "Apple 硬件 H.265 编码，适合高吞吐场景。",
+    "speedLevel": "fast",
+    "qualityLevel": "medium",
+    "requiresHardware": true,
+    "platformHints": ["macOS"],
+    "notes": ["通常不支持 CRF", "不支持 2-pass"]
+  },
+  {
+    "codecFormat": "h265",
+    "encoder": "hevc_nvenc",
+    "displayName": "NVIDIA HEVC NVENC",
+    "description": "NVIDIA 硬件 H.265 编码，实时性能好。",
+    "speedLevel": "fast",
+    "qualityLevel": "medium",
+    "requiresHardware": true,
+    "platformHints": ["NVIDIA GPU"],
+    "notes": ["通常不支持 CRF", "不支持 2-pass"]
+  },
+  {
+    "codecFormat": "av1",
+    "encoder": "libaom-av1",
+    "displayName": "AOM AV1 (Software)",
+    "description": "AOM 官方 AV1 软件编码器，画质上限高。",
+    "speedLevel": "slow",
+    "qualityLevel": "high",
+    "requiresHardware": false,
+    "platformHints": ["macOS", "Windows", "Linux"],
+    "notes": ["支持 CRF", "支持 2-pass", "编码速度较慢"]
+  },
+  {
+    "codecFormat": "av1",
+    "encoder": "svtav1",
+    "displayName": "SVT-AV1 (Software)",
+    "description": "速度与质量平衡较好的 AV1 软件编码器。",
+    "speedLevel": "medium",
+    "qualityLevel": "high",
+    "requiresHardware": false,
+    "platformHints": ["macOS", "Windows", "Linux"],
+    "notes": ["支持 CRF", "支持 2-pass"]
+  },
+  {
+    "codecFormat": "av1",
+    "encoder": "av1_nvenc",
+    "displayName": "NVIDIA AV1 NVENC",
+    "description": "NVIDIA 硬件 AV1 编码，速度优先。",
+    "speedLevel": "fast",
+    "qualityLevel": "medium",
+    "requiresHardware": true,
+    "platformHints": ["NVIDIA RTX 40+"],
+    "notes": ["通常不支持 CRF", "不支持 2-pass"]
+  },
+  {
+    "codecFormat": "av1",
+    "encoder": "av1_videotoolbox",
+    "displayName": "Apple AV1 VideoToolbox",
+    "description": "Apple 硬件 AV1 编码路径，功耗友好。",
+    "speedLevel": "fast",
+    "qualityLevel": "medium",
+    "requiresHardware": true,
+    "platformHints": ["macOS (支持 AV1 编码机型)"],
+    "notes": ["通常不支持 CRF", "不支持 2-pass"]
+  },
+  {
+    "codecFormat": "vp9",
+    "encoder": "libvpx-vp9",
+    "displayName": "libvpx VP9 (Software)",
+    "description": "VP9 软件编码器，适合 Web 分发场景。",
+    "speedLevel": "slow",
+    "qualityLevel": "high",
+    "requiresHardware": false,
+    "platformHints": ["macOS", "Windows", "Linux"],
+    "notes": ["支持 CRF", "支持 2-pass"]
+  }
+]

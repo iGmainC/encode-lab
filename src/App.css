@@ -86,6 +86,7 @@ button:disabled {
   border: 1px solid #dce5ef;
   background: #fff;
   padding: 14px;
+  margin-bottom: 12px;
 }
 
 .stat h2 {
@@ -99,6 +100,83 @@ button:disabled {
   font-size: 30px;
   font-weight: 700;
   line-height: 1;
+}
+
+.muted {
+  color: #6c7a86;
+  margin: 0;
+}
+
+.encoder-group h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: #3f4d59;
+}
+
+.encoder-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.encoder-card {
+  border: 1px solid #e3eaf3;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fdfefe;
+}
+
+.encoder-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.encoder-card p {
+  margin: 8px 0;
+  color: #4e5c68;
+  font-size: 13px;
+}
+
+.meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: #40505d;
+  margin-bottom: 8px;
+}
+
+.meta-block {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.meta-block label {
+  display: block;
+  color: #667684;
+  margin-bottom: 2px;
+}
+
+.chip {
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.chip.ok {
+  background: #e5f7ed;
+  color: #1f7a3f;
+  border: 1px solid #b9e7ca;
+}
+
+.chip.no {
+  background: #f9ecec;
+  color: #9c2e2e;
+  border: 1px solid #f0c9c9;
 }
 
 .panels {
@@ -125,7 +203,8 @@ pre {
 
 @media (max-width: 960px) {
   .cards,
-  .panels {
+  .panels,
+  .encoder-grid {
     grid-template-columns: 1fr;
   }
 

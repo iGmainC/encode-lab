@@ -54,6 +54,8 @@ pub struct Resolution {
 pub enum VideoCodecFormat {
     H264,
     H265,
+    Av1,
+    Vp9,
     Copy,
 }
 
@@ -65,6 +67,11 @@ pub enum VideoEncoder {
     Libx265,
     HevcVideotoolbox,
     HevcNvenc,
+    LibaomAv1,
+    Svtav1,
+    Av1Nvenc,
+    Av1Videotoolbox,
+    LibvpxVp9,
     Copy,
 }
 

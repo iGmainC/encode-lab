@@ -183,6 +183,42 @@ fn payload_validation_works() {
 }
 
 #[test]
+fn validation_rejects_crf_on_hardware_encoder() {
+    let mut payload = build_task_payload("invalid-crf-hw");
+    payload.video.codec_format = VideoCodecFormat::H265;
+    payload.video.encoder = VideoEncoder::HevcNvenc;
+    payload.video.bitrate_mode = VideoBitrateMode::Crf;
+    payload.video.crf = Some(24);
+
+    let err = payload.validate().expect_err("expected validation error");
+    assert_eq!(err.code(), "INVALID_PAYLOAD");
+}
+
+#[test]
+fn validation_rejects_cbr_without_bitrate_flag() {
+    let mut payload = build_task_payload("invalid-cbr-no-bitrate");
+    payload.video.bitrate_mode = VideoBitrateMode::Cbr;
+    payload.video.crf = None;
+    payload.advanced_args = None;
+
+    let err = payload.validate().expect_err("expected validation error");
+    assert_eq!(err.code(), "INVALID_PAYLOAD");
+}
+
+#[test]
+fn validation_rejects_encoder_codec_mismatch_for_vp9() {
+    let mut payload = build_task_payload("invalid-vp9-encoder");
+    payload.video.codec_format = VideoCodecFormat::Vp9;
+    payload.video.encoder = VideoEncoder::Libx265;
+    payload.video.bitrate_mode = VideoBitrateMode::Cbr;
+    payload.video.crf = None;
+    payload.advanced_args = Some("-b:v 3M".to_string());
+
+    let err = payload.validate().expect_err("expected validation error");
+    assert_eq!(err.code(), "INVALID_PAYLOAD");
+}
+
+#[test]
 fn corrupted_json_can_restore_from_backup() {
     let base_dir = test_base_dir();
     let paths = StoragePaths::new(base_dir.clone());

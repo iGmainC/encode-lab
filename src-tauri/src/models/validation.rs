@@ -70,10 +70,27 @@ impl Validate for TaskConfigPayload {
             }
         }
 
-        if matches!(self.video.bitrate_mode, VideoBitrateMode::Crf) && self.video.crf.is_none() {
-            return Err(StorageError::InvalidPayload(
-                "video.crf is required when bitrateMode is CRF".to_string(),
-            ));
+        match self.video.bitrate_mode {
+            VideoBitrateMode::Crf => {
+                if self.video.crf.is_none() {
+                    return Err(StorageError::InvalidPayload(
+                        "video.crf is required when bitrateMode is CRF".to_string(),
+                    ));
+                }
+                if !supports_crf(&self.video.encoder) {
+                    return Err(StorageError::InvalidPayload(
+                        "selected encoder does not support CRF mode".to_string(),
+                    ));
+                }
+            }
+            VideoBitrateMode::Cbr | VideoBitrateMode::Abr => {
+                // V1 当前没有结构化 bitrate 字段，CBR/ABR 需要用户通过 advancedArgs 提供 -b:v。
+                if !contains_video_bitrate_flag(self.advanced_args.as_deref()) {
+                    return Err(StorageError::InvalidPayload(
+                        "bitrateMode CBR/ABR requires -b:v in advancedArgs".to_string(),
+                    ));
+                }
+            }
         }
 
         // 编码联动校验：
@@ -98,6 +115,14 @@ impl Validate for TaskConfigPayload {
             return Err(StorageError::InvalidPayload(
                 "video.encoder is incompatible with video.codecFormat".to_string(),
             ));
+        }
+
+        if let Some(preset) = &self.video.preset {
+            if !is_preset_allowed(&self.video.encoder, preset) {
+                return Err(StorageError::InvalidPayload(format!(
+                    "preset '{preset}' is not supported by selected encoder"
+                )));
+            }
         }
 
         // 音频模式联动校验：
@@ -141,9 +166,71 @@ impl Validate for TemplatePayload {
     }
 }
 
-/// 编码器能力约束（V1）：NVENC 与 copy 不支持 2-pass。
+/// 编码器能力约束：硬件编码器与 copy 不支持 2-pass。
 fn supports_two_pass(encoder: &VideoEncoder) -> bool {
-    !matches!(encoder, VideoEncoder::HevcNvenc | VideoEncoder::Copy)
+    !matches!(
+        encoder,
+        VideoEncoder::HevcNvenc
+            | VideoEncoder::Av1Nvenc
+            | VideoEncoder::H264Videotoolbox
+            | VideoEncoder::HevcVideotoolbox
+            | VideoEncoder::Av1Videotoolbox
+            | VideoEncoder::Copy
+    )
+}
+
+fn supports_crf(encoder: &VideoEncoder) -> bool {
+    matches!(
+        encoder,
+        VideoEncoder::Libx264
+            | VideoEncoder::Libx265
+            | VideoEncoder::LibaomAv1
+            | VideoEncoder::Svtav1
+            | VideoEncoder::LibvpxVp9
+    )
+}
+
+fn contains_video_bitrate_flag(advanced_args: Option<&str>) -> bool {
+    let Some(raw) = advanced_args else {
+        return false;
+    };
+
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .any(|pair| pair[0] == "-b:v" && !pair[1].starts_with('-'))
+}
+
+fn is_preset_allowed(encoder: &VideoEncoder, preset: &str) -> bool {
+    match encoder {
+        VideoEncoder::Libx264
+        | VideoEncoder::Libx265
+        | VideoEncoder::LibaomAv1
+        | VideoEncoder::Svtav1
+        | VideoEncoder::LibvpxVp9 => software_preset_set().contains(&preset),
+        VideoEncoder::HevcNvenc | VideoEncoder::Av1Nvenc => nvenc_preset_set().contains(&preset),
+        VideoEncoder::H264Videotoolbox | VideoEncoder::HevcVideotoolbox | VideoEncoder::Av1Videotoolbox => false,
+        VideoEncoder::Copy => false,
+    }
+}
+
+fn software_preset_set() -> &'static [&'static str] {
+    &[
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+        "placebo",
+    ]
+}
+
+fn nvenc_preset_set() -> &'static [&'static str] {
+    &["p1", "p2", "p3", "p4", "p5", "p6", "p7", "fast", "medium", "slow", "hq"]
 }
 
 /// 编码器与编码格式匹配关系表。
@@ -157,6 +244,14 @@ fn encoder_matches_codec(encoder: VideoEncoder, codec: VideoCodecFormat) -> bool
             encoder,
             VideoEncoder::Libx265 | VideoEncoder::HevcVideotoolbox | VideoEncoder::HevcNvenc
         ),
+        VideoCodecFormat::Av1 => matches!(
+            encoder,
+            VideoEncoder::LibaomAv1
+                | VideoEncoder::Svtav1
+                | VideoEncoder::Av1Nvenc
+                | VideoEncoder::Av1Videotoolbox
+        ),
+        VideoCodecFormat::Vp9 => matches!(encoder, VideoEncoder::LibvpxVp9),
         VideoCodecFormat::Copy => matches!(encoder, VideoEncoder::Copy),
     }
 }

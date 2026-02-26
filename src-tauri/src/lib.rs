@@ -1,6 +1,8 @@
 mod commands;
 mod models;
+mod probe;
 mod storage;
+mod transcode;
 
 use storage::errors::StorageError;
 use tauri::Manager;
@@ -41,6 +43,9 @@ pub fn run() {
             commands::templates::list_templates,
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::probe::detect_ffmpeg,
+            commands::probe::list_encoder_capabilities,
+            commands::transcode::build_ffmpeg_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

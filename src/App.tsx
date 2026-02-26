@@ -32,16 +32,56 @@ type SaveTemplateResponse = {
   templateId: string;
 };
 
+type FfmpegProbeResult = {
+  ffmpegFound: boolean;
+  ffprobeFound: boolean;
+  ffmpegPath?: string;
+  ffprobePath?: string;
+  version?: string;
+};
+
+type EncoderCapability = {
+  codecFormat: string;
+  encoder: string;
+  available: boolean;
+  supportsTwoPass: boolean;
+  supportsCrf: boolean;
+  presets: string[];
+  displayName: string;
+  description: string;
+  speedLevel: string;
+  qualityLevel: string;
+  requiresHardware: boolean;
+  platformHints: string[];
+  notes: string[];
+};
+
+type EncoderCapabilityResult = {
+  source: "runtime_probe";
+  items: EncoderCapability[];
+};
+
+type BuildFfmpegCommandResult = {
+  commands: string[];
+  warnings: string[];
+  sanitizedAdvancedArgs?: string;
+};
+
 type TaskConfigPayload = {
   name: string;
   video: {
-    codecFormat: "h264" | "h265" | "copy";
+    codecFormat: "h264" | "h265" | "av1" | "vp9" | "copy";
     encoder:
       | "libx264"
       | "h264_videotoolbox"
       | "libx265"
       | "hevc_videotoolbox"
       | "hevc_nvenc"
+      | "libaom_av1"
+      | "svtav1"
+      | "av1_nvenc"
+      | "av1_videotoolbox"
+      | "libvpx_vp9"
       | "copy";
     bitrateMode: "CRF" | "CBR" | "ABR";
     crf?: number;
@@ -70,7 +110,6 @@ type TaskConfigPayload = {
   };
 };
 
-// 生成一份最小可用的任务配置，用于联调阶段快速造数。
 function buildSeedPayload(suffix: string): TaskConfigPayload {
   return {
     name: `demo-task-${suffix}`,
@@ -107,33 +146,54 @@ function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [tasks, setTasks] = useState<TaskConfig[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [ffmpegProbe, setFfmpegProbe] = useState<FfmpegProbeResult | null>(null);
+  const [encoderCapabilities, setEncoderCapabilities] =
+    useState<EncoderCapabilityResult | null>(null);
+  const [commandPreview, setCommandPreview] =
+    useState<BuildFfmpegCommandResult | null>(null);
 
-  // 并行拉取三个基础接口，作为前后端联调最小闭环。
   const fetchAll = useCallback(async () => {
     setLoading(true);
     setError(null);
 
     try {
-      const [settingsResult, tasksResult, templatesResult] = await Promise.all([
+      const samplePayload = buildSeedPayload("preview");
+      const [
+        settingsResult,
+        tasksResult,
+        templatesResult,
+        ffmpegProbeResult,
+        encoderCapabilitiesResult,
+        commandPreviewResult,
+      ] = await Promise.all([
         invoke<AppSettings>("get_settings"),
         invoke<TaskConfig[]>("list_tasks"),
         invoke<Template[]>("list_templates"),
+        invoke<FfmpegProbeResult>("detect_ffmpeg"),
+        invoke<EncoderCapabilityResult>("list_encoder_capabilities"),
+        invoke<BuildFfmpegCommandResult>("build_ffmpeg_command", {
+          request: {
+            payload: samplePayload,
+            inputFile: "/tmp/input.mp4",
+            outputFile: "/tmp/output.mp4",
+          },
+        }),
       ]);
 
       setSettings(settingsResult);
       setTasks(tasksResult);
       setTemplates(templatesResult);
+      setFfmpegProbe(ffmpegProbeResult);
+      setEncoderCapabilities(encoderCapabilitiesResult);
+      setCommandPreview(commandPreviewResult);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // 一键写入测试数据：
-  // 1) 创建任务
-  // 2) 保存模板
-  // 3) 刷新页面数据
   const seedDemoData = useCallback(async () => {
     setSeeding(true);
     setError(null);
@@ -160,7 +220,8 @@ function App() {
         `已创建 task=${createResult.taskId}，template=${templateResult.templateId}`,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
     } finally {
       setSeeding(false);
     }
@@ -170,22 +231,38 @@ function App() {
     void fetchAll();
   }, [fetchAll]);
 
-  // 顶部统计卡片数据。
   const summary = useMemo(
     () => ({
       taskCount: tasks.length,
       templateCount: templates.length,
       concurrencyN: settings?.concurrencyN ?? "-",
+      ffmpegFound: ffmpegProbe?.ffmpegFound ? "是" : "否",
+      ffprobeFound: ffmpegProbe?.ffprobeFound ? "是" : "否",
+      availableEncoderCount:
+        encoderCapabilities?.items.filter((item) => item.available).length ?? 0,
     }),
-    [settings, tasks.length, templates.length],
+    [settings, tasks.length, templates.length, ffmpegProbe, encoderCapabilities],
   );
+
+  const groupedEncoders = useMemo(() => {
+    const map = new Map<string, EncoderCapability[]>();
+    for (const item of encoderCapabilities?.items ?? []) {
+      const list = map.get(item.codecFormat) ?? [];
+      list.push(item);
+      map.set(item.codecFormat, list);
+    }
+    return Array.from(map.entries());
+  }, [encoderCapabilities]);
 
   return (
     <main className="page">
       <header className="header">
         <div>
           <h1>Encode Lab 联调面板</h1>
-          <p>当前联调接口：get_settings / list_tasks / list_templates</p>
+          <p>
+            当前联调接口：get_settings / list_tasks / list_templates / detect_ffmpeg /
+            list_encoder_capabilities / build_ffmpeg_command
+          </p>
         </div>
         <div className="actions">
           <button type="button" onClick={() => void seedDemoData()} disabled={seeding || loading}>
@@ -213,9 +290,61 @@ function App() {
           <h2>模板数量</h2>
           <div className="metric">{summary.templateCount}</div>
         </article>
+        <article className="card stat">
+          <h2>ffmpeg 可用</h2>
+          <div className="metric">{summary.ffmpegFound}</div>
+        </article>
+        <article className="card stat">
+          <h2>ffprobe 可用</h2>
+          <div className="metric">{summary.ffprobeFound}</div>
+        </article>
+        <article className="card stat">
+          <h2>可用编码器数</h2>
+          <div className="metric">{summary.availableEncoderCount}</div>
+        </article>
       </section>
 
-      <section className="panels">
+      <section className="card">
+        <h3>编码器说明卡片</h3>
+        {groupedEncoders.length === 0 ? (
+          <p className="muted">暂无编码器数据</p>
+        ) : (
+          groupedEncoders.map(([codec, items]) => (
+            <div key={codec} className="encoder-group">
+              <h4>{codec.toUpperCase()}</h4>
+              <div className="encoder-grid">
+                {items.map((item) => (
+                  <article key={item.encoder} className="encoder-card">
+                    <header>
+                      <strong>{item.displayName}</strong>
+                      <span className={item.available ? "chip ok" : "chip no"}>
+                        {item.available ? "可用" : "不可用"}
+                      </span>
+                    </header>
+                    <p>{item.description}</p>
+                    <div className="meta-line">
+                      <span>速度：{item.speedLevel}</span>
+                      <span>质量：{item.qualityLevel}</span>
+                      <span>CRF：{item.supportsCrf ? "支持" : "不支持"}</span>
+                      <span>2-pass：{item.supportsTwoPass ? "支持" : "不支持"}</span>
+                    </div>
+                    <div className="meta-block">
+                      <label>平台提示</label>
+                      <div>{item.platformHints.join(" / ") || "-"}</div>
+                    </div>
+                    <div className="meta-block">
+                      <label>备注</label>
+                      <div>{item.notes.join("；") || "-"}</div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
+      </section>
+
+      <section className="panels panels-five">
         <article className="card">
           <h3>get_settings</h3>
           <pre>{JSON.stringify(settings, null, 2)}</pre>
@@ -229,6 +358,21 @@ function App() {
         <article className="card">
           <h3>list_templates</h3>
           <pre>{JSON.stringify(templates, null, 2)}</pre>
+        </article>
+
+        <article className="card">
+          <h3>detect_ffmpeg</h3>
+          <pre>{JSON.stringify(ffmpegProbe, null, 2)}</pre>
+        </article>
+
+        <article className="card">
+          <h3>list_encoder_capabilities</h3>
+          <pre>{JSON.stringify(encoderCapabilities, null, 2)}</pre>
+        </article>
+
+        <article className="card">
+          <h3>build_ffmpeg_command (preview)</h3>
+          <pre>{JSON.stringify(commandPreview, null, 2)}</pre>
         </article>
       </section>
     </main>
