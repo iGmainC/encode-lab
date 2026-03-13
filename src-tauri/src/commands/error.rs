@@ -11,6 +11,15 @@ pub struct CommandError {
     pub message: String,
 }
 
+impl CommandError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
 impl From<StorageError> for CommandError {
     fn from(value: StorageError) -> Self {
         // 后端内部错误统一映射到可前端消费的错误模型。

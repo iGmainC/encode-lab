@@ -1,15 +1,20 @@
 mod commands;
 mod models;
+mod preview;
 mod probe;
 mod storage;
 mod transcode;
 
+use std::path::PathBuf;
+
+use preview::PreviewManager;
 use storage::errors::StorageError;
 use tauri::Manager;
 
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) storage: storage::AppStorage,
+    pub(crate) preview_manager: PreviewManager,
 }
 
 fn build_state<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<AppState, StorageError> {
@@ -17,16 +22,23 @@ fn build_state<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<AppState, Stora
         .path()
         .app_data_dir()
         .map_err(|_| StorageError::PathResolveFailed)?;
+    let runtime_dir = build_runtime_dir(&app_data_dir);
 
     Ok(AppState {
         storage: storage::AppStorage::new(app_data_dir),
+        preview_manager: PreviewManager::new(runtime_dir),
     })
+}
+
+fn build_runtime_dir(app_data_dir: &PathBuf) -> PathBuf {
+    app_data_dir.join("runtime")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = build_state(app).map_err(|err| err.to_string())?;
             app.manage(state);
@@ -45,6 +57,10 @@ pub fn run() {
             commands::settings::update_settings,
             commands::probe::detect_ffmpeg,
             commands::probe::list_encoder_capabilities,
+            commands::probe::read_video_metadata,
+            commands::preview::start_preview,
+            commands::preview::update_preview,
+            commands::preview::stop_preview,
             commands::transcode::build_ffmpeg_command,
         ])
         .run(tauri::generate_context!())
