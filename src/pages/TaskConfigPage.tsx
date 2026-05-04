@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import {
@@ -13,15 +14,21 @@ import { SourceVideoCard } from "../components/workbench/SourceVideoCard";
 import { StepFlowHeader } from "../components/workbench/StepFlowHeader";
 import { TaskSummaryCard } from "../components/workbench/TaskSummaryCard";
 import { useTaskDraft } from "../context/TaskDraftContext";
-import type { EncoderCapability } from "../types/workbench";
+import type { EncoderCapability, FfmpegProbeResult } from "../types/workbench";
 
 type Props = {
   filteredEncoders: EncoderCapability[];
   selectedEncoderCapability?: EncoderCapability;
+  ffmpegProbe: FfmpegProbeResult | null;
   onGoPreview: () => void;
 };
 
-export function TaskConfigPage({ filteredEncoders, selectedEncoderCapability, onGoPreview }: Props) {
+export function TaskConfigPage({
+  filteredEncoders,
+  selectedEncoderCapability,
+  ffmpegProbe,
+  onGoPreview,
+}: Props) {
   const {
     step,
     setStep,
@@ -39,6 +46,8 @@ export function TaskConfigPage({ filteredEncoders, selectedEncoderCapability, on
     setFormPreset,
     keepOriginalResolution,
     setKeepOriginalResolution,
+    preserveDolbyVisionMetadata,
+    setPreserveDolbyVisionMetadata,
     formWidth,
     setFormWidth,
     formHeight,
@@ -68,6 +77,27 @@ export function TaskConfigPage({ filteredEncoders, selectedEncoderCapability, on
     pickSourceFile,
     retryVideoMetadata,
   } = useTaskDraft();
+
+  const isDolbyVisionSource = videoMetadata?.video?.hdrType === "DolbyVision";
+  const canPreserveDolbyVision =
+    isDolbyVisionSource &&
+    formCodec === "h265" &&
+    formEncoder === "libx265" &&
+    Boolean(ffmpegProbe?.dolbyVision.supportsPreservePipeline);
+
+  const dolbyVisionHint = !isDolbyVisionSource
+    ? "仅当源视频识别为 Dolby Vision 时显示该能力。"
+    : !ffmpegProbe?.dolbyVision.supportsPreservePipeline
+      ? "当前 FFmpeg 运行时未探测到完整的 Dolby Vision 保留链路。"
+      : formCodec !== "h265" || formEncoder !== "libx265"
+        ? "当前版本仅支持 H.265 + libx265 的 Dolby Vision 保留实验链路。"
+        : "尽量沿用源片的 Dolby Vision 相关色彩与元数据能力，实际结果仍取决于 FFmpeg 与编码器支持。";
+
+  useEffect(() => {
+    if (!canPreserveDolbyVision && preserveDolbyVisionMetadata) {
+      setPreserveDolbyVisionMetadata(false);
+    }
+  }, [canPreserveDolbyVision, preserveDolbyVisionMetadata, setPreserveDolbyVisionMetadata]);
 
   const presetHint =
     formPreset === ""
@@ -100,6 +130,7 @@ export function TaskConfigPage({ filteredEncoders, selectedEncoderCapability, on
             encoder={formEncoder}
             mode={formMode}
             twoPass={formTwoPass}
+            preserveDolbyVisionMetadata={preserveDolbyVisionMetadata}
           />
         </div>
 
@@ -285,6 +316,27 @@ export function TaskConfigPage({ filteredEncoders, selectedEncoderCapability, on
                 />
               </label>
             </div>
+
+            {isDolbyVisionSource ? (
+              <div className="rounded-2xl border bg-muted/30 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium">保留 Dolby Vision 元数据（实验性）</div>
+                    <p className="text-xs text-muted-foreground">{dolbyVisionHint}</p>
+                  </div>
+                  <Switch
+                    checked={preserveDolbyVisionMetadata}
+                    onCheckedChange={setPreserveDolbyVisionMetadata}
+                    disabled={!canPreserveDolbyVision}
+                  />
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  <span>源 HDR: {videoMetadata?.video?.hdrType ?? "-"}</span>
+                  <span>推荐编码器: {ffmpegProbe?.dolbyVision.recommendedEncoder ?? "-"}</span>
+                  <span>dovi_rpu: {ffmpegProbe?.dolbyVision.supportsDoviRpu ? "yes" : "no"}</span>
+                </div>
+              </div>
+            ) : null}
 
             <div className="grid gap-4 md:grid-cols-4">
               <label className="space-y-1 text-sm">

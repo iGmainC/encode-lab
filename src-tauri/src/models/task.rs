@@ -33,6 +33,7 @@ pub struct VideoConfig {
     pub bitrate_mode: VideoBitrateMode,
     pub crf: Option<u8>,
     pub preset: Option<String>,
+    pub preserve_dolby_vision_metadata: Option<bool>,
     pub profile: Option<String>,
     pub tune: Option<String>,
     pub resolution: Option<Resolution>,

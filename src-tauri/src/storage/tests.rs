@@ -5,8 +5,8 @@ use uuid::Uuid;
 use crate::{
     models::{
         task::{
-            AudioConfig, AudioMode, ContainerConfig, ContainerFormat, OutputConfig, TaskConfigPayload,
-            VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
+            AudioConfig, AudioMode, ContainerConfig, ContainerFormat, OutputConfig,
+            TaskConfigPayload, VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
         },
         AppSettings, TemplatePayload, Validate,
     },
@@ -14,7 +14,9 @@ use crate::{
         file_store::FileStore,
         lock_registry::LockRegistry,
         paths::StoragePaths,
-        repositories::{settings_repo::SettingsRepo, tasks_repo::TasksRepo, templates_repo::TemplatesRepo},
+        repositories::{
+            settings_repo::SettingsRepo, tasks_repo::TasksRepo, templates_repo::TemplatesRepo,
+        },
     },
 };
 
@@ -33,6 +35,7 @@ fn build_task_payload(name: &str) -> TaskConfigPayload {
             bitrate_mode: VideoBitrateMode::Crf,
             crf: Some(23),
             preset: Some("medium".to_string()),
+            preserve_dolby_vision_metadata: None,
             profile: None,
             tune: None,
             resolution: None,
@@ -91,7 +94,9 @@ fn list_init_and_crud_smoke() {
         })
         .expect("save template");
 
-    let copy_id = templates_repo.duplicate(&template_id).expect("duplicate template");
+    let copy_id = templates_repo
+        .duplicate(&template_id)
+        .expect("duplicate template");
     assert_ne!(template_id, copy_id);
 
     templates_repo
@@ -178,7 +183,9 @@ fn payload_validation_works() {
     payload.video.codec_format = VideoCodecFormat::H265;
     payload.video.encoder = VideoEncoder::HevcNvenc;
 
-    let err = payload.validate().expect_err("expected payload validation error");
+    let err = payload
+        .validate()
+        .expect_err("expected payload validation error");
     assert_eq!(err.code(), "INVALID_PAYLOAD");
 }
 
@@ -227,7 +234,9 @@ fn corrupted_json_can_restore_from_backup() {
 
     let mut settings = AppSettings::default();
     settings.concurrency_n = 4;
-    settings_repo.update(&settings).expect("initial save settings");
+    settings_repo
+        .update(&settings)
+        .expect("initial save settings");
 
     let backup = backup_path(&paths.settings);
     assert!(backup.exists());
@@ -262,7 +271,9 @@ fn schema_version_mismatch_returns_error() {
 }"#;
     fs::write(&paths.settings, content).expect("write schema mismatch file");
 
-    let err = settings_repo.get().expect_err("schema mismatch should fail");
+    let err = settings_repo
+        .get()
+        .expect_err("schema mismatch should fail");
     assert_eq!(err.code(), "SCHEMA_VERSION_UNSUPPORTED");
 
     let _ = fs::remove_dir_all(base_dir);

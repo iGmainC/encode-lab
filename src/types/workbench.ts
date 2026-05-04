@@ -30,6 +30,13 @@ export type FfmpegProbeResult = {
   ffmpegPath?: string;
   ffprobePath?: string;
   version?: string;
+  dolbyVision: {
+    supportsDoviRpu: boolean;
+    supportsDolbyVisionEncode: boolean;
+    supportsPreservePipeline: boolean;
+    supportedEncoders: string[];
+    recommendedEncoder?: string;
+  };
 };
 
 export type EncoderCapability = {
@@ -106,6 +113,7 @@ export type TaskDraftSnapshot = {
     crf?: number;
     preset?: string;
     keepOriginalResolution?: boolean;
+    preserveDolbyVisionMetadata?: boolean;
     resolution?: { width: number; height: number };
     fps?: number;
     pixelFormat?: string;
@@ -148,8 +156,12 @@ export type PreviewConfig = {
 export type PreviewFrameEvent = {
   previewSessionId: string;
   timeMs: number;
+  mediaPath?: string;
+  mediaKind: "video" | "image";
   imagePath?: string;
   base64?: string;
+  clipStartMs: number;
+  clipEndMs: number;
   width: number;
   height: number;
   seq: number;
@@ -181,6 +193,7 @@ export type ComparePreviewRuntime = {
   previewState: PreviewState;
   previewSpeed?: number;
   estimatedTranscodeSpeed?: number;
+  previewError?: string;
   degradedFromTwoPass: boolean;
   currentTimeSec: number;
   durationSec: number;

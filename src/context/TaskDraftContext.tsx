@@ -33,6 +33,8 @@ type TaskDraftContextValue = {
   setFormPreset: (value: string) => void;
   keepOriginalResolution: boolean;
   setKeepOriginalResolution: (value: boolean) => void;
+  preserveDolbyVisionMetadata: boolean;
+  setPreserveDolbyVisionMetadata: (value: boolean) => void;
   formWidth: string;
   setFormWidth: (value: string) => void;
   formHeight: string;
@@ -75,6 +77,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [formCrf, setFormCrf] = useState(23);
   const [formPreset, setFormPreset] = useState("medium");
   const [keepOriginalResolution, setKeepOriginalResolution] = useState(true);
+  const [preserveDolbyVisionMetadata, setPreserveDolbyVisionMetadata] = useState(false);
   const [formWidth, setFormWidth] = useState("1920");
   const [formHeight, setFormHeight] = useState("1080");
   const [formFps, setFormFps] = useState("30");
@@ -180,6 +183,12 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
     }
   }, [keepOriginalResolution, videoMetadata?.video?.width, videoMetadata?.video?.height]);
 
+  useEffect(() => {
+    if (videoMetadata?.video?.hdrType !== "DolbyVision") {
+      setPreserveDolbyVisionMetadata(false);
+    }
+  }, [videoMetadata?.video?.hdrType]);
+
   const pickSourceFile = useCallback(async () => {
     try {
       const selected = await open({
@@ -214,18 +223,15 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
         crf: formMode === "CRF" ? formCrf : undefined,
         preset: formPreset || undefined,
         keepOriginalResolution,
+        preserveDolbyVisionMetadata,
+        // 保持原始尺寸时不传 resolution，让后端跳过 scale 参数并保留源尺寸语义。
         resolution:
-          keepOriginalResolution && videoMetadata?.video?.width && videoMetadata?.video?.height
+          !keepOriginalResolution && formWidth && formHeight
             ? {
-                width: videoMetadata.video.width,
-                height: videoMetadata.video.height,
+                width: Number(formWidth),
+                height: Number(formHeight),
               }
-            : formWidth && formHeight
-              ? {
-                  width: Number(formWidth),
-                  height: Number(formHeight),
-                }
-              : undefined,
+            : undefined,
         fps: formFps ? Number(formFps) : undefined,
         pixelFormat: formPixelFormat || undefined,
         enableTwoPass: formTwoPass,
@@ -239,8 +245,32 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       },
       advancedArgs:
         formMode !== "CRF"
-          ? `-b:v ${formBitrateKbps}k -maxrate ${formMaxrateKbps}k -bufsize ${formBufsizeKbps}k -color_primaries ${formColorPrimaries} -color_trc ${formColorTrc} -colorspace ${formColorspace}`
-          : `-color_primaries ${formColorPrimaries} -color_trc ${formColorTrc} -colorspace ${formColorspace}`,
+          ? `-b:v ${formBitrateKbps}k -maxrate ${formMaxrateKbps}k -bufsize ${formBufsizeKbps}k -color_primaries ${
+              preserveDolbyVisionMetadata
+                ? videoMetadata?.video?.colorPrimaries ?? formColorPrimaries
+                : formColorPrimaries
+            } -color_trc ${
+              preserveDolbyVisionMetadata
+                ? videoMetadata?.video?.colorTransfer ?? formColorTrc
+                : formColorTrc
+            } -colorspace ${
+              preserveDolbyVisionMetadata
+                ? videoMetadata?.video?.colorSpace ?? formColorspace
+                : formColorspace
+            }`
+          : `-color_primaries ${
+              preserveDolbyVisionMetadata
+                ? videoMetadata?.video?.colorPrimaries ?? formColorPrimaries
+                : formColorPrimaries
+            } -color_trc ${
+              preserveDolbyVisionMetadata
+                ? videoMetadata?.video?.colorTransfer ?? formColorTrc
+                : formColorTrc
+            } -colorspace ${
+              preserveDolbyVisionMetadata
+                ? videoMetadata?.video?.colorSpace ?? formColorspace
+                : formColorspace
+            }`,
       output: {
         dir: "",
         fileNamePattern: "{inputName}_{taskName}",
@@ -254,6 +284,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formCrf,
       formPreset,
       keepOriginalResolution,
+      preserveDolbyVisionMetadata,
       formWidth,
       formHeight,
       formFps,
@@ -265,6 +296,9 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formColorPrimaries,
       formColorTrc,
       formColorspace,
+      videoMetadata?.video?.colorPrimaries,
+      videoMetadata?.video?.colorTransfer,
+      videoMetadata?.video?.colorSpace,
     ],
   );
 
@@ -286,6 +320,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setFormPreset,
       keepOriginalResolution,
       setKeepOriginalResolution,
+      preserveDolbyVisionMetadata,
+      setPreserveDolbyVisionMetadata,
       formWidth,
       setFormWidth,
       formHeight,
@@ -325,6 +361,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formCrf,
       formPreset,
       keepOriginalResolution,
+      preserveDolbyVisionMetadata,
       formWidth,
       formHeight,
       formFps,

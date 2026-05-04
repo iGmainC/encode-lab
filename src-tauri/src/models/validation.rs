@@ -125,6 +125,17 @@ impl Validate for TaskConfigPayload {
             }
         }
 
+        if self.video.preserve_dolby_vision_metadata.unwrap_or(false)
+            && !matches!(
+                (&self.video.codec_format, &self.video.encoder),
+                (VideoCodecFormat::H265, VideoEncoder::Libx265)
+            )
+        {
+            return Err(StorageError::InvalidPayload(
+                "preserveDolbyVisionMetadata currently only supports H.265 + libx265".to_string(),
+            ));
+        }
+
         // 音频模式联动校验：
         // - copy 模式不能携带 customArgs
         // - custom 模式必须提供 customArgs
@@ -209,7 +220,9 @@ fn is_preset_allowed(encoder: &VideoEncoder, preset: &str) -> bool {
         | VideoEncoder::Svtav1
         | VideoEncoder::LibvpxVp9 => software_preset_set().contains(&preset),
         VideoEncoder::HevcNvenc | VideoEncoder::Av1Nvenc => nvenc_preset_set().contains(&preset),
-        VideoEncoder::H264Videotoolbox | VideoEncoder::HevcVideotoolbox | VideoEncoder::Av1Videotoolbox => false,
+        VideoEncoder::H264Videotoolbox
+        | VideoEncoder::HevcVideotoolbox
+        | VideoEncoder::Av1Videotoolbox => false,
         VideoEncoder::Copy => false,
     }
 }
@@ -230,7 +243,9 @@ fn software_preset_set() -> &'static [&'static str] {
 }
 
 fn nvenc_preset_set() -> &'static [&'static str] {
-    &["p1", "p2", "p3", "p4", "p5", "p6", "p7", "fast", "medium", "slow", "hq"]
+    &[
+        "p1", "p2", "p3", "p4", "p5", "p6", "p7", "fast", "medium", "slow", "hq",
+    ]
 }
 
 /// 编码器与编码格式匹配关系表。

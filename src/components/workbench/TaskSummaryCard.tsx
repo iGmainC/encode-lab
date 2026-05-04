@@ -8,9 +8,17 @@ type Props = {
   encoder: string;
   mode: string;
   twoPass: boolean;
+  preserveDolbyVisionMetadata?: boolean;
 };
 
-export function TaskSummaryCard({ videoMetadata, codec, encoder, mode, twoPass }: Props) {
+export function TaskSummaryCard({
+  videoMetadata,
+  codec,
+  encoder,
+  mode,
+  twoPass,
+  preserveDolbyVisionMetadata,
+}: Props) {
   return (
     <Card>
       <CardHeader>
@@ -23,6 +31,7 @@ export function TaskSummaryCard({ videoMetadata, codec, encoder, mode, twoPass }
           <Badge variant="outline">{encoder}</Badge>
           <Badge variant="outline">{mode}</Badge>
           <Badge variant={twoPass ? "default" : "secondary"}>{twoPass ? "2-pass" : "1-pass"}</Badge>
+          {preserveDolbyVisionMetadata ? <Badge variant="secondary">DV Preserve</Badge> : null}
         </div>
 
         <div className="grid grid-cols-2 gap-3 text-sm">

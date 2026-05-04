@@ -17,6 +17,7 @@ const emptyRuntime: ComparePreviewRuntime = {
   previewState: "idle",
   previewSpeed: undefined,
   estimatedTranscodeSpeed: undefined,
+  previewError: undefined,
   degradedFromTwoPass: false,
   currentTimeSec: 0,
   durationSec: 0,

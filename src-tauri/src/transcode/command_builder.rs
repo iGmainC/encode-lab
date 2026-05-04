@@ -1,3 +1,9 @@
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash, Hasher},
+};
+
 use crate::{
     models::{
         task::{AudioMode, ContainerFormat, VideoBitrateMode, VideoCodecFormat, VideoEncoder},
@@ -11,6 +17,16 @@ pub struct CommandBuildOutput {
     pub commands: Vec<String>,
     pub warnings: Vec<String>,
     pub sanitized_advanced_args: Option<String>,
+}
+
+/// 预览短片段命令的时间窗口。
+pub struct PreviewCommandOptions {
+    /// 片段起点，单位秒。
+    pub start_sec: f64,
+    /// 片段时长，单位秒。
+    pub duration_sec: f64,
+    /// 渲染缩放比例，取值通常为 0.25-1.0。
+    pub render_scale: f64,
 }
 
 pub fn build_ffmpeg_commands(
@@ -27,15 +43,42 @@ pub fn build_ffmpeg_commands(
     guard_advanced_args(payload.advanced_args.as_deref())?;
 
     let mut warnings = codec_strategy_warnings(payload);
-    let sanitized_advanced = sanitize_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
+    let sanitized_advanced =
+        sanitize_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
 
-    let commands = if payload.video.enable_two_pass {
+    let passlog_path = if payload.video.enable_two_pass {
+        let path = build_passlog_path(input_file, output_file);
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            // 2-pass 需要先保证 passlog 父目录存在，否则 FFmpeg 会在第一阶段直接失败。
+            fs::create_dir_all(parent)
+                .map_err(|err| StorageError::InvalidPayload(err.to_string()))?;
+        }
+        Some(path)
+    } else {
+        None
+    };
+
+    let command_args = if payload.video.enable_two_pass {
+        let passlog_path = passlog_path.as_deref().ok_or_else(|| {
+            StorageError::InvalidPayload("passlog path is required for 2-pass".to_string())
+        })?;
         vec![
-            build_pass1_command(payload, input_file, sanitized_advanced.as_deref())?,
-            build_pass2_command(payload, input_file, output_file, sanitized_advanced.as_deref())?,
+            build_pass1_args(
+                payload,
+                input_file,
+                passlog_path,
+                sanitized_advanced.as_deref(),
+            )?,
+            build_pass2_args(
+                payload,
+                input_file,
+                output_file,
+                passlog_path,
+                sanitized_advanced.as_deref(),
+            )?,
         ]
     } else {
-        vec![build_single_pass_command(
+        vec![build_single_pass_args(
             payload,
             input_file,
             output_file,
@@ -44,33 +87,97 @@ pub fn build_ffmpeg_commands(
     };
 
     Ok(CommandBuildOutput {
-        commands,
+        commands: command_args
+            .iter()
+            .map(|args| format!("ffmpeg {}", shell_join(args)))
+            .collect(),
         warnings,
         sanitized_advanced_args: sanitized_advanced,
     })
 }
 
-fn build_single_pass_command(
+pub fn build_preview_command_args(
+    payload: &TaskConfigPayload,
+    input_file: &str,
+    output_file: &str,
+    options: PreviewCommandOptions,
+) -> StorageResult<Vec<String>> {
+    if input_file.trim().is_empty() || output_file.trim().is_empty() {
+        return Err(StorageError::InvalidPayload(
+            "input/output file cannot be empty".to_string(),
+        ));
+    }
+
+    guard_advanced_args(payload.advanced_args.as_deref())?;
+
+    let mut warnings = codec_strategy_warnings(payload);
+    let sanitized_advanced =
+        sanitize_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
+    let mut preview_payload = payload.clone();
+
+    // 预览固定走单 pass；正式转码仍保留原 2-pass 配置。
+    preview_payload.video.enable_two_pass = false;
+
+    // 若配置了输出分辨率，预览阶段直接生成缩放后的短片段，减少前端解码压力。
+    if let Some(resolution) = &mut preview_payload.video.resolution {
+        resolution.width = scale_even_dimension(resolution.width, options.render_scale);
+        resolution.height = scale_even_dimension(resolution.height, options.render_scale);
+    }
+
+    let mut args = vec![
+        "-y".to_string(),
+        "-ss".to_string(),
+        format!("{:.3}", options.start_sec.max(0.0)),
+        "-t".to_string(),
+        format!("{:.3}", options.duration_sec.max(0.1)),
+        "-i".to_string(),
+        input_file.to_string(),
+    ];
+
+    append_video_args(&preview_payload, &mut args)?;
+
+    if preview_payload.video.resolution.is_none()
+        && (options.render_scale - 1.0).abs() > f64::EPSILON
+    {
+        // 未指定目标分辨率时，使用输入尺寸按比例缩放到偶数，避免 H.264 等编码器拒绝奇数尺寸。
+        args.push("-vf".to_string());
+        args.push(format!(
+            "scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2",
+            scale = options.render_scale
+        ));
+    }
+
+    append_advanced_args(sanitized_advanced.as_deref(), &mut args);
+    args.push("-an".to_string());
+    args.push("-movflags".to_string());
+    args.push("+faststart".to_string());
+    args.push(output_file.to_string());
+
+    Ok(args)
+}
+
+fn build_single_pass_args(
     payload: &TaskConfigPayload,
     input_file: &str,
     output_file: &str,
     sanitized_advanced: Option<&str>,
-) -> StorageResult<String> {
+) -> StorageResult<Vec<String>> {
     let mut args = base_input_args(input_file);
     append_video_args(payload, &mut args)?;
     append_audio_args(payload, &mut args)?;
     append_container_args(payload, &mut args);
     append_advanced_args(sanitized_advanced, &mut args);
-    args.push(shell_quote(output_file));
+    args.push(output_file.to_string());
 
-    Ok(format!("ffmpeg {}", args.join(" ")))
+    Ok(args)
 }
 
-fn build_pass1_command(
+fn build_pass1_args(
     payload: &TaskConfigPayload,
     input_file: &str,
+    passlog_path: &str,
     sanitized_advanced: Option<&str>,
-) -> StorageResult<String> {
+) -> StorageResult<Vec<String>> {
     let mut args = vec!["-y".to_string()];
     args.extend(base_input_args(input_file));
 
@@ -79,39 +186,40 @@ fn build_pass1_command(
     args.push("-pass".to_string());
     args.push("1".to_string());
     args.push("-passlogfile".to_string());
-    args.push(shell_quote("/tmp/encode-lab/passlog"));
+    args.push(passlog_path.to_string());
     args.push("-an".to_string());
     args.push("-f".to_string());
     args.push(container_name(&payload.container.format).to_string());
-    args.push(shell_quote("/dev/null"));
+    args.push("/dev/null".to_string());
 
-    Ok(format!("ffmpeg {}", args.join(" ")))
+    Ok(args)
 }
 
-fn build_pass2_command(
+fn build_pass2_args(
     payload: &TaskConfigPayload,
     input_file: &str,
     output_file: &str,
+    passlog_path: &str,
     sanitized_advanced: Option<&str>,
-) -> StorageResult<String> {
+) -> StorageResult<Vec<String>> {
     let mut args = base_input_args(input_file);
 
     append_video_args(payload, &mut args)?;
     args.push("-pass".to_string());
     args.push("2".to_string());
     args.push("-passlogfile".to_string());
-    args.push(shell_quote("/tmp/encode-lab/passlog"));
+    args.push(passlog_path.to_string());
 
     append_audio_args(payload, &mut args)?;
     append_container_args(payload, &mut args);
     append_advanced_args(sanitized_advanced, &mut args);
-    args.push(shell_quote(output_file));
+    args.push(output_file.to_string());
 
-    Ok(format!("ffmpeg {}", args.join(" ")))
+    Ok(args)
 }
 
 fn base_input_args(input_file: &str) -> Vec<String> {
-    vec!["-i".to_string(), shell_quote(input_file)]
+    vec!["-i".to_string(), input_file.to_string()]
 }
 
 fn append_video_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> StorageResult<()> {
@@ -134,25 +242,22 @@ fn append_video_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> Sto
 
     if let Some(preset) = &payload.video.preset {
         args.push("-preset".to_string());
-        args.push(shell_quote(preset));
+        args.push(preset.to_string());
     }
 
     if let Some(profile) = &payload.video.profile {
         args.push("-profile:v".to_string());
-        args.push(shell_quote(profile));
+        args.push(profile.to_string());
     }
 
     if let Some(tune) = &payload.video.tune {
         args.push("-tune".to_string());
-        args.push(shell_quote(tune));
+        args.push(tune.to_string());
     }
 
     if let Some(resolution) = &payload.video.resolution {
         args.push("-vf".to_string());
-        args.push(shell_quote(&format!(
-            "scale={}:{}",
-            resolution.width, resolution.height
-        )));
+        args.push(format!("scale={}:{}", resolution.width, resolution.height));
     }
 
     if let Some(fps) = payload.video.fps {
@@ -162,7 +267,17 @@ fn append_video_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> Sto
 
     if let Some(pixel_format) = &payload.video.pixel_format {
         args.push("-pix_fmt".to_string());
-        args.push(shell_quote(pixel_format));
+        args.push(pixel_format.to_string());
+    }
+
+    if payload
+        .video
+        .preserve_dolby_vision_metadata
+        .unwrap_or(false)
+    {
+        // V1 仅在 libx265 路径上显式表达 Dolby Vision 保留意图。
+        args.push("-dolbyvision".to_string());
+        args.push("1".to_string());
     }
 
     if let Some(gop) = payload.video.gop {
@@ -217,7 +332,34 @@ fn guard_advanced_args(value: Option<&str>) -> StorageResult<()> {
         ));
     }
 
+    if contains_positional_output_token(&tokens) {
+        return Err(StorageError::InvalidPayload(
+            "advancedArgs cannot contain positional output paths".to_string(),
+        ));
+    }
+
     Ok(())
+}
+
+fn contains_positional_output_token(tokens: &[String]) -> bool {
+    let mut expects_value = false;
+
+    for token in tokens {
+        if token.starts_with('-') {
+            expects_value = !is_flag_without_value(token);
+            continue;
+        }
+
+        if expects_value {
+            expects_value = false;
+            continue;
+        }
+
+        // 不跟随参数名的裸 token 会被 FFmpeg 解释为输出路径，必须拒绝。
+        return true;
+    }
+
+    false
 }
 
 fn sanitize_advanced_args(raw: Option<&str>, warnings: &mut Vec<String>) -> Option<String> {
@@ -264,7 +406,8 @@ fn codec_strategy_warnings(payload: &TaskConfigPayload) -> Vec<String> {
 
     if is_hardware_encoder(&payload.video.encoder) {
         warnings.push(
-            "当前使用硬件编码器：速度优先，部分质量参数（如 2-pass/CRF）受编码器能力限制".to_string(),
+            "当前使用硬件编码器：速度优先，部分质量参数（如 2-pass/CRF）受编码器能力限制"
+                .to_string(),
         );
     }
 
@@ -279,12 +422,15 @@ fn codec_strategy_warnings(payload: &TaskConfigPayload) -> Vec<String> {
         warnings.push("当前为 CBR/ABR：视频码率参数来自 advancedArgs（例如 -b:v）".to_string());
     }
 
-    if matches!(payload.video.codec_format, VideoCodecFormat::Av1 | VideoCodecFormat::Vp9)
-        && matches!(payload.video.bitrate_mode, VideoBitrateMode::Cbr | VideoBitrateMode::Abr)
-    {
+    if matches!(
+        payload.video.codec_format,
+        VideoCodecFormat::Av1 | VideoCodecFormat::Vp9
+    ) && matches!(
+        payload.video.bitrate_mode,
+        VideoBitrateMode::Cbr | VideoBitrateMode::Abr
+    ) {
         warnings.push(
-            "AV1/VP9 当前优先推荐 CRF 路径；CBR/ABR 需通过 advancedArgs 提供完整参数"
-                .to_string(),
+            "AV1/VP9 当前优先推荐 CRF 路径；CBR/ABR 需通过 advancedArgs 提供完整参数".to_string(),
         );
     }
 
@@ -325,6 +471,35 @@ fn split_args(raw: &str) -> Vec<String> {
     raw.split_whitespace().map(ToString::to_string).collect()
 }
 
+fn is_flag_without_value(flag: &str) -> bool {
+    matches!(flag, "-y" | "-n" | "-an" | "-vn" | "-sn" | "-dn")
+}
+
+fn build_passlog_path(input_file: &str, output_file: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    input_file.hash(&mut hasher);
+    output_file.hash(&mut hasher);
+
+    // passlog 文件名按输入/输出稳定派生，避免并发 2-pass 任务互相覆盖。
+    std::env::temp_dir()
+        .join("encode-lab")
+        .join("passlog")
+        .join(format!("passlog-{:016x}", hasher.finish()))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn scale_even_dimension(value: u32, scale: f64) -> u32 {
+    let scaled = ((value as f64) * scale).round().max(2.0) as u32;
+
+    // 主流视频编码器通常要求偶数尺寸，奇数时向下收敛到最近偶数。
+    if scaled % 2 == 0 {
+        scaled
+    } else {
+        scaled.saturating_sub(1).max(2)
+    }
+}
+
 fn encoder_name(encoder: &VideoEncoder) -> &'static str {
     match encoder {
         VideoEncoder::Libx264 => "libx264",
@@ -349,9 +524,23 @@ fn container_name(format: &ContainerFormat) -> &'static str {
     }
 }
 
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|item| shell_quote(item))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
+    }
+
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "-_./:=+".contains(ch))
+    {
+        return value.to_string();
     }
 
     let escaped = value.replace('"', "\\\"");
@@ -365,7 +554,7 @@ mod tests {
         VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
     };
 
-    use super::build_ffmpeg_commands;
+    use super::{build_ffmpeg_commands, build_preview_command_args, PreviewCommandOptions};
 
     fn payload() -> TaskConfigPayload {
         TaskConfigPayload {
@@ -376,6 +565,7 @@ mod tests {
                 bitrate_mode: VideoBitrateMode::Crf,
                 crf: Some(23),
                 preset: Some("medium".to_string()),
+                preserve_dolby_vision_metadata: None,
                 profile: None,
                 tune: None,
                 resolution: None,
@@ -420,6 +610,8 @@ mod tests {
         assert_eq!(result.commands.len(), 2);
         assert!(result.commands[0].contains("-pass 1"));
         assert!(result.commands[1].contains("-pass 2"));
+        assert!(result.commands[0].contains("passlog-"));
+        assert!(result.commands[1].contains("passlog-"));
         assert!(result.commands[0].contains("/dev/null"));
     }
 
@@ -428,8 +620,18 @@ mod tests {
         let mut value = payload();
         value.advanced_args = Some("-i hacked.mp4".to_string());
 
-        let err = build_ffmpeg_commands(&value, "input.mp4", "output.mp4")
-            .expect_err("should reject");
+        let err =
+            build_ffmpeg_commands(&value, "input.mp4", "output.mp4").expect_err("should reject");
+        assert_eq!(err.code(), "INVALID_PAYLOAD");
+    }
+
+    #[test]
+    fn advanced_args_rejects_positional_output_path() {
+        let mut value = payload();
+        value.advanced_args = Some("-map 0:v:0 extra.mp4".to_string());
+
+        let err =
+            build_ffmpeg_commands(&value, "input.mp4", "output.mp4").expect_err("should reject");
         assert_eq!(err.code(), "INVALID_PAYLOAD");
     }
 
@@ -480,7 +682,42 @@ mod tests {
         value.video.crf = None;
 
         let result = build_ffmpeg_commands(&value, "input.mp4", "output.mp4").expect("build");
-        assert!(result.warnings.iter().any(|item| item.contains("硬件编码器")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|item| item.contains("硬件编码器")));
         assert!(result.warnings.iter().any(|item| item.contains("CBR/ABR")));
+    }
+
+    #[test]
+    fn build_preview_command_should_use_video_parameters() {
+        let mut value = payload();
+        value.video.resolution = Some(crate::models::task::Resolution {
+            width: 1920,
+            height: 1080,
+        });
+
+        let args = build_preview_command_args(
+            &value,
+            "input.mp4",
+            "preview.mp4",
+            PreviewCommandOptions {
+                start_sec: 1.0,
+                duration_sec: 6.0,
+                render_scale: 0.5,
+            },
+        )
+        .expect("preview args");
+
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-c:v" && item[1] == "libx264"));
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-crf" && item[1] == "23"));
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-vf" && item[1] == "scale=960:540"));
+        assert!(args.iter().any(|item| item == "-an"));
     }
 }

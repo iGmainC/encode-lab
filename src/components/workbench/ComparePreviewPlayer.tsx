@@ -38,16 +38,23 @@ export function ComparePreviewPlayer({
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const hideTimerRef = useRef<number | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const previewClipRangeRef = useRef<{ startMs: number; endMs: number } | null>(null);
+  const isScrubbingRef = useRef(false);
+  const pendingScrubTimeMsRef = useRef<number | null>(null);
   const lastUpdateAtRef = useRef(0);
   const lastFrameSeqRef = useRef(0);
   const taskConfigRef = useRef(taskDraftSnapshot);
 
-  const [previewFrameSrc, setPreviewFrameSrc] = useState<string | null>(null);
+  const [previewMediaSrc, setPreviewMediaSrc] = useState<string | null>(null);
+  const [previewMediaKind, setPreviewMediaKind] = useState<"video" | "image">("video");
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [previewState, setPreviewState] = useState<PreviewState>("idle");
   const [previewSpeed, setPreviewSpeed] = useState<number | undefined>(undefined);
   const [estimatedTranscodeSpeed, setEstimatedTranscodeSpeed] = useState<number | undefined>(undefined);
+  const [previewError, setPreviewError] = useState<string | undefined>(undefined);
   const [degradedFromTwoPass, setDegradedFromTwoPass] = useState(false);
   const [durationSec, setDurationSec] = useState(0);
   const [currentTimeSec, setCurrentTimeSec] = useState(0);
@@ -55,6 +62,7 @@ export function ComparePreviewPlayer({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isOverlayVisible, setIsOverlayVisible] = useState(true);
   const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
+  const [isScrubbingTimeline, setIsScrubbingTimeline] = useState(false);
 
   taskConfigRef.current = taskDraftSnapshot;
 
@@ -68,11 +76,44 @@ export function ComparePreviewPlayer({
       ? `inset(0 0 0 ${Math.round(splitterPosition * 100)}%)`
       : `inset(${Math.round(splitterPosition * 100)}% 0 0 0)`;
 
+  /**
+   * 将主视频时间同步到预览短片段内部时间。
+   * @param sourceTimeSec 主视频当前时间，单位秒
+   */
+  const syncPreviewVideoTime = (sourceTimeSec: number) => {
+    const previewVideo = previewVideoRef.current;
+    const clipRange = previewClipRangeRef.current;
+    if (!previewVideo || !clipRange) {
+      return;
+    }
+
+    const nextTime = Math.max(0, sourceTimeSec - clipRange.startMs / 1000);
+    if (Number.isFinite(nextTime) && Math.abs(previewVideo.currentTime - nextTime) > 0.2) {
+      previewVideo.currentTime = nextTime;
+    }
+  };
+
+  /**
+   * 判断当前时间是否仍在已生成的预览片段内。
+   * @param timeMs 主视频当前时间，单位毫秒
+   * @returns true 表示可复用当前预览片段
+   */
+  const isTimeInsidePreviewClip = (timeMs: number) => {
+    const clipRange = previewClipRangeRef.current;
+    if (!clipRange) {
+      return false;
+    }
+
+    // 接近片段末尾时提前刷新，避免右侧覆盖视频播完后停住。
+    return timeMs >= clipRange.startMs && timeMs <= clipRange.endMs - 800;
+  };
+
   useEffect(() => {
     onRuntimeChange({
       previewState,
       previewSpeed,
       estimatedTranscodeSpeed,
+      previewError,
       degradedFromTwoPass,
       currentTimeSec,
       durationSec,
@@ -82,6 +123,7 @@ export function ComparePreviewPlayer({
     previewState,
     previewSpeed,
     estimatedTranscodeSpeed,
+    previewError,
     degradedFromTwoPass,
     currentTimeSec,
     durationSec,
@@ -152,17 +194,24 @@ export function ComparePreviewPlayer({
         if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
           return;
         }
-        if (payload.seq <= lastFrameSeqRef.current || !payload.imagePath) {
-          if (!payload.base64) {
-            return;
-          }
+        if (payload.seq <= lastFrameSeqRef.current) {
+          return;
         }
+
+        const assetPath = payload.mediaPath ?? payload.imagePath;
+        const nextMediaSrc = payload.base64 ?? (assetPath ? convertFileSrc(assetPath) : null);
+        if (!nextMediaSrc) {
+          return;
+        }
+
         lastFrameSeqRef.current = payload.seq;
-        if (payload.base64) {
-          setPreviewFrameSrc(payload.base64);
-        } else if (payload.imagePath) {
-          setPreviewFrameSrc(convertFileSrc(payload.imagePath));
-        }
+        previewClipRangeRef.current = {
+          startMs: payload.clipStartMs,
+          endMs: payload.clipEndMs,
+        };
+        setPreviewMediaKind(payload.mediaKind);
+        setPreviewMediaSrc(nextMediaSrc);
+        setPreviewError(undefined);
       });
 
       unlistenState = await listen<PreviewStateEvent>("preview:state", (event) => {
@@ -174,6 +223,7 @@ export function ComparePreviewPlayer({
         setPreviewSpeed(payload.previewSpeed);
         setEstimatedTranscodeSpeed(payload.estimatedTranscodeSpeed);
         setDegradedFromTwoPass(Boolean(payload.degradedFromTwoPass));
+        setPreviewError(payload.error ? `${payload.error.code}: ${payload.error.message}` : undefined);
       });
     };
 
@@ -195,12 +245,16 @@ export function ComparePreviewPlayer({
     const startSession = async () => {
       if (!sourceFile) {
         setPreviewState("idle");
+        setPreviewMediaSrc(null);
+        setPreviewError(undefined);
+        setSessionId(null);
         return;
       }
 
       if (sessionIdRef.current) {
         await invoke("stop_preview", { previewSessionId: sessionIdRef.current }).catch(() => {});
         sessionIdRef.current = null;
+        setSessionId(null);
       }
 
       const payload: PreviewConfig = {
@@ -219,10 +273,13 @@ export function ComparePreviewPlayer({
           return;
         }
         sessionIdRef.current = result.previewSessionId;
+        setSessionId(result.previewSessionId);
+        setPreviewError(undefined);
         setDegradedFromTwoPass(Boolean(result.degradedFromTwoPass));
         lastFrameSeqRef.current = 0;
-      } catch {
+      } catch (err) {
         setPreviewState("error");
+        setPreviewError(err instanceof Error ? err.message : String(err));
       }
     };
 
@@ -233,33 +290,44 @@ export function ComparePreviewPlayer({
       if (sessionIdRef.current) {
         void invoke("stop_preview", { previewSessionId: sessionIdRef.current }).catch(() => {});
         sessionIdRef.current = null;
+        setSessionId(null);
       }
     };
   }, [sourceFile]);
 
   useEffect(() => {
-    if (!sessionIdRef.current) {
+    if (!sessionId) {
       return;
     }
 
     const timer = window.setTimeout(() => {
       void invoke<UpdatePreviewResponse>("update_preview", {
-        previewSessionId: sessionIdRef.current,
+        previewSessionId: sessionId,
         patch: {
           compareOrientation: splitMode,
           splitterPosition,
           taskConfigSnapshot: taskDraftSnapshot,
         },
-      }).catch(() => {
+      }).catch((err) => {
         setPreviewState("error");
+        setPreviewError(err instanceof Error ? err.message : String(err));
       });
     }, UPDATE_INTERVAL_MS);
 
     return () => window.clearTimeout(timer);
-  }, [splitMode, splitterPosition, taskDraftSnapshot]);
+  }, [sessionId, splitMode, splitterPosition, taskDraftSnapshot]);
 
   const dispatchTimeUpdate = (timeMs: number, immediate = false) => {
+    syncPreviewVideoTime(timeMs / 1000);
+
+    if (isScrubbingRef.current && !immediate) {
+      pendingScrubTimeMsRef.current = timeMs;
+      return;
+    }
     if (!sessionIdRef.current) {
+      return;
+    }
+    if (!immediate && isTimeInsidePreviewClip(timeMs)) {
       return;
     }
     const now = Date.now();
@@ -272,9 +340,34 @@ export function ComparePreviewPlayer({
       patch: {
         timeMs,
       },
-    }).catch(() => {
+    }).catch((err) => {
       setPreviewState("error");
+      setPreviewError(err instanceof Error ? err.message : String(err));
     });
+  };
+
+  /**
+   * 开始拖动时间轴时暂停预览转码请求，避免每个滑块位置都启动 ffmpeg。
+   */
+  const beginTimelineScrub = () => {
+    isScrubbingRef.current = true;
+    setIsScrubbingTimeline(true);
+  };
+
+  /**
+   * 结束时间轴拖动后只提交最后一个时间点。
+   */
+  const commitTimelineScrub = () => {
+    if (!isScrubbingRef.current && pendingScrubTimeMsRef.current === null) {
+      return;
+    }
+
+    isScrubbingRef.current = false;
+    setIsScrubbingTimeline(false);
+
+    const timeMs = pendingScrubTimeMsRef.current ?? Math.round(currentTimeSec * 1000);
+    pendingScrubTimeMsRef.current = null;
+    dispatchTimeUpdate(timeMs, true);
   };
 
   const togglePlay = async () => {
@@ -284,9 +377,11 @@ export function ComparePreviewPlayer({
     }
     if (video.paused) {
       await video.play().catch(() => {});
+      await previewVideoRef.current?.play().catch(() => {});
       setIsPlaying(true);
     } else {
       video.pause();
+      previewVideoRef.current?.pause();
       setIsPlaying(false);
     }
   };
@@ -337,6 +432,17 @@ export function ComparePreviewPlayer({
     };
   }, [isDraggingSplitter, splitMode]);
 
+  useEffect(() => {
+    if (previewMediaKind !== "video" || !previewMediaSrc) {
+      return;
+    }
+
+    syncPreviewVideoTime(currentTimeSec);
+    if (isPlaying) {
+      void previewVideoRef.current?.play().catch(() => {});
+    }
+  }, [previewMediaKind, previewMediaSrc, currentTimeSec, isPlaying]);
+
   return (
     <div className="space-y-4">
       <div
@@ -352,8 +458,17 @@ export function ComparePreviewPlayer({
             onLoadedMetadata={(event) => {
               setDurationSec(event.currentTarget.duration || 0);
             }}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
+            onError={() => {
+              setPreviewError("源视频无法加载，请检查 asset 权限或文件编码格式");
+            }}
+            onPlay={() => {
+              setIsPlaying(true);
+              void previewVideoRef.current?.play().catch(() => {});
+            }}
+            onPause={() => {
+              previewVideoRef.current?.pause();
+              setIsPlaying(false);
+            }}
             onTimeUpdate={(event) => {
               const nextTime = event.currentTarget.currentTime;
               setCurrentTimeSec(nextTime);
@@ -362,7 +477,8 @@ export function ComparePreviewPlayer({
             onSeeking={(event) => {
               const nextTime = event.currentTarget.currentTime;
               setCurrentTimeSec(nextTime);
-              dispatchTimeUpdate(Math.round(nextTime * 1000), true);
+              syncPreviewVideoTime(nextTime);
+              dispatchTimeUpdate(Math.round(nextTime * 1000), !isScrubbingRef.current);
             }}
           />
         ) : (
@@ -371,9 +487,26 @@ export function ComparePreviewPlayer({
           </div>
         )}
 
-        {previewFrameSrc ? (
+        {previewMediaSrc && previewMediaKind === "video" ? (
+          <video
+            ref={previewVideoRef}
+            src={previewMediaSrc}
+            muted
+            playsInline
+            className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+            style={{ clipPath }}
+            onLoadedMetadata={() => {
+              syncPreviewVideoTime(currentTimeSec);
+            }}
+            onError={() => {
+              setPreviewError("预览片段生成成功，但当前 WebView 无法解码该编码格式");
+            }}
+          />
+        ) : null}
+
+        {previewMediaSrc && previewMediaKind === "image" ? (
           <img
-            src={previewFrameSrc}
+            src={previewMediaSrc}
             alt="preview frame"
             className="pointer-events-none absolute inset-0 h-full w-full object-contain"
             style={{ clipPath }}
@@ -428,11 +561,20 @@ export function ComparePreviewPlayer({
               max={durationSec || 0}
               step={0.01}
               value={currentTimeSec}
+              onPointerDown={beginTimelineScrub}
+              onPointerUp={commitTimelineScrub}
+              onTouchStart={beginTimelineScrub}
+              onTouchEnd={commitTimelineScrub}
+              onKeyDown={beginTimelineScrub}
+              onKeyUp={commitTimelineScrub}
               onChange={(event) => {
                 const next = Number(event.target.value);
+                const nextMs = Math.round(next * 1000);
+                pendingScrubTimeMsRef.current = nextMs;
                 if (videoRef.current) {
                   videoRef.current.currentTime = next;
                 }
+                syncPreviewVideoTime(next);
                 setCurrentTimeSec(next);
               }}
             />
@@ -459,6 +601,8 @@ export function ComparePreviewPlayer({
             <span>
               estimatedTranscodeSpeed: {estimatedTranscodeSpeed ? `${estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
             </span>
+            {isScrubbingTimeline ? <span>拖动中，松手后刷新预览</span> : null}
+            {previewError ? <span className="text-red-200">error: {previewError}</span> : null}
           </div>
         </div>
       </div>

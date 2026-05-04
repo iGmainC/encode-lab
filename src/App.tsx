@@ -203,6 +203,7 @@ function AppRoutes({
               <TaskConfigPage
                 filteredEncoders={filteredEncoders}
                 selectedEncoderCapability={selectedEncoderCapability}
+                ffmpegProbe={ffmpegProbe}
                 onGoPreview={() => navigate("/preview")}
               />
             }
