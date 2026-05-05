@@ -18,7 +18,7 @@ export function PreviewInspector({ splitMode, videoMetadata, codec, encoder, two
       <Card>
         <CardHeader>
           <CardTitle>预览状态</CardTitle>
-          <CardDescription>预览会优先贴近真实转码能力，但仍然是近实时近似。</CardDescription>
+          <CardDescription>预览以当前时间点的源帧和参数帧进行近似对比。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <div className="flex flex-wrap gap-2">
@@ -30,8 +30,8 @@ export function PreviewInspector({ splitMode, videoMetadata, codec, encoder, two
             <AlertTitle>2-pass 预览规则</AlertTitle>
             <AlertDescription>
               {runtime.degradedFromTwoPass || twoPass
-                ? "当前任务启用了 2-pass，预览阶段已降级为 1-pass 近似结果。"
-                : "当前任务以单 pass 预览，和正式命令更接近。"}
+                ? "当前任务启用了 2-pass，预览阶段已降级为单帧参数预览。"
+                : "当前任务以单帧参数预览，适合快速检查画面变化。"}
             </AlertDescription>
           </Alert>
           <div className="grid gap-3 md:grid-cols-2">

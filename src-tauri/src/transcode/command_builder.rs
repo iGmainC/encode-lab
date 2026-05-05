@@ -19,12 +19,13 @@ pub struct CommandBuildOutput {
     pub sanitized_advanced_args: Option<String>,
 }
 
-/// 预览短片段命令的时间窗口。
+/// 编码预览使用的小片段帧数，避免部分编码器单帧输出灰帧或延迟帧。
+const PREVIEW_ENCODE_FRAME_COUNT: u8 = 8;
+
+/// 预览单帧命令的时间点。
 pub struct PreviewCommandOptions {
-    /// 片段起点，单位秒。
-    pub start_sec: f64,
-    /// 片段时长，单位秒。
-    pub duration_sec: f64,
+    /// 抽帧时间点，单位秒。
+    pub time_sec: f64,
     /// 渲染缩放比例，取值通常为 0.25-1.0。
     pub render_scale: f64,
 }
@@ -96,7 +97,7 @@ pub fn build_ffmpeg_commands(
     })
 }
 
-pub fn build_preview_command_args(
+pub fn build_preview_encoded_frame_command_args(
     payload: &TaskConfigPayload,
     input_file: &str,
     output_file: &str,
@@ -110,15 +111,14 @@ pub fn build_preview_command_args(
 
     guard_advanced_args(payload.advanced_args.as_deref())?;
 
-    let mut warnings = codec_strategy_warnings(payload);
+    let mut warnings = Vec::new();
     let sanitized_advanced =
         sanitize_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
     let mut preview_payload = payload.clone();
 
-    // 预览固定走单 pass；正式转码仍保留原 2-pass 配置。
+    // 单帧编码预览不执行 2-pass，但保留 codec/crf/preset/advancedArgs 等质量参数。
     preview_payload.video.enable_two_pass = false;
 
-    // 若配置了输出分辨率，预览阶段直接生成缩放后的短片段，减少前端解码压力。
     if let Some(resolution) = &mut preview_payload.video.resolution {
         resolution.width = scale_even_dimension(resolution.width, options.render_scale);
         resolution.height = scale_even_dimension(resolution.height, options.render_scale);
@@ -127,19 +127,64 @@ pub fn build_preview_command_args(
     let mut args = vec![
         "-y".to_string(),
         "-ss".to_string(),
-        format!("{:.3}", options.start_sec.max(0.0)),
-        "-t".to_string(),
-        format!("{:.3}", options.duration_sec.max(0.1)),
+        format!("{:.3}", options.time_sec.max(0.0)),
         "-i".to_string(),
         input_file.to_string(),
     ];
 
     append_video_args(&preview_payload, &mut args)?;
+    append_advanced_args(sanitized_advanced.as_deref(), &mut args);
+    args.push("-frames:v".to_string());
+    args.push(PREVIEW_ENCODE_FRAME_COUNT.to_string());
+    args.push("-an".to_string());
+    args.push("-f".to_string());
+    args.push("matroska".to_string());
+    args.push(output_file.to_string());
 
-    if preview_payload.video.resolution.is_none()
-        && (options.render_scale - 1.0).abs() > f64::EPSILON
-    {
-        // 未指定目标分辨率时，使用输入尺寸按比例缩放到偶数，避免 H.264 等编码器拒绝奇数尺寸。
+    Ok(args)
+}
+
+pub fn build_preview_decode_frame_command_args(
+    input_file: &str,
+    output_file: &str,
+) -> StorageResult<Vec<String>> {
+    if input_file.trim().is_empty() || output_file.trim().is_empty() {
+        return Err(StorageError::InvalidPayload(
+            "input/output file cannot be empty".to_string(),
+        ));
+    }
+
+    Ok(vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        input_file.to_string(),
+        "-frames:v".to_string(),
+        "1".to_string(),
+        output_file.to_string(),
+    ])
+}
+
+pub fn build_source_frame_command_args(
+    input_file: &str,
+    output_file: &str,
+    options: PreviewCommandOptions,
+) -> StorageResult<Vec<String>> {
+    if input_file.trim().is_empty() || output_file.trim().is_empty() {
+        return Err(StorageError::InvalidPayload(
+            "input/output file cannot be empty".to_string(),
+        ));
+    }
+
+    let mut args = vec![
+        "-y".to_string(),
+        "-ss".to_string(),
+        format!("{:.3}", options.time_sec.max(0.0)),
+        "-i".to_string(),
+        input_file.to_string(),
+    ];
+
+    if (options.render_scale - 1.0).abs() > f64::EPSILON {
+        // 源片 proxy 只做展示缩放，不应用目标转码参数。
         args.push("-vf".to_string());
         args.push(format!(
             "scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2",
@@ -147,13 +192,15 @@ pub fn build_preview_command_args(
         ));
     }
 
-    append_advanced_args(sanitized_advanced.as_deref(), &mut args);
-    args.push("-an".to_string());
-    args.push("-movflags".to_string());
-    args.push("+faststart".to_string());
+    append_frame_output_args(&mut args);
     args.push(output_file.to_string());
 
     Ok(args)
+}
+
+fn append_frame_output_args(args: &mut Vec<String>) {
+    args.push("-frames:v".to_string());
+    args.push("1".to_string());
 }
 
 fn build_single_pass_args(
@@ -554,7 +601,10 @@ mod tests {
         VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
     };
 
-    use super::{build_ffmpeg_commands, build_preview_command_args, PreviewCommandOptions};
+    use super::{
+        build_ffmpeg_commands, build_preview_encoded_frame_command_args,
+        build_source_frame_command_args, PreviewCommandOptions,
+    };
 
     fn payload() -> TaskConfigPayload {
         TaskConfigPayload {
@@ -690,34 +740,68 @@ mod tests {
     }
 
     #[test]
-    fn build_preview_command_should_use_video_parameters() {
+    fn build_preview_encoded_frame_command_should_apply_target_encoder_parameters() {
         let mut value = payload();
+        value.video.codec_format = VideoCodecFormat::Av1;
+        value.video.encoder = VideoEncoder::LibaomAv1;
+        value.video.crf = Some(45);
+        value.video.preset = Some("slow".to_string());
         value.video.resolution = Some(crate::models::task::Resolution {
             width: 1920,
             height: 1080,
         });
+        value.advanced_args = Some("-cpu-used 6 -row-mt 1".to_string());
 
-        let args = build_preview_command_args(
+        let args = build_preview_encoded_frame_command_args(
             &value,
-            "input.mp4",
-            "preview.mp4",
+            "input.mkv",
+            "preview.mkv",
             PreviewCommandOptions {
-                start_sec: 1.0,
-                duration_sec: 6.0,
+                time_sec: 1.0,
                 render_scale: 0.5,
             },
         )
         .expect("preview args");
 
+        assert!(args.iter().any(|item| item == "libaom-av1"));
         assert!(args
             .windows(2)
-            .any(|item| item[0] == "-c:v" && item[1] == "libx264"));
+            .any(|item| item[0] == "-crf" && item[1] == "45"));
         assert!(args
             .windows(2)
-            .any(|item| item[0] == "-crf" && item[1] == "23"));
+            .any(|item| item[0] == "-preset" && item[1] == "slow"));
         assert!(args
             .windows(2)
             .any(|item| item[0] == "-vf" && item[1] == "scale=960:540"));
-        assert!(args.iter().any(|item| item == "-an"));
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-cpu-used" && item[1] == "6"));
+        assert!(!args.iter().any(|item| item == "-pass"));
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-frames:v" && item[1] == "8"));
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-f" && item[1] == "matroska"));
+        assert_eq!(args.last().map(String::as_str), Some("preview.mkv"));
+    }
+
+    #[test]
+    fn build_source_frame_command_should_output_single_png_frame() {
+        let args = build_source_frame_command_args(
+            "input.mov",
+            "source.png",
+            PreviewCommandOptions {
+                time_sec: 0.0,
+                render_scale: 0.5,
+            },
+        )
+        .expect("source frame args");
+
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-frames:v" && item[1] == "1"));
+        assert!(!args.iter().any(|item| item == "-c:v"));
+        assert_eq!(args.last().map(String::as_str), Some("source.png"));
     }
 }

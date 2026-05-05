@@ -2,10 +2,7 @@ use std::path::PathBuf;
 
 use crate::{
     models::AppSettings,
-    storage::{
-        errors::StorageResult,
-        file_store::FileStore,
-    },
+    storage::{errors::StorageResult, file_store::FileStore},
 };
 
 #[derive(Clone)]

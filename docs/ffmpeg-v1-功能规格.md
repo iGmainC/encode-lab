@@ -99,8 +99,8 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 
 ### 4.2.2 视频参数（结构化）字段
 
-1. `videoCodecFormat`：`h264` / `h265` / `copy`。
-2. `videoEncoder`：根据 `videoCodecFormat` 动态可选（如 `libx264`、`h264_videotoolbox`、`libx265`、`hevc_videotoolbox`、`hevc_nvenc`）。
+1. `videoCodecFormat`：`h264` / `h265` / `av1` / `vp9` / `copy`。
+2. `videoEncoder`：根据 `videoCodecFormat` 动态可选（如 `libx264`、`h264_videotoolbox`、`libx265`、`hevc_videotoolbox`、`hevc_nvenc`、`libaom-av1`、`svtav1`、`av1_nvenc`、`av1_videotoolbox`、`libvpx-vp9`）。
 3. `bitrateMode`：`CRF` / `CBR` / `ABR`。
 4. `crf`：整数，默认 `23`，范围 `0-51`（软件编码器场景）。
 5. `preset`：`ultrafast ... placebo`（软件编码器）或硬件编码器支持的 preset 集合。
@@ -111,6 +111,12 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 10. `pixelFormat`：如 `yuv420p`。
 11. `gop`：关键帧间隔（可选）。
 12. `enableTwoPass`：布尔，V1 必须支持（仅在编码器能力支持时可开启）。
+
+### 4.2.2.1 AV1 高级参数（结构化入口，写入 advancedArgs）
+
+1. `libaom-av1`：支持 `cpu-used`、`row-mt`、`tiles` 表单项，并生成 `-cpu-used`、`-row-mt`、`-tiles` 参数。
+2. `svtav1`：支持 `tune`、`film-grain` 表单项，并生成 `-svtav1-params` 参数。
+3. `av1_nvenc` / `av1_videotoolbox`：V1 暂不暴露软件编码高级项，仅复用通用码率、分辨率、FPS、像素格式等参数。
 
 ### 4.2.3 音频参数字段
 
@@ -148,24 +154,27 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 
 ### 4.3.1 核心交互
 
-1. 仅一个播放器时间轴与播放控制。
-2. 画面中间有可拖动分割线，左侧显示原视频，右侧显示预览渲染结果。
+1. 仅一个时间轴定位当前帧，不提供视频播放控制。
+2. 画面中间有可拖动分割线，默认左侧/上侧显示源视频当前帧，右侧/下侧显示应用当前参数后的预览帧，并在画面中明确标注“原始图像”和“转码后图像”。
 3. 分割线方向支持切换：`vertical`（左右对比）与 `horizontal`（上下对比）。
-4. 默认方向为 `vertical`，用户切换后应记住上次选择（会话内至少生效，建议持久化到设置）。
-5. 参数变更后自动触发预览更新，保证“可连续对比”体验。
+4. 对比显示顺序支持切换：`source-first` 表示原始图像在左/上，`preview-first` 表示转码后图像在左/上。
+5. 参数变更后自动刷新当前时间点的预览帧，保证按帧对比体验。
+6. 主预览区支持打开独立 Tauri 预览窗口，并由系统窗口全屏承载画面对比；打开时同步当前时间点、分割线位置、分割方向、对比显示顺序和当前已生成帧，独立窗口首屏应复用该帧且暂不启动新的预览会话，只有用户继续拖动时间轴或复用帧加载失败时才生成新帧；同一预览 session 内已生成 PNG 需保留到 session 结束，避免独立窗口拿到的帧路径失效；独立窗口内的右上角按钮用于关闭该窗口。
 
 ### 4.3.2 技术语义（V1）
 
 1. 预览为“近实时”，目标是快速反馈，不承诺逐帧绝对实时。
 2. 预览速率优先与真实转码能力对齐（显示 `previewSpeed` 与 `estimatedTranscodeSpeed`）。
-3. 当任务启用 `2-pass` 时，预览阶段自动降级为 `1-pass`，并在 UI 明确提示“预览近似最终效果”。
-4. 正式转码时仍执行完整 `2-pass`。
+3. 预览帧先按当前编码参数编码为临时单帧视频，再解码为 PNG 展示；因此 `codec`、`CRF`、`preset`、`advancedArgs` 等质量参数应体现在对比图中。
+4. 当任务启用 `2-pass` 时，预览阶段自动降级为单帧单 pass 编码预览，并在 UI 明确提示“预览近似最终效果”。
+5. 正式转码时仍执行完整 `2-pass`。
+6. 预览组件使用 PNG 单帧图片承载源帧与预览帧，避免 WebView 直接解码原始输入或目标编码格式失败。
 
 ### 4.3.3 预览更新策略
 
 1. 参数改动触发 `300ms` 防抖。
-2. 新预览任务启动前取消旧预览任务，避免资源占满。
-3. 默认预览片段长度 `5-8s`，围绕当前时间点循环，以提升反馈速度。
+2. 拖动时间轴时只更新当前时间指示，松手后生成该时间点的新帧；松手提交需覆盖控件外 release、pointer cancel、窗口失焦等边界，避免长期停留在 scrubbing 状态。
+3. 新预览任务启动前取消旧预览任务，避免资源占满。
 
 ## 4.4 预览后批量转码
 
@@ -400,7 +409,7 @@ type PreviewConfig = {
 `idle -> warming -> running -> updating -> running -> stopped | error`
 
 1. 参数变更触发 `updating`，旧预览会话被取消。
-2. 启用 `2-pass` 时，`warming` 阶段强制将预览命令重写为 `1-pass`。
+2. 启用 `2-pass` 时，`warming` 阶段强制降级为单帧参数预览。
 
 ## 7.3 调度规则
 
@@ -462,7 +471,7 @@ type PreviewConfig = {
 2. 并发 `N=1/2/4` 场景下，队列调度符合 FIFO，无重复启动。
 3. 运行中 `pause/resume` 后，任务可继续并输出可播放文件。
 4. 转码进行中可以查看缩略图，时间点与当前进度基本一致。
-5. `2-pass` 任务预览自动降级 `1-pass`，正式转码执行完整两遍。
+5. `2-pass` 任务预览自动降级为单帧参数预览，正式转码执行完整两遍。
 6. 当选择 `h265 + hevc_nvenc` 时，UI 必须禁用 `2-pass` 并给出明确提示。
 7. 多文件批量中单个任务失败不阻塞其余任务完成。
 8. 模板保存后可在模板页直接预览并继续发起转码。
@@ -480,7 +489,7 @@ type PreviewConfig = {
 | T2A | 编码器能力联动（如 hevc_nvenc 禁用 2-pass） | 是 | 是 | 是 |
 | T3 | 预览参数防抖与会话替换 | 是 | 是 | 是 |
 | T3A | 分割线横纵切换与拖动一致性 | 是 | 是 | 是 |
-| T4 | 2-pass 预览降级 1-pass | 是 | 是 | 是 |
+| T4 | 2-pass 预览降级为单帧参数预览 | 是 | 是 | 是 |
 | T5 | 队列并发 N 调度 | 是 | 是 | 是 |
 | T6 | pause/resume 信号控制 | 否 | 是 | 是 |
 | T7 | 失败隔离与错误上报 | 是 | 是 | 是 |
@@ -584,11 +593,14 @@ ffmpeg -i input.mp4 \
 ### 14.1.3 2-pass 任务预览降级示例
 
 ```bash
-# 预览会自动改为 1-pass 快速参数组合（示意）
-ffmpeg -ss 00:00:10 -t 6 -i input.mp4 \
-  -c:v libx264 -preset veryfast -crf 23 \
-  -c:a copy \
-  preview.mp4
+# 预览会自动改为当前时间点单帧参数预览（示意）
+ffmpeg -ss 00:00:10 -i input.mp4 \
+  -c:v libx264 -preset medium -crf 23 \
+  -vf scale=1280:720 -frames:v 1 -an -f matroska \
+  preview.mkv
+
+ffmpeg -i preview.mkv -frames:v 1 \
+  preview.png
 ```
 
 ## 14.2 命令拼装规则（简版）
@@ -621,5 +633,5 @@ ffmpeg -ss 00:00:10 -t 6 -i input.mp4 \
 2. FFmpeg 来源：系统安装版本。
 3. 存储方案：本地 JSON。
 4. 并发策略：可配置并发 `N` + FIFO。
-5. 预览策略：近实时，速率对齐真实转码能力。
-6. 2-pass 策略：预览降级 1-pass，正式转码执行 2-pass。
+5. 预览策略：按帧图片对比，参数变化后刷新当前时间点。
+6. 2-pass 策略：预览降级为单帧参数预览，正式转码执行 2-pass。

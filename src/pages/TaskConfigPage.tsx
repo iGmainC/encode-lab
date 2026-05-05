@@ -23,6 +23,70 @@ type Props = {
   onGoPreview: () => void;
 };
 
+/**
+ * 生成 Dolby Vision 元数据保留能力的用户可读说明。
+ * @param params 当前源视频、编码器和 FFmpeg 探测状态
+ * @returns 开关说明与禁用原因；禁用原因为空表示当前允许开启
+ */
+function buildDolbyVisionPreserveCopy({
+  isDolbyVisionSource,
+  formCodec,
+  formEncoder,
+  ffmpegProbe,
+}: {
+  isDolbyVisionSource: boolean;
+  formCodec: string;
+  formEncoder: string;
+  ffmpegProbe: FfmpegProbeResult | null;
+}) {
+  if (!isDolbyVisionSource) {
+    return {
+      hint: "仅当源视频识别为 Dolby Vision 时显示该能力。",
+      disabledReason: "当前源视频未被识别为 Dolby Vision。",
+    };
+  }
+
+  if (!ffmpegProbe) {
+    return {
+      hint: "正在等待 FFmpeg 能力探测结果，探测完成后会显示是否可保留。",
+      disabledReason: "FFmpeg 能力尚未完成探测。",
+    };
+  }
+
+  if (!ffmpegProbe.ffmpegFound) {
+    return {
+      hint: "当前环境未找到 ffmpeg，无法确认或执行 Dolby Vision 元数据保留链路。",
+      disabledReason: "未找到 ffmpeg。",
+    };
+  }
+
+  if (!ffmpegProbe.dolbyVision.supportsDoviRpu) {
+    return {
+      hint: "当前 FFmpeg 未提供 dovi_rpu bitstream filter，无法提取/写回 Dolby Vision RPU 元数据。",
+      disabledReason: "缺少 dovi_rpu bitstream filter。",
+    };
+  }
+
+  if (!ffmpegProbe.dolbyVision.supportsDolbyVisionEncode) {
+    return {
+      hint: "当前 libx265 未暴露 Dolby Vision 编码参数，无法在输出 H.265 中写入 Dolby Vision 元数据。",
+      disabledReason: "libx265 不支持 Dolby Vision 编码参数。",
+    };
+  }
+
+  if (formCodec !== "h265" || formEncoder !== "libx265") {
+    return {
+      hint: "当前版本仅支持 H.265 + libx265 的 Dolby Vision 保留实验链路。",
+      disabledReason: `当前选择为 ${formCodec} / ${formEncoder}，请切换到 H.265 / libx265。`,
+    };
+  }
+
+  return {
+    hint: "尽量沿用源片的 Dolby Vision 相关色彩与元数据能力，实际结果仍取决于 FFmpeg 与编码器支持。",
+    disabledReason: "",
+  };
+}
+
 export function TaskConfigPage({
   filteredEncoders,
   selectedEncoderCapability,
@@ -68,6 +132,18 @@ export function TaskConfigPage({
     setFormColorTrc,
     formColorspace,
     setFormColorspace,
+    av1CpuUsed,
+    setAv1CpuUsed,
+    av1RowMt,
+    setAv1RowMt,
+    av1TileColumns,
+    setAv1TileColumns,
+    av1TileRows,
+    setAv1TileRows,
+    av1SvtTune,
+    setAv1SvtTune,
+    av1FilmGrain,
+    setAv1FilmGrain,
     sourceFilePath,
     setSourceFilePath,
     videoMetadata,
@@ -79,19 +155,17 @@ export function TaskConfigPage({
   } = useTaskDraft();
 
   const isDolbyVisionSource = videoMetadata?.video?.hdrType === "DolbyVision";
+  const dolbyVisionCopy = buildDolbyVisionPreserveCopy({
+    isDolbyVisionSource,
+    formCodec,
+    formEncoder,
+    ffmpegProbe,
+  });
   const canPreserveDolbyVision =
     isDolbyVisionSource &&
     formCodec === "h265" &&
     formEncoder === "libx265" &&
     Boolean(ffmpegProbe?.dolbyVision.supportsPreservePipeline);
-
-  const dolbyVisionHint = !isDolbyVisionSource
-    ? "仅当源视频识别为 Dolby Vision 时显示该能力。"
-    : !ffmpegProbe?.dolbyVision.supportsPreservePipeline
-      ? "当前 FFmpeg 运行时未探测到完整的 Dolby Vision 保留链路。"
-      : formCodec !== "h265" || formEncoder !== "libx265"
-        ? "当前版本仅支持 H.265 + libx265 的 Dolby Vision 保留实验链路。"
-        : "尽量沿用源片的 Dolby Vision 相关色彩与元数据能力，实际结果仍取决于 FFmpeg 与编码器支持。";
 
   useEffect(() => {
     if (!canPreserveDolbyVision && preserveDolbyVisionMetadata) {
@@ -107,6 +181,8 @@ export function TaskConfigPage({
         : formPreset === "medium" || formPreset === "fast" || formPreset === "slow"
           ? "均衡档：速度与压缩效率平衡，推荐先从这里开始。"
           : "偏质量/压缩：编码更慢，体积通常更小。";
+
+  const isAv1SoftwareEncoder = formEncoder === "libaom-av1" || formEncoder === "svtav1";
 
   return (
     <div className="space-y-6">
@@ -262,6 +338,112 @@ export function TaskConfigPage({
               </div>
             )}
 
+            {formCodec === "av1" ? (
+              <div className="space-y-4 rounded-2xl border bg-muted/20 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium">AV1 高级参数</div>
+                    <p className="text-xs text-muted-foreground">
+                      根据当前 AV1 编码器生成软件编码高级参数，并追加到 advancedArgs。
+                    </p>
+                  </div>
+                  <div className="rounded-full border px-3 py-1 text-xs text-muted-foreground">
+                    {isAv1SoftwareEncoder ? "软件编码" : "硬件编码"}
+                  </div>
+                </div>
+
+                {formEncoder === "libaom-av1" ? (
+                  <div className="grid gap-4 md:grid-cols-4">
+                    <label className="space-y-1 text-sm">
+                      <span className="text-muted-foreground">cpu-used</span>
+                      <Select value={av1CpuUsed} onValueChange={setAv1CpuUsed}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="选择速度档" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {["0", "1", "2", "3", "4", "5", "6", "7", "8"].map((value) => (
+                            <SelectItem key={value} value={value}>
+                              {value}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">越高越快，压缩效率通常越低。</p>
+                    </label>
+
+                    <div className="rounded-2xl border bg-background/60 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className="text-sm font-medium">row-mt</div>
+                          <p className="text-xs text-muted-foreground">启用行级多线程。</p>
+                        </div>
+                        <Switch checked={av1RowMt} onCheckedChange={setAv1RowMt} />
+                      </div>
+                    </div>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-muted-foreground">Tile Columns</span>
+                      <input
+                        className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                        value={av1TileColumns}
+                        onChange={(event) => setAv1TileColumns(event.target.value)}
+                        placeholder="2"
+                      />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-muted-foreground">Tile Rows</span>
+                      <input
+                        className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                        value={av1TileRows}
+                        onChange={(event) => setAv1TileRows(event.target.value)}
+                        placeholder="1"
+                      />
+                    </label>
+                  </div>
+                ) : null}
+
+                {formEncoder === "svtav1" ? (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="space-y-1 text-sm">
+                      <span className="text-muted-foreground">SVT Tune</span>
+                      <Select value={av1SvtTune} onValueChange={setAv1SvtTune}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="选择 Tune" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">VQ</SelectItem>
+                          <SelectItem value="1">PSNR</SelectItem>
+                          <SelectItem value="2">SSIM</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                      <span className="text-muted-foreground">Film Grain</span>
+                      <Select value={av1FilmGrain} onValueChange={setAv1FilmGrain}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="选择颗粒强度" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">关闭</SelectItem>
+                          <SelectItem value="4">轻微</SelectItem>
+                          <SelectItem value="8">中等</SelectItem>
+                          <SelectItem value="12">明显</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </label>
+                  </div>
+                ) : null}
+
+                {!isAv1SoftwareEncoder ? (
+                  <div className="rounded-2xl border bg-background/60 p-3 text-sm text-muted-foreground">
+                    当前硬件 AV1 编码器暂不暴露软件编码高级项，仅沿用码率、分辨率、FPS、像素格式等通用参数。
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="grid gap-4 md:grid-cols-4">
               <label className="space-y-1 text-sm md:col-span-2">
                 <span className="text-muted-foreground">Preset</span>
@@ -322,7 +504,12 @@ export function TaskConfigPage({
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">保留 Dolby Vision 元数据（实验性）</div>
-                    <p className="text-xs text-muted-foreground">{dolbyVisionHint}</p>
+                    <p className="text-xs text-muted-foreground">{dolbyVisionCopy.hint}</p>
+                    {!canPreserveDolbyVision ? (
+                      <p className="text-xs font-medium text-destructive">
+                        无法开启：{dolbyVisionCopy.disabledReason}
+                      </p>
+                    ) : null}
                   </div>
                   <Switch
                     checked={preserveDolbyVisionMetadata}
@@ -334,6 +521,9 @@ export function TaskConfigPage({
                   <span>源 HDR: {videoMetadata?.video?.hdrType ?? "-"}</span>
                   <span>推荐编码器: {ffmpegProbe?.dolbyVision.recommendedEncoder ?? "-"}</span>
                   <span>dovi_rpu: {ffmpegProbe?.dolbyVision.supportsDoviRpu ? "yes" : "no"}</span>
+                  <span>
+                    libx265 DV encode: {ffmpegProbe?.dolbyVision.supportsDolbyVisionEncode ? "yes" : "no"}
+                  </span>
                 </div>
               </div>
             ) : null}

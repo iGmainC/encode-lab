@@ -122,10 +122,12 @@ fn presets_for(encoder: &str) -> Vec<String> {
     }
 
     if matches!(encoder, "hevc_nvenc" | "av1_nvenc") {
-        return ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "fast", "medium", "slow", "hq"]
-            .iter()
-            .map(|v| v.to_string())
-            .collect();
+        return [
+            "p1", "p2", "p3", "p4", "p5", "p6", "p7", "fast", "medium", "slow", "hq",
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
     }
 
     vec![]

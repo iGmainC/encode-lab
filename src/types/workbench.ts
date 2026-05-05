@@ -143,6 +143,23 @@ export type PreviewState =
   | "stopped"
   | "error";
 
+/** 对比图层显示顺序：source-first 表示左侧/上侧为原始图像。 */
+export type CompareImageOrder = "source-first" | "preview-first";
+
+/** 当前已生成的预览帧快照，可用于独立窗口复用首帧。 */
+export type ComparePreviewFrameSnapshot = {
+  /** 源帧图片绝对路径 */
+  sourceImagePath: string;
+  /** 转码后预览帧图片绝对路径 */
+  previewImagePath: string;
+  /** 该帧所在时间点，单位毫秒 */
+  timeMs: number;
+  /** 后端预览序号，用于排查帧时序 */
+  seq: number;
+  /** 前端参数与时间点匹配 key，用于独立窗口判断首帧是否可复用 */
+  renderKey?: string;
+};
+
 export type PreviewConfig = {
   inputFile: string;
   clipRange?: { startMs: number; endMs: number };
@@ -156,12 +173,8 @@ export type PreviewConfig = {
 export type PreviewFrameEvent = {
   previewSessionId: string;
   timeMs: number;
-  mediaPath?: string;
-  mediaKind: "video" | "image";
-  imagePath?: string;
-  base64?: string;
-  clipStartMs: number;
-  clipEndMs: number;
+  sourceImagePath?: string;
+  previewImagePath?: string;
   width: number;
   height: number;
   seq: number;
@@ -198,4 +211,5 @@ export type ComparePreviewRuntime = {
   currentTimeSec: number;
   durationSec: number;
   isFullscreen: boolean;
+  currentFrame?: ComparePreviewFrameSnapshot;
 };

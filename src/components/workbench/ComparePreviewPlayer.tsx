@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Maximize2, Minimize2, Pause, Play } from "lucide-react";
+import { Maximize2, Minimize2, X } from "lucide-react";
 import { Button } from "../ui/button";
+import { Slider } from "../ui/slider";
+import { Switch } from "../ui/switch";
 import type {
+  CompareImageOrder,
+  ComparePreviewFrameSnapshot,
   ComparePreviewRuntime,
   PreviewConfig,
   PreviewFrameEvent,
@@ -16,133 +20,863 @@ import type {
 
 type Props = {
   sourceFile: string;
+  sourceDurationSec?: number;
   taskDraftSnapshot: TaskDraftSnapshot;
   splitMode: "vertical" | "horizontal";
   splitterPosition: number;
+  compareOrder: CompareImageOrder;
+  initialTimeSec?: number;
+  initialFrame?: ComparePreviewFrameSnapshot;
   onSplitModeChange: (value: "vertical" | "horizontal") => void;
   onSplitterPositionChange: (value: number) => void;
+  onCompareOrderChange: (value: CompareImageOrder) => void;
   onRuntimeChange: (value: ComparePreviewRuntime) => void;
+  fillViewport?: boolean;
+  deferSessionUntilInteraction?: boolean;
+  onFullscreenButtonClick?: (value: ComparePreviewRuntime) => void;
+  fullscreenButtonIcon?: "fullscreen" | "close";
 };
 
+/** 控制区在全屏模式下自动隐藏的延迟，单位毫秒。 */
 const CONTROL_AUTO_HIDE_MS = 2500;
+/** 参数变化后自动刷新当前帧的防抖时间，单位毫秒。 */
 const UPDATE_INTERVAL_MS = 300;
+/** 预览帧固定使用半尺寸渲染，兼顾可读性和生成速度。 */
+const PREVIEW_RENDER_SCALE: PreviewConfig["renderScale"] = 0.5;
 
-export function ComparePreviewPlayer({
+/** 兼容部分 WebView 只暴露 WebKit 前缀 Fullscreen API 的情况。 */
+type WebkitFullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
+
+/** 兼容 WebKit 前缀 fullscreen 状态和退出 API。 */
+type WebkitFullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+/**
+ * 获取当前原生全屏元素。
+ * @returns 标准或 WebKit 前缀 Fullscreen API 记录的全屏元素
+ */
+function getNativeFullscreenElement() {
+  const fullscreenDocument = document as WebkitFullscreenDocument;
+  return document.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement ?? null;
+}
+
+/**
+ * 尝试进入原生全屏。
+ * @param element 需要全屏展示的容器
+ * @returns true 表示原生全屏已请求成功；false 表示需要走应用内 fallback
+ */
+async function requestNativeFullscreen(element: HTMLElement) {
+  const fullscreenElement = element as WebkitFullscreenElement;
+  const requestFullscreen = element.requestFullscreen ?? fullscreenElement.webkitRequestFullscreen;
+  if (!requestFullscreen) {
+    return false;
+  }
+
+  try {
+    await requestFullscreen.call(element);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 尝试退出原生全屏。
+ * @returns true 表示已调用原生退出逻辑
+ */
+async function exitNativeFullscreen() {
+  const fullscreenDocument = document as WebkitFullscreenDocument;
+  const exitFullscreen = document.exitFullscreen ?? fullscreenDocument.webkitExitFullscreen;
+  if (!exitFullscreen) {
+    return false;
+  }
+
+  try {
+    await exitFullscreen.call(document);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 将秒数转换为毫秒整数。
+ * @param seconds 时间，单位秒
+ * @returns 四舍五入后的毫秒
+ */
+function secondsToMs(seconds: number) {
+  return Math.round(seconds * 1000);
+}
+
+/**
+ * 将时间限制到源视频范围内。
+ * @param value 当前时间，单位秒
+ * @param durationSec 源视频总时长，单位秒
+ * @returns 合法的时间点
+ */
+function clampTimeSec(value: number, durationSec: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  if (durationSec <= 0) {
+    return Math.max(0, value);
+  }
+  return Math.min(durationSec, Math.max(0, value));
+}
+
+/**
+ * 生成前端用于判断帧是否仍匹配当前参数的稳定 key。
+ * @param inputFile 源文件路径
+ * @param timeMs 当前时间点，单位毫秒
+ * @param taskDraftSnapshotKey 参数快照序列化结果
+ * @param renderScale 预览渲染缩放
+ * @returns 当前预览请求的唯一 key
+ */
+function buildPreviewRenderKey(
+  inputFile: string,
+  timeMs: number,
+  taskDraftSnapshotKey: string,
+  renderScale: PreviewConfig["renderScale"],
+) {
+  return JSON.stringify([inputFile, timeMs, taskDraftSnapshotKey, renderScale]);
+}
+
+/**
+ * 判断外部传入的首帧是否可直接复用。
+ * @param frame 候选首帧
+ * @param desiredRenderKey 当前时间点和参数对应的 key
+ * @returns 匹配时返回原帧，否则返回 undefined
+ */
+function getReusableInitialFrame(
+  frame: ComparePreviewFrameSnapshot | undefined,
+  desiredRenderKey: string,
+) {
+  return frame?.renderKey === desiredRenderKey ? frame : undefined;
+}
+
+/**
+ * 管理预览时间轴的草稿时间和松手提交。
+ * @param options 时间轴配置和提交回调
+ * @returns 当前时间、拖动状态和 Slider 事件处理函数
+ */
+function usePreviewTimeline({
+  durationSec,
+  initialTimeSec,
+  initialFrame,
+  onCommitTimeMs,
+}: {
+  durationSec: number;
+  initialTimeSec?: number;
+  initialFrame?: ComparePreviewFrameSnapshot;
+  onCommitTimeMs: (timeMs: number) => void;
+}) {
+  const initialCurrentTimeSec = clampTimeSec(
+    initialFrame ? initialFrame.timeMs / 1000 : initialTimeSec ?? 0,
+    durationSec,
+  );
+  const currentTimeSecRef = useRef(initialCurrentTimeSec);
+  const pendingTimeMsRef = useRef<number | null>(null);
+  const isScrubbingRef = useRef(false);
+  const [currentTimeSec, setCurrentTimeSecState] = useState(initialCurrentTimeSec);
+  const [isScrubbingTimeline, setIsScrubbingTimeline] = useState(false);
+
+  /**
+   * 同步时间到 state 和 ref，供全局 release 兜底读取最新值。
+   * @param value 当前时间，单位秒
+   */
+  const setCurrentTimeSec = useCallback(
+    (value: number) => {
+      const next = clampTimeSec(value, durationSec);
+      currentTimeSecRef.current = next;
+      setCurrentTimeSecState(next);
+    },
+    [durationSec],
+  );
+
+  useEffect(() => {
+    if (initialTimeSec === undefined) {
+      return;
+    }
+
+    setCurrentTimeSec(initialTimeSec);
+  }, [initialTimeSec, setCurrentTimeSec]);
+
+  useEffect(() => {
+    if (!initialFrame) {
+      return;
+    }
+
+    setCurrentTimeSec(initialFrame.timeMs / 1000);
+  }, [initialFrame, setCurrentTimeSec]);
+
+  /**
+   * 标记用户已开始拖动时间轴。
+   */
+  const beginTimelineScrub = useCallback(() => {
+    isScrubbingRef.current = true;
+    setIsScrubbingTimeline(true);
+  }, []);
+
+  /**
+   * 更新草稿时间，不触发后端抽帧。
+   * @param value Slider 的当前值数组
+   */
+  const updateDraftTime = useCallback(
+    (value: number[]) => {
+      const next = clampTimeSec(value[0] ?? currentTimeSecRef.current, durationSec);
+      pendingTimeMsRef.current = secondsToMs(next);
+      setCurrentTimeSec(next);
+    },
+    [durationSec, setCurrentTimeSec],
+  );
+
+  /**
+   * 提交最后一个草稿时间点。
+   * @param value Slider commit 传入的最终值数组
+   */
+  const commitDraftTime = useCallback(
+    (value?: number[]) => {
+      if (value && (isScrubbingRef.current || pendingTimeMsRef.current !== null)) {
+        updateDraftTime(value);
+      }
+      if (!isScrubbingRef.current && pendingTimeMsRef.current === null) {
+        return;
+      }
+
+      const timeMs = pendingTimeMsRef.current ?? secondsToMs(currentTimeSecRef.current);
+      pendingTimeMsRef.current = null;
+      isScrubbingRef.current = false;
+      setIsScrubbingTimeline(false);
+      onCommitTimeMs(timeMs);
+    },
+    [onCommitTimeMs, updateDraftTime],
+  );
+
+  useEffect(() => {
+    if (!isScrubbingTimeline) {
+      return;
+    }
+
+    const commitFromWindow = () => commitDraftTime();
+
+    // Slider 的 release 在窗口外发生时仍需要提交最后时间点。
+    window.addEventListener("pointerup", commitFromWindow);
+    window.addEventListener("pointercancel", commitFromWindow);
+    window.addEventListener("touchend", commitFromWindow);
+    window.addEventListener("blur", commitFromWindow);
+    return () => {
+      window.removeEventListener("pointerup", commitFromWindow);
+      window.removeEventListener("pointercancel", commitFromWindow);
+      window.removeEventListener("touchend", commitFromWindow);
+      window.removeEventListener("blur", commitFromWindow);
+    };
+  }, [commitDraftTime, isScrubbingTimeline]);
+
+  return {
+    currentTimeSec,
+    currentTimeMs: secondsToMs(currentTimeSec),
+    isScrubbingTimeline,
+    isScrubbingRef,
+    beginTimelineScrub,
+    updateDraftTime,
+    commitDraftTime,
+  };
+}
+
+/**
+ * 管理预览会话、渲染请求和 Tauri 事件。
+ * @param options 当前预览参数和目标帧信息
+ * @returns 当前预览帧、状态和渲染操作
+ */
+function usePreviewFrameSession({
   sourceFile,
   taskDraftSnapshot,
+  taskDraftSnapshotKey,
   splitMode,
   splitterPosition,
-  onSplitModeChange,
-  onSplitterPositionChange,
-  onRuntimeChange,
-}: Props) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
-  const hideTimerRef = useRef<number | null>(null);
+  desiredTimeMs,
+  desiredRenderKey,
+  initialFrame,
+  deferSessionUntilInteraction,
+  isScrubbingTimeline,
+}: {
+  sourceFile: string;
+  taskDraftSnapshot: TaskDraftSnapshot;
+  taskDraftSnapshotKey: string;
+  splitMode: "vertical" | "horizontal";
+  splitterPosition: number;
+  desiredTimeMs: number;
+  desiredRenderKey: string;
+  initialFrame?: ComparePreviewFrameSnapshot;
+  deferSessionUntilInteraction: boolean;
+  isScrubbingTimeline: boolean;
+}) {
   const sessionIdRef = useRef<string | null>(null);
-  const previewClipRangeRef = useRef<{ startMs: number; endMs: number } | null>(null);
-  const isScrubbingRef = useRef(false);
-  const pendingScrubTimeMsRef = useRef<number | null>(null);
-  const lastUpdateAtRef = useRef(0);
+  const desiredRenderKeyRef = useRef(desiredRenderKey);
+  const lastSubmittedRenderKeyRef = useRef<string | null>(null);
   const lastFrameSeqRef = useRef(0);
-  const taskConfigRef = useRef(taskDraftSnapshot);
+  const fallbackRenderKeyRef = useRef<string | null>(null);
 
-  const [previewMediaSrc, setPreviewMediaSrc] = useState<string | null>(null);
-  const [previewMediaKind, setPreviewMediaKind] = useState<"video" | "image">("video");
+  const [listenersReady, setListenersReady] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [previewState, setPreviewState] = useState<PreviewState>("idle");
   const [previewSpeed, setPreviewSpeed] = useState<number | undefined>(undefined);
   const [estimatedTranscodeSpeed, setEstimatedTranscodeSpeed] = useState<number | undefined>(undefined);
   const [previewError, setPreviewError] = useState<string | undefined>(undefined);
   const [degradedFromTwoPass, setDegradedFromTwoPass] = useState(false);
-  const [durationSec, setDurationSec] = useState(0);
-  const [currentTimeSec, setCurrentTimeSec] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isOverlayVisible, setIsOverlayVisible] = useState(true);
-  const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
-  const [isScrubbingTimeline, setIsScrubbingTimeline] = useState(false);
-
-  taskConfigRef.current = taskDraftSnapshot;
-
-  const sourceAssetUrl = useMemo(
-    () => (sourceFile ? convertFileSrc(sourceFile) : ""),
-    [sourceFile],
+  const [currentFrame, setCurrentFrame] = useState<ComparePreviewFrameSnapshot | undefined>(() =>
+    getReusableInitialFrame(initialFrame, desiredRenderKey),
   );
 
-  const clipPath =
-    splitMode === "vertical"
-      ? `inset(0 0 0 ${Math.round(splitterPosition * 100)}%)`
-      : `inset(${Math.round(splitterPosition * 100)}% 0 0 0)`;
+  const visibleFrame = currentFrame?.renderKey === desiredRenderKey ? currentFrame : undefined;
+  const sourceImageSrc = useMemo(
+    () => (visibleFrame ? convertFileSrc(visibleFrame.sourceImagePath) : null),
+    [visibleFrame],
+  );
+  const previewImageSrc = useMemo(
+    () => (visibleFrame ? convertFileSrc(visibleFrame.previewImagePath) : null),
+    [visibleFrame],
+  );
+
+  useEffect(() => {
+    desiredRenderKeyRef.current = desiredRenderKey;
+  }, [desiredRenderKey]);
 
   /**
-   * 将主视频时间同步到预览短片段内部时间。
-   * @param sourceTimeSec 主视频当前时间，单位秒
+   * 清空当前帧和图片状态。
    */
-  const syncPreviewVideoTime = (sourceTimeSec: number) => {
-    const previewVideo = previewVideoRef.current;
-    const clipRange = previewClipRangeRef.current;
-    if (!previewVideo || !clipRange) {
+  const clearFrameSnapshot = useCallback(() => {
+    setCurrentFrame(undefined);
+  }, []);
+
+  /**
+   * 停止当前后端预览 session。
+   */
+  const stopSession = useCallback(() => {
+    if (!sessionIdRef.current) {
       return;
     }
 
-    const nextTime = Math.max(0, sourceTimeSec - clipRange.startMs / 1000);
-    if (Number.isFinite(nextTime) && Math.abs(previewVideo.currentTime - nextTime) > 0.2) {
-      previewVideo.currentTime = nextTime;
-    }
-  };
+    void invoke("stop_preview", { previewSessionId: sessionIdRef.current }).catch(() => {});
+    sessionIdRef.current = null;
+    setSessionId(null);
+  }, []);
 
   /**
-   * 判断当前时间是否仍在已生成的预览片段内。
-   * @param timeMs 主视频当前时间，单位毫秒
-   * @returns true 表示可复用当前预览片段
+   * 确保后端预览 session 已存在。
+   * @param timeMs 当前渲染时间点，单位毫秒
+   * @returns 当前或新建的 session id
    */
-  const isTimeInsidePreviewClip = (timeMs: number) => {
-    const clipRange = previewClipRangeRef.current;
-    if (!clipRange) {
-      return false;
+  const ensureSession = useCallback(
+    async (timeMs: number) => {
+      if (sessionIdRef.current) {
+        return sessionIdRef.current;
+      }
+      if (!listenersReady || !sourceFile) {
+        return null;
+      }
+
+      const payload: PreviewConfig = {
+        inputFile: sourceFile,
+        renderScale: PREVIEW_RENDER_SCALE,
+        compareOrientation: splitMode,
+        splitterPosition,
+        timeMs,
+        taskConfigSnapshot: taskDraftSnapshot,
+      };
+
+      try {
+        const result = await invoke<StartPreviewResponse>("start_preview", { payload });
+        sessionIdRef.current = result.previewSessionId;
+        setSessionId(result.previewSessionId);
+        setPreviewState("warming");
+        setPreviewError(undefined);
+        setDegradedFromTwoPass(Boolean(result.degradedFromTwoPass));
+        lastFrameSeqRef.current = 0;
+        return result.previewSessionId;
+      } catch (err) {
+        setPreviewState("error");
+        setPreviewError(err instanceof Error ? err.message : String(err));
+        return null;
+      }
+    },
+    [listenersReady, sourceFile, splitMode, splitterPosition, taskDraftSnapshot],
+  );
+
+  /**
+   * 请求生成指定时间和参数对应的预览帧。
+   * @param timeMs 当前时间点，单位毫秒
+   * @param renderKey 本次渲染请求对应的前端 key
+   */
+  const requestFrame = useCallback(
+    async (timeMs: number, renderKey: string) => {
+      if (!sourceFile) {
+        return;
+      }
+
+      const previewSessionId = await ensureSession(timeMs);
+      if (!previewSessionId) {
+        return;
+      }
+
+      lastSubmittedRenderKeyRef.current = renderKey;
+      fallbackRenderKeyRef.current = null;
+      setPreviewState((state) => (state === "idle" ? "warming" : "updating"));
+
+      void invoke<UpdatePreviewResponse>("update_preview", {
+        previewSessionId,
+        patch: {
+          taskConfigSnapshot: taskDraftSnapshot,
+          timeMs,
+        },
+      }).catch((err) => {
+        setPreviewState("error");
+        setPreviewError(err instanceof Error ? err.message : String(err));
+      });
+    },
+    [ensureSession, sourceFile, taskDraftSnapshot],
+  );
+
+  /**
+   * 复用帧加载失败时重新生成当前目标帧。
+   */
+  const retryCurrentFrame = useCallback(() => {
+    if (fallbackRenderKeyRef.current === desiredRenderKey) {
+      setPreviewState("error");
+      setPreviewError("预览帧图片加载失败，请重新生成当前帧");
+      return;
     }
 
-    // 接近片段末尾时提前刷新，避免右侧覆盖视频播完后停住。
-    return timeMs >= clipRange.startMs && timeMs <= clipRange.endMs - 800;
-  };
+    // 当前图片路径已失效时立即隐藏旧帧，避免继续展示错误资源。
+    fallbackRenderKeyRef.current = desiredRenderKey;
+    clearFrameSnapshot();
+    void requestFrame(desiredTimeMs, desiredRenderKey);
+  }, [clearFrameSnapshot, desiredRenderKey, desiredTimeMs, requestFrame]);
 
   useEffect(() => {
-    onRuntimeChange({
-      previewState,
-      previewSpeed,
-      estimatedTranscodeSpeed,
-      previewError,
-      degradedFromTwoPass,
-      currentTimeSec,
-      durationSec,
-      isFullscreen,
-    });
-  }, [
+    let unlistenFrame: (() => void) | undefined;
+    let unlistenState: (() => void) | undefined;
+
+    const setup = async () => {
+      unlistenFrame = await listen<PreviewFrameEvent>("preview:frame", (event) => {
+        const payload = event.payload;
+        if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
+          return;
+        }
+        if (payload.seq <= lastFrameSeqRef.current) {
+          return;
+        }
+
+        lastFrameSeqRef.current = payload.seq;
+        if (!payload.sourceImagePath || !payload.previewImagePath) {
+          return;
+        }
+
+        const submittedRenderKey = lastSubmittedRenderKeyRef.current;
+        if (!submittedRenderKey || submittedRenderKey !== desiredRenderKeyRef.current) {
+          return;
+        }
+
+        setCurrentFrame({
+          sourceImagePath: payload.sourceImagePath,
+          previewImagePath: payload.previewImagePath,
+          timeMs: payload.timeMs,
+          seq: payload.seq,
+          renderKey: submittedRenderKey,
+        });
+        setPreviewError(undefined);
+      });
+
+      unlistenState = await listen<PreviewStateEvent>("preview:state", (event) => {
+        const payload = event.payload;
+        if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
+          return;
+        }
+        setPreviewState(payload.state);
+        setPreviewSpeed(payload.previewSpeed);
+        setEstimatedTranscodeSpeed(payload.estimatedTranscodeSpeed);
+        setDegradedFromTwoPass(Boolean(payload.degradedFromTwoPass));
+        setPreviewError(payload.error ? `${payload.error.code}: ${payload.error.message}` : undefined);
+      });
+
+      setListenersReady(true);
+    };
+
+    void setup();
+
+    return () => {
+      setListenersReady(false);
+      if (unlistenFrame) {
+        unlistenFrame();
+      }
+      if (unlistenState) {
+        unlistenState();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const reusableInitialFrame = getReusableInitialFrame(initialFrame, desiredRenderKey);
+    if (!reusableInitialFrame) {
+      return;
+    }
+
+    // 独立窗口复用主窗口帧时，不启动新的 session，避免首屏重复跑 FFmpeg。
+    setCurrentFrame(reusableInitialFrame);
+    lastSubmittedRenderKeyRef.current = desiredRenderKey;
+    setPreviewState("running");
+    setPreviewError(undefined);
+  }, [desiredRenderKey, initialFrame]);
+
+  useEffect(() => {
+    if (!sourceFile) {
+      stopSession();
+      clearFrameSnapshot();
+      setPreviewState("idle");
+      setPreviewError(undefined);
+      return;
+    }
+    if (!listenersReady) {
+      return;
+    }
+
+    const reusableInitialFrame = getReusableInitialFrame(initialFrame, desiredRenderKey);
+    if (deferSessionUntilInteraction && reusableInitialFrame) {
+      setCurrentFrame(reusableInitialFrame);
+      lastSubmittedRenderKeyRef.current = desiredRenderKey;
+      setPreviewState("running");
+      return;
+    }
+
+    void requestFrame(desiredTimeMs, desiredRenderKey);
+
+    return () => {
+      stopSession();
+    };
+  }, [listenersReady, sourceFile]);
+
+  useEffect(() => {
+    if (!sourceFile || !sessionId || isScrubbingTimeline) {
+      return;
+    }
+    if (lastSubmittedRenderKeyRef.current === desiredRenderKey) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void requestFrame(desiredTimeMs, desiredRenderKey);
+    }, UPDATE_INTERVAL_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [desiredRenderKey, desiredTimeMs, isScrubbingTimeline, requestFrame, sessionId, sourceFile, taskDraftSnapshotKey]);
+
+  return {
+    currentFrame: visibleFrame,
+    sourceImageSrc,
+    previewImageSrc,
     previewState,
     previewSpeed,
     estimatedTranscodeSpeed,
     previewError,
     degradedFromTwoPass,
-    currentTimeSec,
+    requestFrame,
+    retryCurrentFrame,
+  };
+}
+
+/**
+ * 管理分割线拖动状态和全局事件。
+ * @param options 分割线容器和外部位置回调
+ * @returns 分割线拖动入口函数
+ */
+function useCompareSplitterDrag({
+  containerRef,
+  splitMode,
+  onSplitterPositionChange,
+}: {
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  splitMode: "vertical" | "horizontal";
+  onSplitterPositionChange: (value: number) => void;
+}) {
+  const latestPositionRef = useRef<number | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
+
+  /**
+   * 根据指针坐标计算分割线位置。
+   * @param clientX 指针 x 坐标
+   * @param clientY 指针 y 坐标
+   * @returns 0.1 - 0.9 范围内的分割线位置
+   */
+  const getSplitterPositionFromPointer = useCallback(
+    (clientX: number, clientY: number) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return null;
+      }
+
+      const raw =
+        splitMode === "vertical"
+          ? (clientX - rect.left) / rect.width
+          : (clientY - rect.top) / rect.height;
+      return Math.min(0.9, Math.max(0.1, raw));
+    },
+    [containerRef, splitMode],
+  );
+
+  /**
+   * 通过 requestAnimationFrame 合并高频拖动更新。
+   * @param next 下一个分割线位置
+   */
+  const scheduleSplitterPosition = useCallback(
+    (next: number) => {
+      latestPositionRef.current = next;
+      if (animationFrameRef.current !== null) {
+        return;
+      }
+
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        animationFrameRef.current = null;
+        if (latestPositionRef.current !== null) {
+          onSplitterPositionChange(latestPositionRef.current);
+        }
+      });
+    },
+    [onSplitterPositionChange],
+  );
+
+  /**
+   * 从 pointer 事件更新分割线位置。
+   * @param clientX 指针 x 坐标
+   * @param clientY 指针 y 坐标
+   */
+  const updateSplitterByPointer = useCallback(
+    (clientX: number, clientY: number) => {
+      const next = getSplitterPositionFromPointer(clientX, clientY);
+      if (next === null) {
+        return;
+      }
+      scheduleSplitterPosition(next);
+    },
+    [getSplitterPositionFromPointer, scheduleSplitterPosition],
+  );
+
+  /**
+   * 开始拖动分割线。
+   * @param event 分割线 pointerdown 事件
+   */
+  const beginSplitterDrag = useCallback(
+    (event: React.PointerEvent) => {
+      event.preventDefault();
+      setIsDraggingSplitter(true);
+      updateSplitterByPointer(event.clientX, event.clientY);
+    },
+    [updateSplitterByPointer],
+  );
+
+  useEffect(() => {
+    if (!isDraggingSplitter) {
+      return;
+    }
+
+    const previousBodyUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+
+    const onPointerMove = (event: PointerEvent) => {
+      // 拖动分割线时阻止文本选择和图片拖拽。
+      event.preventDefault();
+      updateSplitterByPointer(event.clientX, event.clientY);
+    };
+    const onPointerUp = () => {
+      setIsDraggingSplitter(false);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.body.style.userSelect = previousBodyUserSelect;
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+    };
+  }, [isDraggingSplitter, updateSplitterByPointer]);
+
+  return {
+    isDraggingSplitter,
+    beginSplitterDrag,
+  };
+}
+
+export function ComparePreviewPlayer({
+  sourceFile,
+  sourceDurationSec,
+  taskDraftSnapshot,
+  splitMode,
+  splitterPosition,
+  compareOrder,
+  initialTimeSec,
+  initialFrame,
+  onSplitModeChange,
+  onSplitterPositionChange,
+  onCompareOrderChange,
+  onRuntimeChange,
+  fillViewport = false,
+  deferSessionUntilInteraction = false,
+  onFullscreenButtonClick,
+  fullscreenButtonIcon = "fullscreen",
+}: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const hideTimerRef = useRef<number | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreenFallback, setIsFullscreenFallback] = useState(false);
+  const [isOverlayVisible, setIsOverlayVisible] = useState(true);
+  const requestFrameRef = useRef<((timeMs: number, renderKey: string) => void) | null>(null);
+
+  const fullscreenActive = isFullscreen || isFullscreenFallback;
+  const previewFullscreenActive = fullscreenActive || fillViewport;
+  const durationSec = sourceDurationSec ?? 0;
+  const taskDraftSnapshotKey = useMemo(
+    () => JSON.stringify(taskDraftSnapshot),
+    [taskDraftSnapshot],
+  );
+
+  const timeline = usePreviewTimeline({
     durationSec,
-    isFullscreen,
-    onRuntimeChange,
-  ]);
+    initialTimeSec,
+    initialFrame,
+    onCommitTimeMs: (timeMs) => {
+      const renderKey = buildPreviewRenderKey(
+        sourceFile,
+        timeMs,
+        taskDraftSnapshotKey,
+        PREVIEW_RENDER_SCALE,
+      );
+      requestFrameRef.current?.(timeMs, renderKey);
+    },
+  });
+
+  const desiredRenderKey = useMemo(
+    () =>
+      buildPreviewRenderKey(
+        sourceFile,
+        timeline.currentTimeMs,
+        taskDraftSnapshotKey,
+        PREVIEW_RENDER_SCALE,
+      ),
+    [sourceFile, taskDraftSnapshotKey, timeline.currentTimeMs],
+  );
+
+  const previewSession = usePreviewFrameSession({
+    sourceFile,
+    taskDraftSnapshot,
+    taskDraftSnapshotKey,
+    splitMode,
+    splitterPosition,
+    desiredTimeMs: timeline.currentTimeMs,
+    desiredRenderKey,
+    initialFrame,
+    deferSessionUntilInteraction,
+    isScrubbingTimeline: timeline.isScrubbingTimeline,
+  });
+  requestFrameRef.current = (timeMs, renderKey) => {
+    void previewSession.requestFrame(timeMs, renderKey);
+  };
+
+  const splitterDrag = useCompareSplitterDrag({
+    containerRef,
+    splitMode,
+    onSplitterPositionChange,
+  });
+
+  const hasFrame = Boolean(previewSession.sourceImageSrc && previewSession.previewImageSrc);
+  const splitterPercent = Math.round(splitterPosition * 100);
+  const sourceIsFirst = compareOrder === "source-first";
+  const clipPath =
+    splitMode === "vertical"
+      ? sourceIsFirst
+        ? `inset(0 0 0 ${splitterPercent}%)`
+        : `inset(0 ${100 - splitterPercent}% 0 0)`
+      : sourceIsFirst
+        ? `inset(${splitterPercent}% 0 0 0)`
+        : `inset(0 0 ${100 - splitterPercent}% 0)`;
+  const firstPaneLabel = sourceIsFirst ? "原始图像" : "转码后图像";
+  const secondPaneLabel = sourceIsFirst ? "转码后图像" : "原始图像";
+  const firstPaneSideLabel = splitMode === "vertical" ? "左侧" : "上方";
+  const secondPaneSideLabel = splitMode === "vertical" ? "右侧" : "下方";
+  const firstPaneClass = "left-4 top-20";
+  const secondPaneClass =
+    splitMode === "vertical" ? "right-4 top-20" : "left-4 bottom-28";
+
+  const runtime = useMemo<ComparePreviewRuntime>(
+    () => ({
+      previewState: previewSession.previewState,
+      previewSpeed: previewSession.previewSpeed,
+      estimatedTranscodeSpeed: previewSession.estimatedTranscodeSpeed,
+      previewError: previewSession.previewError,
+      degradedFromTwoPass: previewSession.degradedFromTwoPass,
+      currentTimeSec: timeline.currentTimeSec,
+      durationSec,
+      isFullscreen: previewFullscreenActive,
+      currentFrame: previewSession.currentFrame,
+    }),
+    [
+      durationSec,
+      previewFullscreenActive,
+      previewSession.currentFrame,
+      previewSession.degradedFromTwoPass,
+      previewSession.estimatedTranscodeSpeed,
+      previewSession.previewError,
+      previewSession.previewSpeed,
+      previewSession.previewState,
+      timeline.currentTimeSec,
+    ],
+  );
+
+  useEffect(() => {
+    onRuntimeChange(runtime);
+  }, [onRuntimeChange, runtime]);
 
   useEffect(() => {
     const syncFullscreenState = () => {
-      const active = document.fullscreenElement === containerRef.current;
+      const active = getNativeFullscreenElement() === containerRef.current;
       setIsFullscreen(active);
+      if (active) {
+        setIsFullscreenFallback(false);
+      }
       setIsOverlayVisible(true);
     };
 
     document.addEventListener("fullscreenchange", syncFullscreenState);
+    document.addEventListener("webkitfullscreenchange", syncFullscreenState);
     return () => {
       document.removeEventListener("fullscreenchange", syncFullscreenState);
+      document.removeEventListener("webkitfullscreenchange", syncFullscreenState);
     };
   }, []);
+
+  useEffect(() => {
+    if (!isFullscreenFallback) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsFullscreenFallback(false);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isFullscreenFallback]);
 
   useEffect(() => {
     const resetAutoHide = () => {
@@ -150,7 +884,7 @@ export function ComparePreviewPlayer({
       if (hideTimerRef.current) {
         window.clearTimeout(hideTimerRef.current);
       }
-      if (document.fullscreenElement === containerRef.current) {
+      if (previewFullscreenActive) {
         hideTimerRef.current = window.setTimeout(() => {
           setIsOverlayVisible(false);
         }, CONTROL_AUTO_HIDE_MS);
@@ -173,345 +907,87 @@ export function ComparePreviewPlayer({
         window.clearTimeout(hideTimerRef.current);
       }
     };
-  }, []);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !sourceAssetUrl) {
-      return;
-    }
-
-    video.load();
-  }, [sourceAssetUrl]);
-
-  useEffect(() => {
-    let unlistenFrame: (() => void) | undefined;
-    let unlistenState: (() => void) | undefined;
-
-    const setup = async () => {
-      unlistenFrame = await listen<PreviewFrameEvent>("preview:frame", (event) => {
-        const payload = event.payload;
-        if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
-          return;
-        }
-        if (payload.seq <= lastFrameSeqRef.current) {
-          return;
-        }
-
-        const assetPath = payload.mediaPath ?? payload.imagePath;
-        const nextMediaSrc = payload.base64 ?? (assetPath ? convertFileSrc(assetPath) : null);
-        if (!nextMediaSrc) {
-          return;
-        }
-
-        lastFrameSeqRef.current = payload.seq;
-        previewClipRangeRef.current = {
-          startMs: payload.clipStartMs,
-          endMs: payload.clipEndMs,
-        };
-        setPreviewMediaKind(payload.mediaKind);
-        setPreviewMediaSrc(nextMediaSrc);
-        setPreviewError(undefined);
-      });
-
-      unlistenState = await listen<PreviewStateEvent>("preview:state", (event) => {
-        const payload = event.payload;
-        if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
-          return;
-        }
-        setPreviewState(payload.state);
-        setPreviewSpeed(payload.previewSpeed);
-        setEstimatedTranscodeSpeed(payload.estimatedTranscodeSpeed);
-        setDegradedFromTwoPass(Boolean(payload.degradedFromTwoPass));
-        setPreviewError(payload.error ? `${payload.error.code}: ${payload.error.message}` : undefined);
-      });
-    };
-
-    void setup();
-
-    return () => {
-      if (unlistenFrame) {
-        unlistenFrame();
-      }
-      if (unlistenState) {
-        unlistenState();
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    let canceled = false;
-
-    const startSession = async () => {
-      if (!sourceFile) {
-        setPreviewState("idle");
-        setPreviewMediaSrc(null);
-        setPreviewError(undefined);
-        setSessionId(null);
-        return;
-      }
-
-      if (sessionIdRef.current) {
-        await invoke("stop_preview", { previewSessionId: sessionIdRef.current }).catch(() => {});
-        sessionIdRef.current = null;
-        setSessionId(null);
-      }
-
-      const payload: PreviewConfig = {
-        inputFile: sourceFile,
-        renderScale: 0.5,
-        compareOrientation: splitMode,
-        splitterPosition,
-        timeMs: Math.round(currentTimeSec * 1000),
-        taskConfigSnapshot: taskDraftSnapshot,
-      };
-
-      try {
-        const result = await invoke<StartPreviewResponse>("start_preview", { payload });
-        if (canceled) {
-          await invoke("stop_preview", { previewSessionId: result.previewSessionId }).catch(() => {});
-          return;
-        }
-        sessionIdRef.current = result.previewSessionId;
-        setSessionId(result.previewSessionId);
-        setPreviewError(undefined);
-        setDegradedFromTwoPass(Boolean(result.degradedFromTwoPass));
-        lastFrameSeqRef.current = 0;
-      } catch (err) {
-        setPreviewState("error");
-        setPreviewError(err instanceof Error ? err.message : String(err));
-      }
-    };
-
-    void startSession();
-
-    return () => {
-      canceled = true;
-      if (sessionIdRef.current) {
-        void invoke("stop_preview", { previewSessionId: sessionIdRef.current }).catch(() => {});
-        sessionIdRef.current = null;
-        setSessionId(null);
-      }
-    };
-  }, [sourceFile]);
-
-  useEffect(() => {
-    if (!sessionId) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      void invoke<UpdatePreviewResponse>("update_preview", {
-        previewSessionId: sessionId,
-        patch: {
-          compareOrientation: splitMode,
-          splitterPosition,
-          taskConfigSnapshot: taskDraftSnapshot,
-        },
-      }).catch((err) => {
-        setPreviewState("error");
-        setPreviewError(err instanceof Error ? err.message : String(err));
-      });
-    }, UPDATE_INTERVAL_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [sessionId, splitMode, splitterPosition, taskDraftSnapshot]);
-
-  const dispatchTimeUpdate = (timeMs: number, immediate = false) => {
-    syncPreviewVideoTime(timeMs / 1000);
-
-    if (isScrubbingRef.current && !immediate) {
-      pendingScrubTimeMsRef.current = timeMs;
-      return;
-    }
-    if (!sessionIdRef.current) {
-      return;
-    }
-    if (!immediate && isTimeInsidePreviewClip(timeMs)) {
-      return;
-    }
-    const now = Date.now();
-    if (!immediate && now - lastUpdateAtRef.current < UPDATE_INTERVAL_MS) {
-      return;
-    }
-    lastUpdateAtRef.current = now;
-    void invoke<UpdatePreviewResponse>("update_preview", {
-      previewSessionId: sessionIdRef.current,
-      patch: {
-        timeMs,
-      },
-    }).catch((err) => {
-      setPreviewState("error");
-      setPreviewError(err instanceof Error ? err.message : String(err));
-    });
-  };
-
-  /**
-   * 开始拖动时间轴时暂停预览转码请求，避免每个滑块位置都启动 ffmpeg。
-   */
-  const beginTimelineScrub = () => {
-    isScrubbingRef.current = true;
-    setIsScrubbingTimeline(true);
-  };
-
-  /**
-   * 结束时间轴拖动后只提交最后一个时间点。
-   */
-  const commitTimelineScrub = () => {
-    if (!isScrubbingRef.current && pendingScrubTimeMsRef.current === null) {
-      return;
-    }
-
-    isScrubbingRef.current = false;
-    setIsScrubbingTimeline(false);
-
-    const timeMs = pendingScrubTimeMsRef.current ?? Math.round(currentTimeSec * 1000);
-    pendingScrubTimeMsRef.current = null;
-    dispatchTimeUpdate(timeMs, true);
-  };
-
-  const togglePlay = async () => {
-    const video = videoRef.current;
-    if (!video) {
-      return;
-    }
-    if (video.paused) {
-      await video.play().catch(() => {});
-      await previewVideoRef.current?.play().catch(() => {});
-      setIsPlaying(true);
-    } else {
-      video.pause();
-      previewVideoRef.current?.pause();
-      setIsPlaying(false);
-    }
-  };
+  }, [previewFullscreenActive]);
 
   const toggleFullscreen = async () => {
     const container = containerRef.current;
     if (!container) {
       return;
     }
-    if (document.fullscreenElement === container) {
-      await document.exitFullscreen().catch(() => {});
+    if (isFullscreenFallback) {
+      setIsFullscreenFallback(false);
+      return;
+    }
+    if (getNativeFullscreenElement() === container) {
+      await exitNativeFullscreen();
     } else {
-      await container.requestFullscreen().catch(() => {});
+      const enteredNativeFullscreen = await requestNativeFullscreen(container);
+      if (!enteredNativeFullscreen) {
+        // Tauri WebView 或宿主策略可能拒绝 Fullscreen API，此时退回到应用内 fixed 全屏。
+        setIsFullscreenFallback(true);
+        setIsOverlayVisible(true);
+      }
     }
   };
 
-  const updateSplitterByPointer = (clientX: number, clientY: number) => {
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) {
+  /**
+   * 处理预览放大按钮。
+   */
+  const handleFullscreenButtonClick = () => {
+    if (onFullscreenButtonClick) {
+      onFullscreenButtonClick(runtime);
       return;
     }
 
-    const raw =
-      splitMode === "vertical"
-        ? (clientX - rect.left) / rect.width
-        : (clientY - rect.top) / rect.height;
-    const next = Math.min(0.9, Math.max(0.1, raw));
-    onSplitterPositionChange(next);
+    void toggleFullscreen();
   };
-
-  useEffect(() => {
-    if (!isDraggingSplitter) {
-      return;
-    }
-
-    const onPointerMove = (event: PointerEvent) => {
-      updateSplitterByPointer(event.clientX, event.clientY);
-    };
-    const onPointerUp = () => {
-      setIsDraggingSplitter(false);
-    };
-
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-    };
-  }, [isDraggingSplitter, splitMode]);
-
-  useEffect(() => {
-    if (previewMediaKind !== "video" || !previewMediaSrc) {
-      return;
-    }
-
-    syncPreviewVideoTime(currentTimeSec);
-    if (isPlaying) {
-      void previewVideoRef.current?.play().catch(() => {});
-    }
-  }, [previewMediaKind, previewMediaSrc, currentTimeSec, isPlaying]);
 
   return (
-    <div className="space-y-4">
+    <div className={fillViewport ? "h-screen select-none bg-black" : "space-y-4 select-none"}>
       <div
         ref={containerRef}
-        className="relative overflow-hidden rounded-3xl border bg-black"
-        onDoubleClick={() => void toggleFullscreen()}
+        className={`relative touch-none overflow-hidden bg-black ${
+          previewFullscreenActive
+            ? `${fillViewport ? "h-full w-full" : "fixed inset-0 z-50 h-screen w-screen"} rounded-none border-0`
+            : "rounded-3xl border"
+        }`}
+        onDoubleClick={handleFullscreenButtonClick}
       >
         {sourceFile ? (
-          <video
-            ref={videoRef}
-            src={sourceAssetUrl}
-            className="aspect-video w-full bg-black object-contain"
-            onLoadedMetadata={(event) => {
-              setDurationSec(event.currentTarget.duration || 0);
-            }}
-            onError={() => {
-              setPreviewError("源视频无法加载，请检查 asset 权限或文件编码格式");
-            }}
-            onPlay={() => {
-              setIsPlaying(true);
-              void previewVideoRef.current?.play().catch(() => {});
-            }}
-            onPause={() => {
-              previewVideoRef.current?.pause();
-              setIsPlaying(false);
-            }}
-            onTimeUpdate={(event) => {
-              const nextTime = event.currentTarget.currentTime;
-              setCurrentTimeSec(nextTime);
-              dispatchTimeUpdate(Math.round(nextTime * 1000));
-            }}
-            onSeeking={(event) => {
-              const nextTime = event.currentTarget.currentTime;
-              setCurrentTimeSec(nextTime);
-              syncPreviewVideoTime(nextTime);
-              dispatchTimeUpdate(Math.round(nextTime * 1000), !isScrubbingRef.current);
-            }}
-          />
+          <div className={`relative w-full bg-black ${previewFullscreenActive ? "h-full" : "aspect-video"}`}>
+            {hasFrame ? (
+              <>
+                <img
+                  src={previewSession.sourceImageSrc ?? ""}
+                  alt="source frame"
+                  draggable={false}
+                  className="absolute inset-0 h-full w-full object-contain"
+                  onError={previewSession.retryCurrentFrame}
+                />
+                <img
+                  src={previewSession.previewImageSrc ?? ""}
+                  alt="preview frame"
+                  draggable={false}
+                  className="absolute inset-0 h-full w-full object-contain"
+                  style={{ clipPath }}
+                  onError={previewSession.retryCurrentFrame}
+                />
+              </>
+            ) : (
+              <div className="grid h-full place-items-center text-sm text-white/70">
+                {previewSession.previewState === "error" ? "预览帧生成失败" : "正在生成当前时间点预览帧..."}
+              </div>
+            )}
+          </div>
         ) : (
-          <div className="grid aspect-video place-items-center text-sm text-muted-foreground">
+          <div
+            className={`grid place-items-center text-sm text-muted-foreground ${
+              previewFullscreenActive ? "h-full" : "aspect-video"
+            }`}
+          >
             先在任务配置页选择源视频，再进入预览。
           </div>
         )}
-
-        {previewMediaSrc && previewMediaKind === "video" ? (
-          <video
-            ref={previewVideoRef}
-            src={previewMediaSrc}
-            muted
-            playsInline
-            className="pointer-events-none absolute inset-0 h-full w-full object-contain"
-            style={{ clipPath }}
-            onLoadedMetadata={() => {
-              syncPreviewVideoTime(currentTimeSec);
-            }}
-            onError={() => {
-              setPreviewError("预览片段生成成功，但当前 WebView 无法解码该编码格式");
-            }}
-          />
-        ) : null}
-
-        {previewMediaSrc && previewMediaKind === "image" ? (
-          <img
-            src={previewMediaSrc}
-            alt="preview frame"
-            className="pointer-events-none absolute inset-0 h-full w-full object-contain"
-            style={{ clipPath }}
-          />
-        ) : null}
 
         <div
           className={`absolute ${
@@ -524,62 +1000,79 @@ export function ComparePreviewPlayer({
               ? { left: `${splitterPosition * 100}%` }
               : { top: `${splitterPosition * 100}%` }
           }
-          onPointerDown={(event) => {
-            setIsDraggingSplitter(true);
-            updateSplitterByPointer(event.clientX, event.clientY);
-          }}
+          onPointerDown={splitterDrag.beginSplitterDrag}
         />
+
+        {hasFrame ? (
+          <>
+            <div
+              className={`pointer-events-none absolute z-10 rounded-md bg-black/65 px-2 py-1 text-xs font-medium text-white shadow ${firstPaneClass}`}
+            >
+              {firstPaneSideLabel} · {firstPaneLabel}
+            </div>
+            <div
+              className={`pointer-events-none absolute z-10 rounded-md bg-black/65 px-2 py-1 text-xs font-medium text-white shadow ${secondPaneClass}`}
+            >
+              {secondPaneSideLabel} · {secondPaneLabel}
+            </div>
+          </>
+        ) : null}
 
         <div
           className={`absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-3 bg-gradient-to-b from-black/70 to-transparent px-4 py-4 transition ${
-            !isOverlayVisible && isFullscreen ? "pointer-events-none opacity-0" : "opacity-100"
+            !isOverlayVisible && previewFullscreenActive ? "pointer-events-none opacity-0" : "opacity-100"
           }`}
         >
           <div className="text-sm text-white/90">
-            <div className="font-medium">实时按帧预览</div>
+            <div className="font-medium">按帧图片对比</div>
             <div className="text-xs text-white/70">
-              {previewState} · {degradedFromTwoPass ? "2-pass 预览降级为 1-pass" : "当前为单 pass"}
+              {previewSession.previewState} · {previewSession.degradedFromTwoPass ? "2-pass 预览降级为单帧参数预览" : "当前为单帧预览"}
             </div>
           </div>
-          <Button size="sm" variant="secondary" onClick={() => void toggleFullscreen()}>
-            {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={(event) => {
+              event.stopPropagation();
+              handleFullscreenButtonClick();
+            }}
+          >
+            {fullscreenButtonIcon === "close" ? (
+              <X className="h-4 w-4" />
+            ) : previewFullscreenActive ? (
+              <Minimize2 className="h-4 w-4" />
+            ) : (
+              <Maximize2 className="h-4 w-4" />
+            )}
           </Button>
         </div>
 
         <div
           className={`absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/80 via-black/60 to-transparent px-4 pb-4 pt-16 transition ${
-            !isOverlayVisible && isFullscreen ? "pointer-events-none opacity-0" : "opacity-100"
+            !isOverlayVisible && previewFullscreenActive ? "pointer-events-none opacity-0" : "opacity-100"
           }`}
         >
-          <div className="grid gap-3 md:grid-cols-[auto_1fr_auto_auto_auto] md:items-center">
-            <Button size="sm" variant="secondary" onClick={() => void togglePlay()}>
-              {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-            </Button>
-            <input
-              type="range"
+          <div className="grid gap-3 md:grid-cols-[1fr_auto_auto_auto_auto] md:items-center">
+            <Slider
               min={0}
               max={durationSec || 0}
               step={0.01}
-              value={currentTimeSec}
-              onPointerDown={beginTimelineScrub}
-              onPointerUp={commitTimelineScrub}
-              onTouchStart={beginTimelineScrub}
-              onTouchEnd={commitTimelineScrub}
-              onKeyDown={beginTimelineScrub}
-              onKeyUp={commitTimelineScrub}
-              onChange={(event) => {
-                const next = Number(event.target.value);
-                const nextMs = Math.round(next * 1000);
-                pendingScrubTimeMsRef.current = nextMs;
-                if (videoRef.current) {
-                  videoRef.current.currentTime = next;
+              value={[timeline.currentTimeSec]}
+              onPointerDown={timeline.beginTimelineScrub}
+              onPointerCancel={() => timeline.commitDraftTime()}
+              onPointerUp={() => timeline.commitDraftTime()}
+              onBlur={() => timeline.commitDraftTime()}
+              onKeyDown={(event) => {
+                if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+                  timeline.beginTimelineScrub();
                 }
-                syncPreviewVideoTime(next);
-                setCurrentTimeSec(next);
               }}
+              onKeyUp={() => timeline.commitDraftTime()}
+              onValueChange={timeline.updateDraftTime}
+              onValueCommit={timeline.commitDraftTime}
             />
             <div className="text-xs text-white/75">
-              {currentTimeSec.toFixed(2)} / {durationSec.toFixed(2)}s
+              {timeline.currentTimeSec.toFixed(2)} / {durationSec.toFixed(2)}s
             </div>
             <Button
               size="sm"
@@ -595,14 +1088,26 @@ export function ComparePreviewPlayer({
             >
               上下
             </Button>
+            <label className="flex items-center gap-2 rounded-md bg-white/10 px-2 py-1 text-xs text-white/80">
+              <span>{sourceIsFirst ? "原始在前" : "转码后在前"}</span>
+              <Switch
+                size="sm"
+                checked={!sourceIsFirst}
+                aria-label="切换原始图像和转码后图像的显示方向"
+                onCheckedChange={(checked) => {
+                  // 切换显示方向只影响前端裁剪和标签，不触发后端重新生成预览帧。
+                  onCompareOrderChange(checked ? "preview-first" : "source-first");
+                }}
+              />
+            </label>
           </div>
           <div className="mt-3 flex flex-wrap gap-3 text-xs text-white/75">
-            <span>previewSpeed: {previewSpeed ? `${previewSpeed.toFixed(2)}x` : "-"}</span>
+            <span>previewSpeed: {previewSession.previewSpeed ? `${previewSession.previewSpeed.toFixed(2)}x` : "-"}</span>
             <span>
-              estimatedTranscodeSpeed: {estimatedTranscodeSpeed ? `${estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
+              estimatedTranscodeSpeed: {previewSession.estimatedTranscodeSpeed ? `${previewSession.estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
             </span>
-            {isScrubbingTimeline ? <span>拖动中，松手后刷新预览</span> : null}
-            {previewError ? <span className="text-red-200">error: {previewError}</span> : null}
+            {timeline.isScrubbingTimeline ? <span>拖动中，松手后生成当前帧</span> : null}
+            {previewSession.previewError ? <span className="text-red-200">error: {previewSession.previewError}</span> : null}
           </div>
         </div>
       </div>

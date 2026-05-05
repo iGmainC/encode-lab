@@ -55,6 +55,18 @@ type TaskDraftContextValue = {
   setFormColorTrc: (value: string) => void;
   formColorspace: string;
   setFormColorspace: (value: string) => void;
+  av1CpuUsed: string;
+  setAv1CpuUsed: (value: string) => void;
+  av1RowMt: boolean;
+  setAv1RowMt: (value: boolean) => void;
+  av1TileColumns: string;
+  setAv1TileColumns: (value: string) => void;
+  av1TileRows: string;
+  setAv1TileRows: (value: string) => void;
+  av1SvtTune: string;
+  setAv1SvtTune: (value: string) => void;
+  av1FilmGrain: string;
+  setAv1FilmGrain: (value: string) => void;
   sourceFilePath: string;
   setSourceFilePath: (value: string) => void;
   videoMetadata: VideoMetadataResult | null;
@@ -88,6 +100,12 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [formColorPrimaries, setFormColorPrimaries] = useState("bt709");
   const [formColorTrc, setFormColorTrc] = useState("bt709");
   const [formColorspace, setFormColorspace] = useState("bt709");
+  const [av1CpuUsed, setAv1CpuUsed] = useState("6");
+  const [av1RowMt, setAv1RowMt] = useState(true);
+  const [av1TileColumns, setAv1TileColumns] = useState("2");
+  const [av1TileRows, setAv1TileRows] = useState("1");
+  const [av1SvtTune, setAv1SvtTune] = useState("0");
+  const [av1FilmGrain, setAv1FilmGrain] = useState("0");
   const [sourceFilePath, setSourceFilePath] = useState("");
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadataResult | null>(null);
   const [videoMetadataLoading, setVideoMetadataLoading] = useState(false);
@@ -213,6 +231,96 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
     await fetchVideoMetadata(sourceFilePath);
   }, [fetchVideoMetadata, sourceFilePath]);
 
+  /**
+   * 构建色彩元数据参数。
+   * @returns FFmpeg 色彩参数片段
+   */
+  const buildColorArgs = useCallback(() => {
+    const colorPrimaries = preserveDolbyVisionMetadata
+      ? videoMetadata?.video?.colorPrimaries ?? formColorPrimaries
+      : formColorPrimaries;
+    const colorTrc = preserveDolbyVisionMetadata
+      ? videoMetadata?.video?.colorTransfer ?? formColorTrc
+      : formColorTrc;
+    const colorspace = preserveDolbyVisionMetadata
+      ? videoMetadata?.video?.colorSpace ?? formColorspace
+      : formColorspace;
+
+    return `-color_primaries ${colorPrimaries} -color_trc ${colorTrc} -colorspace ${colorspace}`;
+  }, [
+    preserveDolbyVisionMetadata,
+    formColorPrimaries,
+    formColorTrc,
+    formColorspace,
+    videoMetadata?.video?.colorPrimaries,
+    videoMetadata?.video?.colorTransfer,
+    videoMetadata?.video?.colorSpace,
+  ]);
+
+  /**
+   * 构建 AV1 软件编码器高级参数。
+   * @returns 当前 AV1 编码器适用的高级参数；硬件编码器返回空字符串
+   */
+  const buildAv1AdvancedArgs = useCallback(() => {
+    if (formCodec !== "av1") {
+      return "";
+    }
+
+    if (formEncoder === "libaom-av1") {
+      const args = [`-cpu-used ${av1CpuUsed}`];
+      if (av1RowMt) {
+        args.push("-row-mt 1");
+      }
+      if (av1TileColumns && av1TileRows) {
+        // libaom 使用 CxR 表达 tile 布局，空值时交给编码器默认策略。
+        args.push(`-tiles ${av1TileColumns}x${av1TileRows}`);
+      }
+      return args.join(" ");
+    }
+
+    if (formEncoder === "svtav1") {
+      const params = [`tune=${av1SvtTune}`];
+      if (av1FilmGrain !== "0") {
+        params.push(`film-grain=${av1FilmGrain}`);
+      }
+      return `-svtav1-params ${params.join(":")}`;
+    }
+
+    return "";
+  }, [
+    formCodec,
+    formEncoder,
+    av1CpuUsed,
+    av1RowMt,
+    av1TileColumns,
+    av1TileRows,
+    av1SvtTune,
+    av1FilmGrain,
+  ]);
+
+  /**
+   * 合并结构化表单无法直接表达的 FFmpeg 参数。
+   * @returns 可直接提交给后端的 advancedArgs
+   */
+  const buildAdvancedArgs = useCallback(() => {
+    const args = [
+      formMode !== "CRF"
+        ? `-b:v ${formBitrateKbps}k -maxrate ${formMaxrateKbps}k -bufsize ${formBufsizeKbps}k`
+        : "",
+      buildColorArgs(),
+      buildAv1AdvancedArgs(),
+    ].filter(Boolean);
+
+    return args.join(" ");
+  }, [
+    formMode,
+    formBitrateKbps,
+    formMaxrateKbps,
+    formBufsizeKbps,
+    buildColorArgs,
+    buildAv1AdvancedArgs,
+  ]);
+
   const taskDraftSnapshot = useMemo<TaskDraftSnapshot>(
     () => ({
       name: "preview-draft",
@@ -243,34 +351,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
         format: "mp4",
         faststart: true,
       },
-      advancedArgs:
-        formMode !== "CRF"
-          ? `-b:v ${formBitrateKbps}k -maxrate ${formMaxrateKbps}k -bufsize ${formBufsizeKbps}k -color_primaries ${
-              preserveDolbyVisionMetadata
-                ? videoMetadata?.video?.colorPrimaries ?? formColorPrimaries
-                : formColorPrimaries
-            } -color_trc ${
-              preserveDolbyVisionMetadata
-                ? videoMetadata?.video?.colorTransfer ?? formColorTrc
-                : formColorTrc
-            } -colorspace ${
-              preserveDolbyVisionMetadata
-                ? videoMetadata?.video?.colorSpace ?? formColorspace
-                : formColorspace
-            }`
-          : `-color_primaries ${
-              preserveDolbyVisionMetadata
-                ? videoMetadata?.video?.colorPrimaries ?? formColorPrimaries
-                : formColorPrimaries
-            } -color_trc ${
-              preserveDolbyVisionMetadata
-                ? videoMetadata?.video?.colorTransfer ?? formColorTrc
-                : formColorTrc
-            } -colorspace ${
-              preserveDolbyVisionMetadata
-                ? videoMetadata?.video?.colorSpace ?? formColorspace
-                : formColorspace
-            }`,
+      advancedArgs: buildAdvancedArgs(),
       output: {
         dir: "",
         fileNamePattern: "{inputName}_{taskName}",
@@ -293,12 +374,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formBitrateKbps,
       formMaxrateKbps,
       formBufsizeKbps,
-      formColorPrimaries,
-      formColorTrc,
-      formColorspace,
-      videoMetadata?.video?.colorPrimaries,
-      videoMetadata?.video?.colorTransfer,
-      videoMetadata?.video?.colorSpace,
+      buildAdvancedArgs,
     ],
   );
 
@@ -342,6 +418,18 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setFormColorTrc,
       formColorspace,
       setFormColorspace,
+      av1CpuUsed,
+      setAv1CpuUsed,
+      av1RowMt,
+      setAv1RowMt,
+      av1TileColumns,
+      setAv1TileColumns,
+      av1TileRows,
+      setAv1TileRows,
+      av1SvtTune,
+      setAv1SvtTune,
+      av1FilmGrain,
+      setAv1FilmGrain,
       sourceFilePath,
       setSourceFilePath,
       videoMetadata,
@@ -372,6 +460,12 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formColorPrimaries,
       formColorTrc,
       formColorspace,
+      av1CpuUsed,
+      av1RowMt,
+      av1TileColumns,
+      av1TileRows,
+      av1SvtTune,
+      av1FilmGrain,
       sourceFilePath,
       videoMetadata,
       videoMetadataLoading,

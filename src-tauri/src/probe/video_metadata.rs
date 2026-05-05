@@ -209,7 +209,12 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         .as_deref()
         .and_then(parse_u64)
         .and_then(|v| u8::try_from(v).ok())
-        .or_else(|| stream.pix_fmt.as_deref().and_then(infer_bit_depth_from_pix_fmt));
+        .or_else(|| {
+            stream
+                .pix_fmt
+                .as_deref()
+                .and_then(infer_bit_depth_from_pix_fmt)
+        });
 
     let hdr_type = detect_hdr_type(stream);
 
@@ -252,7 +257,10 @@ fn map_audio_stream(stream: &FfprobeStream) -> AudioStreamMetadata {
     }
 }
 
-fn build_tags(container_format: &Option<String>, video: Option<&VideoStreamMetadata>) -> Vec<String> {
+fn build_tags(
+    container_format: &Option<String>,
+    video: Option<&VideoStreamMetadata>,
+) -> Vec<String> {
     let mut set = BTreeSet::new();
 
     if let Some(video) = video {
@@ -302,7 +310,12 @@ fn detect_hdr_type(stream: &FfprobeStream) -> HdrType {
         .as_deref()
         .and_then(parse_u64)
         .and_then(|value| u8::try_from(value).ok())
-        .or_else(|| stream.pix_fmt.as_deref().and_then(infer_bit_depth_from_pix_fmt));
+        .or_else(|| {
+            stream
+                .pix_fmt
+                .as_deref()
+                .and_then(infer_bit_depth_from_pix_fmt)
+        });
     let pix_fmt = stream.pix_fmt.as_deref().unwrap_or_default().to_lowercase();
 
     if contains_dolby_vision_hint(stream) {
@@ -463,7 +476,10 @@ mod tests {
 
     #[test]
     fn parse_fraction_should_work() {
-        assert_eq!(parse_fraction("30000/1001").map(|v| v.round() as i32), Some(30));
+        assert_eq!(
+            parse_fraction("30000/1001").map(|v| v.round() as i32),
+            Some(30)
+        );
         assert_eq!(parse_fraction("25/1"), Some(25.0));
         assert_eq!(parse_fraction("0/0"), None);
     }

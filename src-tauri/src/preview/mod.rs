@@ -16,11 +16,12 @@ use uuid::Uuid;
 use crate::{
     commands::error::{CommandError, CommandResult},
     models::{task::Resolution, TaskConfigPayload, Validate},
-    transcode::command_builder::{build_preview_command_args, PreviewCommandOptions},
+    transcode::command_builder::{
+        build_preview_decode_frame_command_args, build_preview_encoded_frame_command_args,
+        build_source_frame_command_args, PreviewCommandOptions,
+    },
 };
 
-const PREVIEW_CLIP_DURATION_MS: u64 = 6_000;
-const PREVIEW_CLIP_LEAD_MS: u64 = 1_000;
 const MIN_RENDER_INTERVAL_MS: u64 = 500;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -85,23 +86,11 @@ pub struct StopPreviewResponse {
 pub struct PreviewFrameEvent {
     pub preview_session_id: String,
     pub time_ms: u64,
-    pub media_path: Option<String>,
-    pub media_kind: PreviewMediaKind,
-    pub image_path: Option<String>,
-    pub base64: Option<String>,
-    pub clip_start_ms: u64,
-    pub clip_end_ms: u64,
+    pub source_image_path: Option<String>,
+    pub preview_image_path: Option<String>,
     pub width: u32,
     pub height: u32,
     pub seq: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub enum PreviewMediaKind {
-    Video,
-    Image,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,18 +129,25 @@ struct PreviewSession {
     degraded_from_two_pass: bool,
     seq: u64,
     last_render_started_at: Option<Instant>,
+    deferred_seq: Option<u64>,
 }
 
 #[derive(Clone)]
 struct RunningPreviewProcess {
     seq: u64,
     child: Arc<Mutex<Option<Child>>>,
+    encoded_path: PathBuf,
 }
 
 struct RenderRequest {
     session: PreviewSession,
-    should_render: bool,
-    delay_ms: u64,
+    decision: RenderDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RenderDecision {
+    Immediate,
+    Deferred { delay_ms: u64 },
 }
 
 #[derive(Clone, Default)]
@@ -174,20 +170,20 @@ impl PreviewManager {
 
     pub fn start_session<R: Runtime>(
         &self,
-        app: AppHandle<R>,
+        _app: AppHandle<R>,
         payload: PreviewConfig,
     ) -> CommandResult<StartPreviewResponse> {
         validate_preview_input(&payload)?;
 
         let degraded_from_two_pass = payload.task_config_snapshot.video.enable_two_pass;
-        let mut session = PreviewSession {
+        let session = PreviewSession {
             id: Uuid::new_v4().to_string(),
             config: sanitize_preview_config(payload)?,
             degraded_from_two_pass,
             seq: 1,
             last_render_started_at: None,
+            deferred_seq: None,
         };
-        session.last_render_started_at = Some(Instant::now());
 
         let response = StartPreviewResponse {
             preview_session_id: session.id.clone(),
@@ -199,13 +195,6 @@ impl PreviewManager {
             .map_err(|_| CommandError::new("preview_lock_failed", "preview session lock poisoned"))?
             .insert(session.id.clone(), session.clone());
 
-        if let Err(err) = self.schedule_render(app, session.clone(), PreviewState::Warming) {
-            if let Ok(mut sessions) = self.sessions.lock() {
-                sessions.remove(&session.id);
-            }
-            self.cleanup_session_dir(&session.id);
-            return Err(err);
-        }
         Ok(response)
     }
 
@@ -233,11 +222,14 @@ impl PreviewManager {
             degraded_from_two_pass: render_request.session.degraded_from_two_pass,
         };
 
-        if render_request.should_render {
-            self.cancel_process(preview_session_id);
-            self.schedule_render(app, render_request.session, PreviewState::Updating)?;
-        } else {
-            self.schedule_deferred_render(app, render_request.session, render_request.delay_ms);
+        match render_request.decision {
+            RenderDecision::Immediate => {
+                self.cancel_process(preview_session_id);
+                self.schedule_render(app, render_request.session, PreviewState::Updating)?;
+            }
+            RenderDecision::Deferred { delay_ms } => {
+                self.schedule_deferred_render(app, render_request.session, delay_ms);
+            }
         }
         Ok(response)
     }
@@ -367,11 +359,12 @@ impl PreviewManager {
                 let Some(latest) = sessions.get_mut(&session.id) else {
                     return;
                 };
-                if latest.seq != session.seq {
+                if !is_current_deferred_render(latest, session.seq) {
                     return;
                 }
 
                 // 延迟补渲染真正启动时再更新时间戳，避免后续更新继续被同一窗口节流。
+                latest.deferred_seq = None;
                 latest.last_render_started_at = Some(Instant::now());
                 latest.clone()
             };
@@ -400,8 +393,17 @@ impl PreviewManager {
         fs::create_dir_all(&session_dir)
             .map_err(|err| CommandError::new("preview_runtime_failed", err.to_string()))?;
 
-        let output_path = session_dir.join(format!("clip-{}.mp4", session.seq));
-        cleanup_old_preview_media(&session_dir, &output_path);
+        let output_path = session_dir.join(format!("preview-{}.png", session.seq));
+        let source_path = session_dir.join(format!("source-{}.png", session.seq));
+        let encoded_path = session_dir.join(format!("preview-{}.mkv", session.seq));
+        cleanup_old_preview_media(
+            &session_dir,
+            &[
+                output_path.as_path(),
+                source_path.as_path(),
+                encoded_path.as_path(),
+            ],
+        );
 
         let time_ms = session
             .config
@@ -415,20 +417,32 @@ impl PreviewManager {
             })
             .unwrap_or(0);
 
-        let clip_start_ms = time_ms.saturating_sub(PREVIEW_CLIP_LEAD_MS);
-        let mut args = build_preview_command_args(
+        let mut source_args = build_source_frame_command_args(
+            &session.config.input_file,
+            &source_path.to_string_lossy(),
+            PreviewCommandOptions {
+                time_sec: time_ms as f64 / 1000.0,
+                render_scale: session.config.render_scale,
+            },
+        )
+        .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
+        source_args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
+
+        // 源图用作左侧基准层，避免 WebView 直接解码用户原始文件失败。
+        run_blocking_ffmpeg_args(source_args, &source_path)?;
+
+        let mut args = build_preview_encoded_frame_command_args(
             &session.config.task_config_snapshot,
             &session.config.input_file,
-            &output_path.to_string_lossy(),
+            &encoded_path.to_string_lossy(),
             PreviewCommandOptions {
-                start_sec: clip_start_ms as f64 / 1000.0,
-                duration_sec: PREVIEW_CLIP_DURATION_MS as f64 / 1000.0,
+                time_sec: time_ms as f64 / 1000.0,
                 render_scale: session.config.render_scale,
             },
         )
         .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
 
-        // 预览命令只在本地执行，loglevel 放在最前，便于失败时直接返回关键错误。
+        // 先编码单帧再解码为 PNG，避免 WebView 播放目标编码格式，同时保留编码质量差异。
         args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
 
         let child = Command::new("ffmpeg")
@@ -442,6 +456,7 @@ impl PreviewManager {
         let process = RunningPreviewProcess {
             seq: session.seq,
             child: child_slot.clone(),
+            encoded_path,
         };
 
         match self.processes.lock() {
@@ -482,7 +497,8 @@ impl PreviewManager {
             })?
             .join("preview")
             .join(&session.id);
-        let output_path = session_dir.join(format!("clip-{}.mp4", session.seq));
+        let output_path = session_dir.join(format!("preview-{}.png", session.seq));
+        let source_path = session_dir.join(format!("source-{}.png", session.seq));
 
         loop {
             let mut child_guard = process.child.lock().map_err(|_| {
@@ -510,8 +526,18 @@ impl PreviewManager {
 
                     if !status.success() {
                         let _ = fs::remove_file(&output_path);
+                        let _ = fs::remove_file(&process.encoded_path);
                         return Err(CommandError::new("preview_render_failed", stderr));
                     }
+
+                    let mut decode_args = build_preview_decode_frame_command_args(
+                        &process.encoded_path.to_string_lossy(),
+                        &output_path.to_string_lossy(),
+                    )
+                    .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
+                    decode_args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
+                    run_blocking_ffmpeg_args(decode_args, &output_path)?;
+                    let _ = fs::remove_file(&process.encoded_path);
 
                     break;
                 }
@@ -533,19 +559,13 @@ impl PreviewManager {
                     .map(|range| range.start_ms)
             })
             .unwrap_or(0);
-        let clip_start_ms = time_ms.saturating_sub(PREVIEW_CLIP_LEAD_MS);
-        let clip_end_ms = clip_start_ms + PREVIEW_CLIP_DURATION_MS;
         let (width, height) = estimate_dimensions(&session.config);
 
         Ok(PreviewFrameEvent {
             preview_session_id: session.id.clone(),
             time_ms,
-            media_path: Some(output_path.to_string_lossy().to_string()),
-            media_kind: PreviewMediaKind::Video,
-            image_path: None,
-            base64: None,
-            clip_start_ms,
-            clip_end_ms,
+            source_image_path: Some(source_path.to_string_lossy().to_string()),
+            preview_image_path: Some(output_path.to_string_lossy().to_string()),
             width,
             height,
             seq: session.seq,
@@ -593,6 +613,25 @@ impl PreviewManager {
             let _ = fs::remove_dir_all(session_dir);
         }
     }
+}
+
+fn run_blocking_ffmpeg_args(args: Vec<String>, output_path: &Path) -> Result<(), CommandError> {
+    let output = Command::new("ffmpeg")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
+
+    if !output.status.success() {
+        let _ = fs::remove_file(output_path);
+        return Err(CommandError::new(
+            "preview_render_failed",
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_preview_input(payload: &PreviewConfig) -> CommandResult<()> {
@@ -653,15 +692,25 @@ fn build_render_request(session: &mut PreviewSession, min_interval_ms: u64) -> R
         .unwrap_or(min_interval_ms);
     let should_render = elapsed_ms >= min_interval_ms;
 
-    if should_render {
+    let decision = if should_render {
         session.last_render_started_at = Some(now);
-    }
+        session.deferred_seq = None;
+        RenderDecision::Immediate
+    } else {
+        session.deferred_seq = Some(session.seq);
+        RenderDecision::Deferred {
+            delay_ms: min_interval_ms.saturating_sub(elapsed_ms),
+        }
+    };
 
     RenderRequest {
         session: session.clone(),
-        should_render,
-        delay_ms: min_interval_ms.saturating_sub(elapsed_ms),
+        decision,
     }
+}
+
+fn is_current_deferred_render(session: &PreviewSession, seq: u64) -> bool {
+    session.seq == seq && session.deferred_seq == Some(seq)
 }
 
 #[cfg(test)]
@@ -700,7 +749,7 @@ fn estimate_dimensions(config: &PreviewConfig) -> (u32, u32) {
     (0, 0)
 }
 
-fn cleanup_old_preview_media(session_dir: &Path, active_file: &Path) {
+fn cleanup_old_preview_media(session_dir: &Path, active_files: &[&Path]) {
     let entries = match fs::read_dir(session_dir) {
         Ok(value) => value,
         Err(_) => return,
@@ -710,9 +759,10 @@ fn cleanup_old_preview_media(session_dir: &Path, active_file: &Path) {
         let path = entry.path();
         let is_preview_media = matches!(
             path.extension().and_then(|value| value.to_str()),
-            Some("jpg") | Some("mp4")
+            // PNG/JPG 可能已被独立预览窗口复用；保留到 session 结束，避免路径失效。
+            Some("mp4") | Some("mkv")
         );
-        if is_preview_media && path != active_file {
+        if is_preview_media && !active_files.iter().any(|active_file| path == *active_file) {
             let _ = fs::remove_file(path);
         }
     }
@@ -736,8 +786,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        build_preview_filter, build_render_request, sanitize_preview_config, CompareOrientation,
-        PreviewConfig,
+        build_preview_filter, build_render_request, is_current_deferred_render,
+        sanitize_preview_config, CompareOrientation, PreviewConfig, RenderDecision,
     };
 
     fn payload() -> PreviewConfig {
@@ -808,14 +858,15 @@ mod tests {
             degraded_from_two_pass: false,
             seq: 1,
             last_render_started_at: Some(Instant::now()),
+            deferred_seq: None,
         };
 
         session.seq += 1;
         let request = build_render_request(&mut session, 500);
 
-        assert!(!request.should_render);
+        assert!(matches!(request.decision, RenderDecision::Deferred { .. }));
         assert_eq!(request.session.seq, 2);
-        assert!(request.delay_ms <= 500);
+        assert_eq!(request.session.deferred_seq, Some(2));
     }
 
     #[test]
@@ -826,11 +877,36 @@ mod tests {
             degraded_from_two_pass: false,
             seq: 1,
             last_render_started_at: Some(Instant::now() - Duration::from_millis(600)),
+            deferred_seq: Some(1),
         };
 
         let request = build_render_request(&mut session, 500);
 
-        assert!(request.should_render);
-        assert_eq!(request.delay_ms, 0);
+        assert!(matches!(request.decision, RenderDecision::Immediate));
+        assert_eq!(request.session.deferred_seq, None);
+    }
+
+    #[test]
+    fn newer_deferred_render_should_invalidate_older_seq() {
+        let mut session = super::PreviewSession {
+            id: "preview-c".to_string(),
+            config: payload(),
+            degraded_from_two_pass: false,
+            seq: 1,
+            last_render_started_at: Some(Instant::now()),
+            deferred_seq: None,
+        };
+
+        session.seq += 1;
+        let first = build_render_request(&mut session, 500);
+        assert!(matches!(first.decision, RenderDecision::Deferred { .. }));
+        assert!(is_current_deferred_render(&session, 2));
+
+        session.seq += 1;
+        let second = build_render_request(&mut session, 500);
+        assert!(matches!(second.decision, RenderDecision::Deferred { .. }));
+
+        assert!(!is_current_deferred_render(&session, 2));
+        assert!(is_current_deferred_render(&session, 3));
     }
 }

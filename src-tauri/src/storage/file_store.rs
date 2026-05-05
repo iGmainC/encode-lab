@@ -141,10 +141,11 @@ impl FileStore {
     {
         let backup = backup_path(path);
         // 读取备份失败则直接返回恢复失败错误。
-        let backup_content = fs::read_to_string(&backup).map_err(|err| StorageError::BackupRecoveryFailed {
-            path: backup.clone(),
-            reason: err.to_string(),
-        })?;
+        let backup_content =
+            fs::read_to_string(&backup).map_err(|err| StorageError::BackupRecoveryFailed {
+                path: backup.clone(),
+                reason: err.to_string(),
+            })?;
 
         // 备份内容也要经过 schema 校验，避免恢复到不合法数据。
         let data = self.parse_envelope::<T>(&backup_content)?;

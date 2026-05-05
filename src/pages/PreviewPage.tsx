@@ -1,16 +1,24 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { ComparePreviewPlayer } from "../components/workbench/ComparePreviewPlayer";
 import { PreviewInspector } from "../components/workbench/PreviewInspector";
 import { useTaskDraft } from "../context/TaskDraftContext";
-import type { ComparePreviewRuntime, TaskDraftSnapshot } from "../types/workbench";
+import {
+  DETACHED_PREVIEW_UPDATE_EVENT,
+  type DetachedPreviewPayload,
+  writeDetachedPreviewPayload,
+} from "../lib/detachedPreview";
+import type { CompareImageOrder, ComparePreviewRuntime, TaskDraftSnapshot } from "../types/workbench";
 
 type Props = {
   splitMode: "vertical" | "horizontal";
   setSplitMode: (mode: "vertical" | "horizontal") => void;
   splitterPosition: number;
   setSplitterPosition: (value: number) => void;
+  compareOrder: CompareImageOrder;
+  setCompareOrder: (value: CompareImageOrder) => void;
 };
 
 const emptyRuntime: ComparePreviewRuntime = {
@@ -24,11 +32,16 @@ const emptyRuntime: ComparePreviewRuntime = {
   isFullscreen: false,
 };
 
+/** 独立系统全屏预览窗口 label。 */
+const DETACHED_PREVIEW_WINDOW_LABEL = "preview-detached";
+
 export function PreviewPage({
   splitMode,
   setSplitMode,
   splitterPosition,
   setSplitterPosition,
+  compareOrder,
+  setCompareOrder,
 }: Props) {
   const {
     setStep,
@@ -40,24 +53,106 @@ export function PreviewPage({
     formTwoPass,
   } = useTaskDraft();
   const [runtime, setRuntime] = useState<ComparePreviewRuntime>(emptyRuntime);
+  const runtimeRef = useRef<ComparePreviewRuntime>(emptyRuntime);
+  const [detachedPreviewError, setDetachedPreviewError] = useState<string | null>(null);
+
+  /**
+   * 同步预览运行态，并保留 ref 供打开独立窗口时读取最新帧。
+   * @param value 子组件回传的预览运行态
+   */
+  const handleRuntimeChange = (value: ComparePreviewRuntime) => {
+    runtimeRef.current = value;
+    setRuntime(value);
+  };
+
+  /**
+   * 打开或唤起独立系统全屏预览窗口。
+   */
+  const openDetachedPreviewWindow = async (runtimeOverride?: ComparePreviewRuntime) => {
+    if (!sourceFilePath) {
+      setDetachedPreviewError("请先选择源视频后再打开独立预览窗口。");
+      return;
+    }
+
+    const latestRuntime = runtimeOverride ?? runtimeRef.current;
+    const payload: DetachedPreviewPayload = {
+      sourceFile: sourceFilePath,
+      sourceDurationSec: videoMetadata?.durationSec,
+      taskDraftSnapshot: taskDraftSnapshot as TaskDraftSnapshot,
+      splitMode,
+      splitterPosition,
+      compareOrder,
+      currentTimeSec: latestRuntime.currentTimeSec,
+      currentFrame: latestRuntime.currentFrame,
+      updatedAt: Date.now(),
+    };
+
+    setDetachedPreviewError(null);
+    writeDetachedPreviewPayload(payload);
+
+    try {
+      const existingWindow = await WebviewWindow.getByLabel(DETACHED_PREVIEW_WINDOW_LABEL);
+      if (existingWindow) {
+        // 已存在的独立窗口只同步快照并切回系统全屏，避免重复创建窗口。
+        await existingWindow.emit(DETACHED_PREVIEW_UPDATE_EVENT, payload);
+        await existingWindow.setFocus();
+        await existingWindow.setFullscreen(true);
+        return;
+      }
+
+      const detachedUrl = new URL(window.location.href);
+      detachedUrl.pathname = "/";
+      detachedUrl.search = "detachedPreview=1";
+      detachedUrl.hash = "";
+
+      const previewWindow = new WebviewWindow(DETACHED_PREVIEW_WINDOW_LABEL, {
+        url: detachedUrl.toString(),
+        title: "Encode Lab Preview",
+        width: 1280,
+        height: 720,
+        minWidth: 800,
+        minHeight: 450,
+        center: true,
+        resizable: true,
+        decorations: true,
+        focus: true,
+        fullscreen: true,
+      });
+
+      void previewWindow.once("tauri://created", () => {
+        // 窗口创建成功后再补发一次快照，覆盖 localStorage 读取时序差异。
+        void previewWindow.emit(DETACHED_PREVIEW_UPDATE_EVENT, payload);
+        void previewWindow.setFullscreen(true).catch(() => {});
+      });
+      void previewWindow.once("tauri://error", (event) => {
+        setDetachedPreviewError(`独立预览窗口创建失败：${String(event.payload)}`);
+      });
+    } catch (err) {
+      setDetachedPreviewError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
       <div className="space-y-4">
         <Card>
           <CardHeader>
-            <CardTitle>单播放器对比预览</CardTitle>
-            <CardDescription>主视频负责时间轴和播放控制，预览层实时接收最新渲染帧并覆盖显示。</CardDescription>
+            <CardTitle>按帧图片对比预览</CardTitle>
+            <CardDescription>时间轴定位当前帧，源帧与参数预览帧通过分割线叠放对比。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ComparePreviewPlayer
               sourceFile={sourceFilePath}
+              sourceDurationSec={videoMetadata?.durationSec}
               taskDraftSnapshot={taskDraftSnapshot as TaskDraftSnapshot}
               splitMode={splitMode}
               splitterPosition={splitterPosition}
+              compareOrder={compareOrder}
               onSplitModeChange={setSplitMode}
               onSplitterPositionChange={setSplitterPosition}
-              onRuntimeChange={setRuntime}
+              onCompareOrderChange={setCompareOrder}
+              onRuntimeChange={handleRuntimeChange}
+              onFullscreenButtonClick={(value) => void openDetachedPreviewWindow(value)}
             />
 
             <div className="rounded-2xl border p-4">
@@ -66,19 +161,36 @@ export function PreviewPage({
                   <div className="font-medium">预览控制区</div>
                   <p className="text-sm text-muted-foreground">进入队列前，在这里确认当前时间点、分割方式和预览状态是否符合预期。</p>
                 </div>
-                <Button
-                  onClick={() => {
-                    setStep("enqueue");
-                  }}
-                >
-                  加入队列
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="secondary"
+                    disabled={!sourceFilePath}
+                    onClick={() => void openDetachedPreviewWindow()}
+                  >
+                    系统全屏预览
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setStep("enqueue");
+                    }}
+                  >
+                    加入队列
+                  </Button>
+                </div>
               </div>
+              {detachedPreviewError ? (
+                <div className="mb-3 rounded-2xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                  {detachedPreviewError}
+                </div>
+              ) : null}
               <div className="grid gap-3 md:grid-cols-3">
                 <div className="rounded-2xl border p-3 text-sm">currentTime: {runtime.currentTimeSec.toFixed(2)}s</div>
                 <div className="rounded-2xl border p-3 text-sm">duration: {runtime.durationSec.toFixed(2)}s</div>
                 <div className="rounded-2xl border p-3 text-sm">
                   splitter: {(splitterPosition * 100).toFixed(0)}%
+                </div>
+                <div className="rounded-2xl border p-3 text-sm md:col-span-3">
+                  compare: {compareOrder === "source-first" ? "原始在左/上，转码后在右/下" : "转码后在左/上，原始在右/下"}
                 </div>
               </div>
             </div>

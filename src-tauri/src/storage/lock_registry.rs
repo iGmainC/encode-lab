@@ -15,10 +15,7 @@ pub struct LockRegistry {
 impl LockRegistry {
     pub fn lock_for(&self, path: &Path) -> Arc<Mutex<()>> {
         // 这里的 lock_map 锁只用于“分配/查找路径锁”，生命周期很短。
-        let mut lock_map = self
-            .lock_map
-            .lock()
-            .expect("lock registry mutex poisoned");
+        let mut lock_map = self.lock_map.lock().expect("lock registry mutex poisoned");
 
         lock_map
             .entry(path.to_path_buf())

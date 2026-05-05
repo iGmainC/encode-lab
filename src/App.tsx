@@ -5,6 +5,7 @@ import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { WorkbenchLayout } from "./components/workbench/WorkbenchLayout";
 import { TaskDraftProvider, useTaskDraft } from "./context/TaskDraftContext";
 import { JobsPage } from "./pages/JobsPage";
+import { DetachedPreviewPage } from "./pages/DetachedPreviewPage";
 import { PreviewPage } from "./pages/PreviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TaskConfigPage } from "./pages/TaskConfigPage";
@@ -85,6 +86,7 @@ function AppRoutes({
   const location = useLocation();
   const [splitMode, setSplitMode] = useState<"vertical" | "horizontal">("vertical");
   const [splitterPosition, setSplitterPosition] = useState(0.5);
+  const [compareOrder, setCompareOrder] = useState<"source-first" | "preview-first">("source-first");
   const {
     formCodec,
     formEncoder,
@@ -216,6 +218,8 @@ function AppRoutes({
                 setSplitMode={setSplitMode}
                 splitterPosition={splitterPosition}
                 setSplitterPosition={setSplitterPosition}
+                compareOrder={compareOrder}
+                setCompareOrder={setCompareOrder}
               />
             }
           />
@@ -238,7 +242,7 @@ function AppRoutes({
   );
 }
 
-function App() {
+function WorkbenchApp() {
   const [loading, setLoading] = useState(true);
   const [seeding, setSeeding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -319,6 +323,16 @@ function App() {
       />
     </TaskDraftProvider>
   );
+}
+
+function App() {
+  const isDetachedPreviewWindow = new URLSearchParams(window.location.search).has("detachedPreview");
+
+  if (isDetachedPreviewWindow) {
+    return <DetachedPreviewPage />;
+  }
+
+  return <WorkbenchApp />;
 }
 
 export default App;
