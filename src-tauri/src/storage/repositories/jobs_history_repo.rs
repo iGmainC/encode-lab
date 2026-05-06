@@ -23,4 +23,21 @@ impl JobsHistoryRepo {
     pub fn save_all(&self, jobs: &[JobHistory]) -> StorageResult<()> {
         self.store.save_data(&self.path, jobs)
     }
+
+    pub fn append(&self, job: JobHistory) -> StorageResult<()> {
+        let mut jobs = self.list()?;
+        jobs.push(job);
+        self.save_all(&jobs)
+    }
+
+    pub fn update(&self, job: &JobHistory) -> StorageResult<()> {
+        let mut jobs = self.list()?;
+        let existing = jobs
+            .iter_mut()
+            .find(|item| item.id == job.id)
+            .ok_or_else(|| crate::storage::errors::StorageError::NotFound(job.id.clone()))?;
+
+        *existing = job.clone();
+        self.save_all(&jobs)
+    }
 }

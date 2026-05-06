@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { WorkbenchLayout } from "./components/workbench/WorkbenchLayout";
@@ -14,18 +15,13 @@ import type {
   AppSettings,
   CreateTaskResponse,
   EncoderCapabilityResult,
+  EnqueueTranscodeJobResponse,
   FfmpegProbeResult,
-  ProtoJob,
+  JobHistory,
   SaveTemplateResponse,
   TaskConfig,
   Template,
 } from "./types/workbench";
-
-const jobsMock: ProtoJob[] = [
-  { id: "J-1001", name: "Meridian_UHD4k5994_HDR_P3PQ.mp4", status: "running", progress: 54, fps: 87, eta: "00:03:12" },
-  { id: "J-1002", name: "S01E02.mov", status: "queued", progress: 0, fps: 0, eta: "--" },
-  { id: "J-1003", name: "S01E03.mkv", status: "failed", progress: 29, fps: 0, eta: "00:08:40" },
-];
 
 const navItems = [
   { label: "任务配置", to: "/task-config" },
@@ -60,6 +56,7 @@ function buildSeedPayload(suffix: string) {
 function AppRoutes({
   settings,
   tasks,
+  jobs,
   templates,
   ffmpegProbe,
   encoderCapabilities,
@@ -69,9 +66,11 @@ function AppRoutes({
   seedMessage,
   onRefresh,
   onSeed,
+  onJobsChanged,
 }: {
   settings: AppSettings | null;
   tasks: TaskConfig[];
+  jobs: JobHistory[];
   templates: Template[];
   ffmpegProbe: FfmpegProbeResult | null;
   encoderCapabilities: EncoderCapabilityResult | null;
@@ -81,6 +80,7 @@ function AppRoutes({
   seedMessage: string | null;
   onRefresh: () => void;
   onSeed: () => void;
+  onJobsChanged: () => void;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -97,6 +97,8 @@ function AppRoutes({
     setFormMode,
     formTwoPass,
     setFormTwoPass,
+    sourceFilePath,
+    taskDraftSnapshot,
   } = useTaskDraft();
 
   const pageMeta = useMemo(() => {
@@ -171,6 +173,24 @@ function AppRoutes({
     setFormTwoPass,
   ]);
 
+  /**
+   * 将当前草稿保存为任务并发起后台转码。
+   */
+  const enqueueCurrentDraft = useCallback(async () => {
+    if (!sourceFilePath) {
+      return;
+    }
+
+    await invoke<EnqueueTranscodeJobResponse>("enqueue_transcode_job", {
+      request: {
+        payload: taskDraftSnapshot,
+        inputFile: sourceFilePath,
+      },
+    });
+    onJobsChanged();
+    navigate("/jobs");
+  }, [navigate, onJobsChanged, sourceFilePath, taskDraftSnapshot]);
+
   return (
     <WorkbenchLayout
       title={pageMeta.title}
@@ -220,10 +240,11 @@ function AppRoutes({
                 setSplitterPosition={setSplitterPosition}
                 compareOrder={compareOrder}
                 setCompareOrder={setCompareOrder}
+                onEnqueue={enqueueCurrentDraft}
               />
             }
           />
-          <Route path="/jobs" element={<JobsPage jobs={jobsMock} />} />
+          <Route path="/jobs" element={<JobsPage jobs={jobs} />} />
           <Route
             path="/templates"
             element={
@@ -249,6 +270,7 @@ function WorkbenchApp() {
   const [seedMessage, setSeedMessage] = useState<string | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [tasks, setTasks] = useState<TaskConfig[]>([]);
+  const [jobs, setJobs] = useState<JobHistory[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [ffmpegProbe, setFfmpegProbe] = useState<FfmpegProbeResult | null>(null);
   const [encoderCapabilities, setEncoderCapabilities] = useState<EncoderCapabilityResult | null>(null);
@@ -257,10 +279,11 @@ function WorkbenchApp() {
     setLoading(true);
     setError(null);
     try {
-      const [settingsResult, tasksResult, templatesResult, ffmpegProbeResult, encoderCapabilitiesResult] =
+      const [settingsResult, tasksResult, jobsResult, templatesResult, ffmpegProbeResult, encoderCapabilitiesResult] =
         await Promise.all([
           invoke<AppSettings>("get_settings"),
           invoke<TaskConfig[]>("list_tasks"),
+          invoke<JobHistory[]>("list_jobs"),
           invoke<Template[]>("list_templates"),
           invoke<FfmpegProbeResult>("detect_ffmpeg"),
           invoke<EncoderCapabilityResult>("list_encoder_capabilities"),
@@ -268,6 +291,7 @@ function WorkbenchApp() {
 
       setSettings(settingsResult);
       setTasks(tasksResult);
+      setJobs(jobsResult);
       setTemplates(templatesResult);
       setFfmpegProbe(ffmpegProbeResult);
       setEncoderCapabilities(encoderCapabilitiesResult);
@@ -306,11 +330,27 @@ function WorkbenchApp() {
     void fetchAll();
   }, [fetchAll]);
 
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    void listen<JobHistory>("job:updated", () => {
+      void fetchAll();
+    }).then((unlisten) => {
+      dispose = unlisten;
+    });
+
+    return () => {
+      if (dispose) {
+        dispose();
+      }
+    };
+  }, [fetchAll]);
+
   return (
     <TaskDraftProvider>
       <AppRoutes
         settings={settings}
         tasks={tasks}
+        jobs={jobs}
         templates={templates}
         ffmpegProbe={ffmpegProbe}
         encoderCapabilities={encoderCapabilities}
@@ -320,6 +360,7 @@ function WorkbenchApp() {
         seedMessage={seedMessage}
         onRefresh={() => void fetchAll()}
         onSeed={() => void seedDemoData()}
+        onJobsChanged={() => void fetchAll()}
       />
     </TaskDraftProvider>
   );

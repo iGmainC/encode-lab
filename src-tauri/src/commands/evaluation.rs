@@ -263,11 +263,14 @@ mod tests {
         let job = JobHistory {
             id: "job-1".to_string(),
             task_id: "task-1".to_string(),
+            name: None,
             input_file: "source.mp4".to_string(),
             output_file: "output.mp4".to_string(),
             status: "failed".to_string(),
+            command_line: None,
             error: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: None,
             ended_at: None,
         };
 

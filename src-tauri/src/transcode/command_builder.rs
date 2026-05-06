@@ -35,6 +35,26 @@ pub fn build_ffmpeg_commands(
     input_file: &str,
     output_file: &str,
 ) -> StorageResult<CommandBuildOutput> {
+    let command_args = build_ffmpeg_command_args(payload, input_file, output_file)?;
+    let mut warnings = codec_strategy_warnings(payload);
+    let sanitized_advanced =
+        sanitize_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
+
+    Ok(CommandBuildOutput {
+        commands: command_args
+            .iter()
+            .map(|args| format!("ffmpeg {}", shell_join(args)))
+            .collect(),
+        warnings,
+        sanitized_advanced_args: sanitized_advanced,
+    })
+}
+
+pub fn build_ffmpeg_command_args(
+    payload: &TaskConfigPayload,
+    input_file: &str,
+    output_file: &str,
+) -> StorageResult<Vec<Vec<String>>> {
     if input_file.trim().is_empty() || output_file.trim().is_empty() {
         return Err(StorageError::InvalidPayload(
             "input/output file cannot be empty".to_string(),
@@ -59,11 +79,11 @@ pub fn build_ffmpeg_commands(
         None
     };
 
-    let command_args = if payload.video.enable_two_pass {
+    if payload.video.enable_two_pass {
         let passlog_path = passlog_path.as_deref().ok_or_else(|| {
             StorageError::InvalidPayload("passlog path is required for 2-pass".to_string())
         })?;
-        vec![
+        Ok(vec![
             build_pass1_args(
                 payload,
                 input_file,
@@ -77,24 +97,15 @@ pub fn build_ffmpeg_commands(
                 passlog_path,
                 sanitized_advanced.as_deref(),
             )?,
-        ]
+        ])
     } else {
-        vec![build_single_pass_args(
+        Ok(vec![build_single_pass_args(
             payload,
             input_file,
             output_file,
             sanitized_advanced.as_deref(),
-        )?]
-    };
-
-    Ok(CommandBuildOutput {
-        commands: command_args
-            .iter()
-            .map(|args| format!("ffmpeg {}", shell_join(args)))
-            .collect(),
-        warnings,
-        sanitized_advanced_args: sanitized_advanced,
-    })
+        )?])
+    }
 }
 
 pub fn build_preview_encoded_frame_command_args(

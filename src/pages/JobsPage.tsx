@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { JobDetailPanel } from "../components/workbench/JobDetailPanel";
-import type { ProtoJob } from "../types/workbench";
+import type { JobHistory } from "../types/workbench";
 
 type Props = {
-  jobs: ProtoJob[];
+  jobs: JobHistory[];
 };
 
 export function JobsPage({ jobs }: Props) {
@@ -14,6 +14,17 @@ export function JobsPage({ jobs }: Props) {
   const runningCount = jobs.filter((job) => job.status === "running").length;
   const queuedCount = jobs.filter((job) => job.status === "queued").length;
   const failedCount = jobs.filter((job) => job.status === "failed").length;
+
+  useEffect(() => {
+    if (!selectedJobId && jobs[0]) {
+      setSelectedJobId(jobs[0].id);
+      return;
+    }
+
+    if (selectedJobId && !jobs.some((job) => job.id === selectedJobId)) {
+      setSelectedJobId(jobs[0]?.id ?? null);
+    }
+  }, [jobs, selectedJobId]);
 
   return (
     <div className="space-y-6">
@@ -56,9 +67,9 @@ export function JobsPage({ jobs }: Props) {
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="font-medium">{job.name}</div>
+                    <div className="font-medium">{job.name ?? job.outputFile}</div>
                     <div className="mt-1 text-sm text-muted-foreground">
-                      进度 {job.progress}% · fps {job.fps} · eta {job.eta}
+                      输出 {job.outputFile}
                     </div>
                   </div>
                   <Badge variant={job.status === "running" ? "default" : "secondary"}>

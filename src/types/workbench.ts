@@ -7,7 +7,7 @@ export type AppSettings = {
 
 export type TaskConfig = {
   id: string;
-  name: string;
+  name?: string | null;
 };
 
 export type Template = {
@@ -71,6 +71,14 @@ export type VideoStreamMetadata = {
   colorSpace?: string;
   bitDepth?: number;
   hdrType?: "Sdr" | "Hdr10" | "Hlg" | "DolbyVision" | "Unknown";
+  /** HDR10 MaxCLL，单位 nit */
+  maxContentLightLevel?: number | null;
+  /** HDR10 MaxFALL，单位 nit */
+  maxFrameAverageLightLevel?: number | null;
+  /** mastering display 最大亮度，单位 nit */
+  masteringDisplayMaxLuminance?: number | null;
+  /** mastering display 最小亮度，单位 nit */
+  masteringDisplayMinLuminance?: number | null;
 };
 
 export type AudioStreamMetadata = {
@@ -93,13 +101,27 @@ export type VideoMetadataResult = {
   rawProbeVersion?: string;
 };
 
-export type ProtoJob = {
+export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "canceled";
+
+/** 后端任务历史记录。 */
+export type JobHistory = {
   id: string;
+  taskId: string;
   name: string;
-  status: "queued" | "running" | "paused" | "completed" | "failed";
-  progress: number;
-  fps: number;
-  eta: string;
+  inputFile: string;
+  outputFile: string;
+  status: JobStatus;
+  commandLine?: string | null;
+  error?: string | null;
+  createdAt: string;
+  startedAt?: string | null;
+  endedAt?: string | null;
+};
+
+export type EnqueueTranscodeJobResponse = {
+  taskId: string;
+  jobId: string;
+  outputFile: string;
 };
 
 export type TaskDraftStep = "source" | "config" | "preview" | "enqueue";

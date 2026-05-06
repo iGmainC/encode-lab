@@ -19,6 +19,7 @@ type Props = {
   setSplitterPosition: (value: number) => void;
   compareOrder: CompareImageOrder;
   setCompareOrder: (value: CompareImageOrder) => void;
+  onEnqueue: () => Promise<void>;
 };
 
 const emptyRuntime: ComparePreviewRuntime = {
@@ -54,6 +55,7 @@ export function PreviewPage({
   setSplitterPosition,
   compareOrder,
   setCompareOrder,
+  onEnqueue,
 }: Props) {
   const {
     setStep,
@@ -185,8 +187,10 @@ export function PreviewPage({
                     系统全屏预览
                   </Button>
                   <Button
+                    disabled={!sourceFilePath}
                     onClick={() => {
                       setStep("enqueue");
+                      void onEnqueue();
                     }}
                   >
                     加入队列

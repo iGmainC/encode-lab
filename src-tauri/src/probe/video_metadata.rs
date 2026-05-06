@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{collections::BTreeSet, path::Path, process::Command};
 
 use crate::commands::error::CommandError;
@@ -33,6 +34,10 @@ pub struct VideoStreamMetadata {
     pub color_space: Option<String>,
     pub bit_depth: Option<u8>,
     pub hdr_type: Option<HdrType>,
+    pub max_content_light_level: Option<u32>,
+    pub max_frame_average_light_level: Option<u32>,
+    pub mastering_display_max_luminance: Option<f64>,
+    pub mastering_display_min_luminance: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,7 +93,7 @@ struct FfprobeStream {
     channels: Option<u32>,
     sample_rate: Option<String>,
     channel_layout: Option<String>,
-    side_data_list: Option<Vec<serde_json::Value>>,
+    side_data_list: Option<Vec<Value>>,
 }
 
 pub fn read_video_metadata(input_file: &str) -> Result<VideoMetadataResult, CommandError> {
@@ -217,6 +222,10 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         });
 
     let hdr_type = detect_hdr_type(stream);
+    let (max_content_light_level, max_frame_average_light_level) =
+        extract_content_light_level(stream);
+    let (mastering_display_max_luminance, mastering_display_min_luminance) =
+        extract_mastering_luminance(stream);
 
     VideoStreamMetadata {
         codec_name: stream.codec_name.clone(),
@@ -236,6 +245,10 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         color_space: stream.color_space.clone(),
         bit_depth,
         hdr_type: Some(hdr_type),
+        max_content_light_level,
+        max_frame_average_light_level,
+        mastering_display_max_luminance,
+        mastering_display_min_luminance,
     }
 }
 
@@ -370,6 +383,90 @@ fn contains_dolby_vision_hint(stream: &FfprobeStream) -> bool {
     ["dovi", "dvhe", "dvh1", "dolby vision"]
         .iter()
         .any(|needle| lower.contains(needle))
+}
+
+fn extract_content_light_level(stream: &FfprobeStream) -> (Option<u32>, Option<u32>) {
+    let Some(side_data_list) = &stream.side_data_list else {
+        return (None, None);
+    };
+
+    let mut max_content_light_level = None;
+    let mut max_frame_average_light_level = None;
+
+    for side_data in side_data_list {
+        let side_data_type = side_data
+            .get("side_data_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_lowercase();
+
+        if !side_data_type.contains("content light") {
+            continue;
+        }
+
+        // HDR10 的 MaxCLL/MaxFALL 常以 max_content/max_average 输出。
+        max_content_light_level =
+            read_u32_side_data(side_data, "max_content").or(max_content_light_level);
+        max_frame_average_light_level =
+            read_u32_side_data(side_data, "max_average").or(max_frame_average_light_level);
+    }
+
+    (max_content_light_level, max_frame_average_light_level)
+}
+
+fn extract_mastering_luminance(stream: &FfprobeStream) -> (Option<f64>, Option<f64>) {
+    let Some(side_data_list) = &stream.side_data_list else {
+        return (None, None);
+    };
+
+    let mut max_luminance = None;
+    let mut min_luminance = None;
+
+    for side_data in side_data_list {
+        let side_data_type = side_data
+            .get("side_data_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_lowercase();
+
+        if !side_data_type.contains("mastering display") {
+            continue;
+        }
+
+        // mastering display metadata 可作为 HDR 预览提示的亮度参考。
+        max_luminance = read_f64_side_data(side_data, "max_luminance").or(max_luminance);
+        min_luminance = read_f64_side_data(side_data, "min_luminance").or(min_luminance);
+    }
+
+    (max_luminance, min_luminance)
+}
+
+fn read_u32_side_data(side_data: &Value, key: &str) -> Option<u32> {
+    let value = side_data.get(key)?;
+    value
+        .as_u64()
+        .and_then(|number| u32::try_from(number).ok())
+        .or_else(|| value.as_str().and_then(parse_u32_string))
+}
+
+fn read_f64_side_data(side_data: &Value, key: &str) -> Option<f64> {
+    let value = side_data.get(key)?;
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(parse_luminance_string))
+}
+
+fn parse_u32_string(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok()
+}
+
+fn parse_luminance_string(value: &str) -> Option<f64> {
+    let trimmed = value.trim();
+    if trimmed.contains('/') {
+        return parse_fraction(trimmed);
+    }
+
+    trimmed.parse::<f64>().ok()
 }
 
 fn normalize_codec_tag(codec_name: &str) -> String {
@@ -594,6 +691,10 @@ mod tests {
             color_space: None,
             bit_depth: Some(10),
             hdr_type: Some(HdrType::Hdr10),
+            max_content_light_level: Some(1000),
+            max_frame_average_light_level: Some(400),
+            mastering_display_max_luminance: Some(1000.0),
+            mastering_display_min_luminance: Some(0.005),
         };
 
         let tags = build_tags(&Some("mov,mp4,m4a,3gp,3g2,mj2".to_string()), Some(&video));
@@ -602,5 +703,48 @@ mod tests {
         assert!(tags.contains(&"10-bit".to_string()));
         assert!(tags.contains(&"4K".to_string()));
         assert!(tags.contains(&"MP4/MOV".to_string()));
+    }
+
+    #[test]
+    fn hdr_side_data_should_extract_light_levels() {
+        let stream = FfprobeStream {
+            codec_type: Some("video".to_string()),
+            codec_name: Some("hevc".to_string()),
+            codec_long_name: None,
+            codec_tag_string: None,
+            profile: None,
+            width: Some(3840),
+            height: Some(2160),
+            pix_fmt: Some("yuv420p10le".to_string()),
+            avg_frame_rate: None,
+            r_frame_rate: None,
+            bit_rate: None,
+            bits_per_raw_sample: Some("10".to_string()),
+            color_primaries: Some("bt2020".to_string()),
+            color_transfer: Some("smpte2084".to_string()),
+            color_space: Some("bt2020nc".to_string()),
+            channels: None,
+            sample_rate: None,
+            channel_layout: None,
+            side_data_list: Some(vec![
+                serde_json::json!({
+                    "side_data_type": "Content light level metadata",
+                    "max_content": 1000,
+                    "max_average": 400
+                }),
+                serde_json::json!({
+                    "side_data_type": "Mastering display metadata",
+                    "max_luminance": "10000000/10000",
+                    "min_luminance": "50/10000"
+                }),
+            ]),
+        };
+
+        let video = map_video_stream(&stream);
+
+        assert_eq!(video.max_content_light_level, Some(1000));
+        assert_eq!(video.max_frame_average_light_level, Some(400));
+        assert_eq!(video.mastering_display_max_luminance, Some(1000.0));
+        assert_eq!(video.mastering_display_min_luminance, Some(0.005));
     }
 }

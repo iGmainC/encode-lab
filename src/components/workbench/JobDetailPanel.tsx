@@ -1,8 +1,8 @@
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
-import type { ProtoJob } from "../../types/workbench";
+import type { JobHistory } from "../../types/workbench";
 
-export function JobDetailPanel({ job }: { job: ProtoJob | null }) {
+export function JobDetailPanel({ job }: { job: JobHistory | null }) {
   return (
     <Card className="h-full">
       <CardHeader>
@@ -13,22 +13,23 @@ export function JobDetailPanel({ job }: { job: ProtoJob | null }) {
         {job ? (
           <>
             <div className="rounded-2xl border p-4">
-              <div className="font-medium">{job.name}</div>
+              <div className="font-medium">{job.name ?? job.outputFile}</div>
               <div className="mt-1 text-muted-foreground">状态: {job.status}</div>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-2xl border p-3">进度: {job.progress}%</div>
-              <div className="rounded-2xl border p-3">fps: {job.fps}</div>
-              <div className="rounded-2xl border p-3">ETA: {job.eta}</div>
-              <div className="rounded-2xl border p-3">缩略图: 占位</div>
+              <div className="rounded-2xl border p-3">输入: {job.inputFile}</div>
+              <div className="rounded-2xl border p-3">输出: {job.outputFile}</div>
+              <div className="rounded-2xl border p-3">创建: {job.createdAt}</div>
+              <div className="rounded-2xl border p-3">结束: {job.endedAt ?? "-"}</div>
             </div>
-            <div className="rounded-2xl border p-4 text-muted-foreground">
-              命令行和 stderr 明细将在真实任务链路接入后显示。
+            <div className="rounded-2xl border p-4 text-muted-foreground break-all">
+              {job.commandLine ?? "暂无命令行"}
             </div>
+            {job.error ? <div className="rounded-2xl border border-destructive/30 bg-destructive/10 p-4 text-destructive whitespace-pre-wrap">{job.error}</div> : null}
             <div className="flex gap-2">
-              <Button variant="secondary">暂停</Button>
-              <Button variant="outline">继续</Button>
-              <Button variant="outline">取消</Button>
+              <Button variant="secondary" disabled>暂停</Button>
+              <Button variant="outline" disabled>继续</Button>
+              <Button variant="outline" disabled>取消</Button>
             </div>
           </>
         ) : (
