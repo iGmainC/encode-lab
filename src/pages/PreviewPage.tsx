@@ -35,6 +35,18 @@ const emptyRuntime: ComparePreviewRuntime = {
 /** 独立系统全屏预览窗口 label。 */
 const DETACHED_PREVIEW_WINDOW_LABEL = "preview-detached";
 
+/**
+ * 锁定独立预览窗口的系统窗口能力。
+ * @param previewWindow 需要约束的独立预览窗口
+ */
+async function lockDetachedPreviewWindow(previewWindow: WebviewWindow) {
+  // 先禁用缩放按钮，再禁用调整尺寸，避免 macOS 因不可调整而忽略缩放状态。
+  await previewWindow.setMaximizable(false).catch(() => {});
+  await previewWindow.setMinimizable(false).catch(() => {});
+  await previewWindow.setResizable(false).catch(() => {});
+  await previewWindow.setFullscreen(true).catch(() => {});
+}
+
 export function PreviewPage({
   splitMode,
   setSplitMode,
@@ -96,7 +108,7 @@ export function PreviewPage({
         // 已存在的独立窗口只同步快照并切回系统全屏，避免重复创建窗口。
         await existingWindow.emit(DETACHED_PREVIEW_UPDATE_EVENT, payload);
         await existingWindow.setFocus();
-        await existingWindow.setFullscreen(true);
+        await lockDetachedPreviewWindow(existingWindow);
         return;
       }
 
@@ -113,16 +125,19 @@ export function PreviewPage({
         minWidth: 800,
         minHeight: 450,
         center: true,
-        resizable: true,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
         decorations: true,
         focus: true,
+        maximized: true,
         fullscreen: true,
       });
 
       void previewWindow.once("tauri://created", () => {
         // 窗口创建成功后再补发一次快照，覆盖 localStorage 读取时序差异。
         void previewWindow.emit(DETACHED_PREVIEW_UPDATE_EVENT, payload);
-        void previewWindow.setFullscreen(true).catch(() => {});
+        void lockDetachedPreviewWindow(previewWindow);
       });
       void previewWindow.once("tauri://error", (event) => {
         setDetachedPreviewError(`独立预览窗口创建失败：${String(event.payload)}`);

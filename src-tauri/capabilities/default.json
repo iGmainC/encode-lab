@@ -9,6 +9,9 @@
     "core:window:allow-close",
     "core:window:allow-set-focus",
     "core:window:allow-set-fullscreen",
+    "core:window:allow-set-maximizable",
+    "core:window:allow-set-minimizable",
+    "core:window:allow-set-resizable",
     "opener:default",
     "dialog:default"
   ]
