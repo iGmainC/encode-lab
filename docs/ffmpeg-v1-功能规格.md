@@ -322,7 +322,8 @@ type Template = {
 10. `list_jobs(filter) -> Job[]`
 11. `get_job_metrics(jobId) -> { progress, fps, speed, eta, frame, timeMs }`
 12. `get_job_thumbnail(jobId, atMs?) -> { imagePath|base64 }`
-13. `save_template(payload) / list_templates() / apply_template(templateId)`
+13. `run_quality_evaluation({ jobId|taskId|referenceFile+distortedFile, metric: "vmaf", vmaf? }) -> { evaluationId, score, logPath }`
+14. `save_template(payload) / list_templates() / apply_template(templateId)`
 
 为支持模板完整管理，V1 同步补充：
 
@@ -479,6 +480,7 @@ type PreviewConfig = {
 10. 音频 `copy` 与 `custom` 模式命令拼装正确。
 11. 输出重名文件自动追加序号，不覆盖旧文件。
 12. 缺失 FFmpeg 时给出可操作引导，不出现静默失败。
+13. 已完成任务可发起 VMAF 质量评估，并返回平均分、参与帧数、日志路径和实际命令。
 
 ## 11. 测试场景矩阵（单元/集成/E2E）
 
@@ -496,6 +498,7 @@ type PreviewConfig = {
 | T8 | 缩略图抓取失败降级 | 是 | 是 | 否 |
 | T9 | 模板增删改查与直预览 | 是 | 是 | 是 |
 | T10 | 输出重名自动改名 | 是 | 是 | 是 |
+| T11 | 已完成任务 VMAF 质量评估 | 是 | 是 | 是 |
 
 ## 12. 里程碑建议（M1 / M2 / M3）
 

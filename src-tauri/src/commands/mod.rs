@@ -1,4 +1,5 @@
 pub mod error;
+pub mod evaluation;
 pub mod preview;
 pub mod probe;
 pub mod settings;

@@ -1,4 +1,5 @@
 mod commands;
+mod evaluation;
 mod models;
 mod preview;
 mod probe;
@@ -61,6 +62,7 @@ pub fn run() {
             commands::preview::start_preview,
             commands::preview::update_preview,
             commands::preview::stop_preview,
+            commands::evaluation::run_quality_evaluation,
             commands::transcode::build_ffmpeg_command,
         ])
         .run(tauri::generate_context!())

@@ -213,3 +213,58 @@ export type ComparePreviewRuntime = {
   isFullscreen: boolean;
   currentFrame?: ComparePreviewFrameSnapshot;
 };
+
+/** 质量评估指标类型，V1 先支持 VMAF。 */
+export type EvaluationMetric = "vmaf";
+
+/** VMAF 评估参数。 */
+export type VmafEvaluationOptions = {
+  /** 可选 VMAF 模型文件路径 */
+  modelPath?: string;
+  /** 可选统一缩放宽度，需与 scaleHeight 同时传入 */
+  scaleWidth?: number;
+  /** 可选统一缩放高度，需与 scaleWidth 同时传入 */
+  scaleHeight?: number;
+  /** 可选抽样间隔，对应 libvmaf n_subsample */
+  frameStep?: number;
+  /** 可选线程数，对应 libvmaf n_threads */
+  threadCount?: number;
+};
+
+/** 质量评估请求；可通过 jobId/taskId 解析文件，也可直接传入文件路径。 */
+export type RunQualityEvaluationRequest = {
+  /** 完成任务记录 id，优先级最高 */
+  jobId?: string;
+  /** 任务 id；后端会选择该任务最近一次 completed job */
+  taskId?: string;
+  /** 源参考视频路径 */
+  referenceFile?: string;
+  /** 转码后待评估视频路径 */
+  distortedFile?: string;
+  /** 评估指标 */
+  metric: EvaluationMetric;
+  /** VMAF 参数 */
+  vmaf?: VmafEvaluationOptions;
+};
+
+/** 质量评估结果。 */
+export type RunQualityEvaluationResponse = {
+  /** 本次评估 id */
+  evaluationId: string;
+  /** 评估指标 */
+  metric: EvaluationMetric;
+  /** VMAF 平均分 */
+  score: number;
+  /** 参与评估的帧数 */
+  frameCount?: number;
+  /** 源参考视频路径 */
+  referenceFile: string;
+  /** 转码后待评估视频路径 */
+  distortedFile: string;
+  /** VMAF JSON 日志路径 */
+  logPath: string;
+  /** 实际执行的 FFmpeg 命令 */
+  command: string;
+  /** FFmpeg stderr 输出 */
+  stderr: string;
+};
