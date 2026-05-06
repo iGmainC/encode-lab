@@ -48,4 +48,20 @@ impl JobsHistoryRepo {
             })
             .map(|_| ())
     }
+
+    /** 删除指定历史任务记录。 */
+    pub fn delete(&self, job_id: &str) -> StorageResult<()> {
+        self.store
+            .mutate_data_or_default(&self.path, Vec::new(), |jobs: &mut Vec<JobHistory>| {
+                let original_len = jobs.len();
+                jobs.retain(|job| job.id != job_id);
+                if jobs.len() == original_len {
+                    return Err(crate::storage::errors::StorageError::NotFound(
+                        job_id.to_string(),
+                    ));
+                }
+                Ok(())
+            })
+            .map(|_| ())
+    }
 }

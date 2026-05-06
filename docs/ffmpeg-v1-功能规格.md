@@ -96,6 +96,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 1. 视频参数：结构化字段（V1 核心）。
 2. 音频参数：仅 `copy` 或原始参数输入框。
 3. 高级参数：原始命令行参数输入（文本区）。
+4. 容器参数：输出容器支持 `mp4` / `mkv` / `mov`，MP4 可配置 `faststart`。
 
 ### 4.2.2 视频参数（结构化）字段
 
@@ -107,7 +108,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 6. `profile`：可选（如 `high`, `main`）。
 7. `tune`：可选（如 `film`, `zerolatency`）。
 8. `resolution`：`source` 或 `WxH`。
-9. `fps`：`source` 或指定值（如 `24/25/30/60`）。
+9. `fps`：`source` 或指定值（如 `24/25/30/60`）；UI 通过“保持原始帧率”开关控制，开启时不生成 `-r` 覆盖参数。
 10. `pixelFormat`：如 `yuv420p`。
 11. `gop`：关键帧间隔（可选）。
 12. `enableTwoPass`：布尔，V1 必须支持（仅在编码器能力支持时可开启）。
@@ -122,6 +123,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 
 1. `audioMode`：`copy` 或 `custom`。
 2. `audioCustomArgs`：当 `audioMode=custom` 时可编辑（例如 `-c:a aac -b:a 192k`）。
+3. 当输出容器为 MP4 时，命令拼装追加 `-strict -2`，兼容 TrueHD 等 FFmpeg 标记为 experimental 的音频 copy 写入场景。
 
 ### 4.2.4 高级原始参数
 
@@ -321,12 +323,13 @@ type Template = {
 6. `update_preview(previewSessionId, patch) -> { ok }`
 7. `stop_preview(previewSessionId) -> { ok }`
 8. `enqueue_transcode(taskId, inputFiles[]) -> { jobIds[] }`
-9. `control_job(jobId, action: pause|resume|cancel) -> { ok }`
+9. `control_job(jobId, action: cancel) -> { ok }`（当前已接入取消；`pause/resume` 保留为后续控制能力）
 10. `list_jobs(filter) -> Job[]`
-11. `get_job_metrics(jobId) -> { progress, fps, speed, eta, frame, timeMs }`
-12. `get_job_thumbnail(jobId, atMs?) -> { imagePath|base64 }`
-13. `run_quality_evaluation({ jobId|taskId|referenceFile+distortedFile, metric: "vmaf", vmaf? }) -> { evaluationId, score, logPath }`
-14. `save_template(payload) / list_templates() / apply_template(templateId)`
+11. `delete_job(jobId) -> { ok }`（删除已结束任务的历史记录，不删除输出文件；`queued/running` 需先取消）
+12. `get_job_metrics(jobId) -> { progress, fps, speed, eta, frame, timeMs }`
+13. `get_job_thumbnail(jobId, atMs?) -> { imagePath|base64 }`
+14. `run_quality_evaluation({ jobId|taskId|referenceFile+distortedFile, metric: "vmaf", vmaf? }) -> { evaluationId, score, logPath }`
+15. `save_template(payload) / list_templates() / apply_template(templateId)`
 
 为支持模板完整管理，V1 同步补充：
 
@@ -337,7 +340,7 @@ type Template = {
 ## 6.2 事件通道（建议）
 
 1. `job:updated`：推送任务状态变化。
-2. `job:metrics`：推送运行指标（1s）。
+2. `job:metrics`：基于 FFmpeg `-progress pipe:1` 推送运行指标，包含 `progress`、`fps`、`speed`、`etaSec`、`timeMs` 和 2-pass 阶段。
 3. `preview:frame`：推送预览帧或帧引用。
 4. `preview:state`：推送预览状态变化。
 
@@ -358,6 +361,12 @@ type Job = {
   taskId: string;
   inputFile: string;
   outputFile: string;
+  inputSizeBytes?: number;
+  outputSizeBytes?: number;
+  sizeChangePercent?: number; // 输出相对输入的体积变化率，负数表示变小
+  inputVideoSizeBytes?: number;
+  outputVideoSizeBytes?: number;
+  videoSizeChangePercent?: number; // 仅视频轨道的体积变化率，按 ffprobe packet size 累加
   queuePosition?: number;
   slotIndex?: number;
   status: JobStatus;
@@ -407,6 +416,8 @@ type PreviewConfig = {
 5. `running -> completed`：退出码 `0`。
 6. `running|paused -> canceled`：用户取消，进程终止后收敛。
 7. 任意运行态 -> `failed`：非零退出码、I/O 错误、依赖缺失。
+
+当前实现已支持 `queued|running -> canceled`。`pause/resume` 仍是规格目标，尚未接入前端控制按钮和后端命令。
 
 ## 7.2 Preview 状态机
 
@@ -535,41 +546,11 @@ type PreviewConfig = {
 
 ## 13. 后期展望（V2+：Server-Worker 分布式转码）
 
-### 13.1 愿景目标
+V1 仍以本机 UI、本机文件、本机 `ffmpeg` 进程和本地 JSON 队列为交付边界，不实现远程节点、跨节点传输或分布式调度。
 
-1. server 作为调度中心，app 可将任务分配给多个 worker 执行。
-2. 目标价值：吞吐提升、资源池化、任务跨设备执行。
+V2+ 的节点拓展方向是将 EncodeLab 演进为 Controller，并通过独立 Node Agent 二进制接入下游机器，支持远程文件入口和集群任务分发。近期可实现的技术设计见 [`节点拓展与分布式转码设计.md`](./节点拓展与分布式转码设计.md)。
 
-### 13.2 目标形态（高层）
-
-1. worker 形态：支持“桌面 app worker 模式”与“独立 worker 服务”并存。
-2. 调度模式：支持拉取/推送混合。
-3. 媒资策略：支持共享存储与 server 中转混合。
-
-### 13.3 核心能力展望
-
-1. Worker 注册与心跳。
-2. 能力上报（编码器、GPU、并发槽位、负载）。
-3. 任务路由（按能力匹配编码器与参数）。
-4. 失败重试与任务迁移。
-5. 统一监控视图（跨 worker 进度、错误、吞吐）。
-
-### 13.4 安全与权限（愿景级）
-
-1. 采用 `API Key + Worker Token` 的基础模型。
-2. 先满足可落地，再为更强安全（如 mTLS）预留升级空间。
-
-### 13.5 公共接口与类型扩展方向（仅展望）
-
-1. V1 接口保持不变。
-2. 后续可能新增抽象命令（不在本期定义字段细节）：`register_worker`、`report_worker_heartbeat`、`dispatch_remote_job`、`report_remote_job_metrics`。
-3. 不在当前文档主规格中新增 DTO 强约束，避免误导为 V1 待实现项。
-
-### 13.6 测试与边界声明
-
-1. 本章节为路线展望，不纳入 V1 功能、接口、验收、测试矩阵。
-2. V2+ 需新增分布式调度专项测试计划。
-3. V1 与 V2+ 通过“可兼容的数据结构与命令抽象”衔接。
+后续代码演进应优先避免继续强化本机路径假设，逐步将文件位置抽象为 `nodeId + path`，并将本机转码建模为内置 `local node`，为远程入口和多节点调度预留兼容边界。
 
 ## 14. 附录
 
@@ -623,6 +604,11 @@ ffmpeg -i preview.mkv -frames:v 1 \
 ## 14.3 文件命名与重名处理规则
 
 默认输出名模式：`{inputName}_{taskName}.{ext}`
+
+文件名保留：
+
+1. 本机输出文件名保留空格、括号和 Unicode 字符；FFmpeg 通过参数数组接收路径，不依赖 shell 字符串转义。
+2. 路径分隔符、控制字符和 `: * ? " < > |` 等跨平台高风险字符会被移除或替换。
 
 重名处理：
 

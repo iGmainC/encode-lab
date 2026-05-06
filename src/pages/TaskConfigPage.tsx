@@ -110,6 +110,8 @@ export function TaskConfigPage({
     setFormPreset,
     keepOriginalResolution,
     setKeepOriginalResolution,
+    keepOriginalFps,
+    setKeepOriginalFps,
     preserveDolbyVisionMetadata,
     setPreserveDolbyVisionMetadata,
     formWidth,
@@ -144,6 +146,10 @@ export function TaskConfigPage({
     setAv1SvtTune,
     av1FilmGrain,
     setAv1FilmGrain,
+    containerFormat,
+    setContainerFormat,
+    containerFaststart,
+    setContainerFaststart,
     sourceFilePath,
     setSourceFilePath,
     videoMetadata,
@@ -530,11 +536,52 @@ export function TaskConfigPage({
 
             <div className="grid gap-4 md:grid-cols-4">
               <label className="space-y-1 text-sm">
+                <span className="text-muted-foreground">输出容器</span>
+                <Select value={containerFormat} onValueChange={(value) => setContainerFormat(value as "mp4" | "mkv" | "mov")}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择输出容器" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="mp4">MP4</SelectItem>
+                    <SelectItem value="mkv">MKV</SelectItem>
+                    <SelectItem value="mov">MOV</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <div className="rounded-2xl border bg-muted/30 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium">Fast Start</div>
+                    <p className="text-xs text-muted-foreground">仅 MP4 生效，用于优化边下边播。</p>
+                  </div>
+                  <Switch
+                    checked={containerFaststart}
+                    onCheckedChange={setContainerFaststart}
+                    disabled={containerFormat !== "mp4"}
+                  />
+                </div>
+              </div>
+              <div className="rounded-2xl border bg-muted/30 p-3 md:col-span-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="text-sm font-medium">保持原始帧率</div>
+                    <p className="text-xs text-muted-foreground">
+                      打开后不生成 FPS 覆盖参数，沿用源视频帧率。
+                    </p>
+                  </div>
+                  <Switch checked={keepOriginalFps} onCheckedChange={setKeepOriginalFps} />
+                </div>
+                <div className="mt-3 text-xs text-muted-foreground">
+                  当前源帧率：{videoMetadata?.video?.fps?.toFixed(3).replace(/\.?0+$/, "") ?? "-"}
+                </div>
+              </div>
+              <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">FPS</span>
                 <input
-                  className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                  className="h-10 w-full rounded-xl border bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                   value={formFps}
                   onChange={(event) => setFormFps(event.target.value)}
+                  disabled={keepOriginalFps}
                 />
               </label>
               <label className="space-y-1 text-sm">

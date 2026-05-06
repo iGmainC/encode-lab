@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::models::node::FileLocation;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskConfig {
@@ -119,4 +121,7 @@ pub struct OutputConfig {
     pub dir: String,
     pub file_name_pattern: String,
     pub overwrite: String,
+    /** 可选输出节点位置；为空时沿用当前本机输出目录语义。 */
+    #[serde(default)]
+    pub location: Option<FileLocation>,
 }

@@ -170,6 +170,8 @@ pub fn run() {
             commands::preview::stop_preview,
             commands::evaluation::run_quality_evaluation,
             commands::transcode::build_ffmpeg_command,
+            commands::transcode::control_job,
+            commands::transcode::delete_job,
             commands::transcode::enqueue_transcode_job,
             commands::transcode::list_jobs,
         ]);

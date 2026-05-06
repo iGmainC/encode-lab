@@ -57,6 +57,7 @@ fn build_task_payload(name: &str) -> TaskConfigPayload {
             dir: String::new(),
             file_name_pattern: "{inputName}_{taskName}".to_string(),
             overwrite: "autoRename".to_string(),
+            location: None,
         },
     }
 }

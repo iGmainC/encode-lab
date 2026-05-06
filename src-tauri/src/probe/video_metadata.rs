@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, path::Path, process::Command};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::Path,
+    process::Command,
+};
 
 use crate::commands::error::CommandError;
 
@@ -29,6 +33,7 @@ pub struct VideoStreamMetadata {
     pub pix_fmt: Option<String>,
     pub fps: Option<f64>,
     pub bit_rate_kbps: Option<u64>,
+    pub size_bytes: Option<u64>,
     pub color_primaries: Option<String>,
     pub color_transfer: Option<String>,
     pub color_space: Option<String>,
@@ -94,6 +99,7 @@ struct FfprobeStream {
     sample_rate: Option<String>,
     channel_layout: Option<String>,
     side_data_list: Option<Vec<Value>>,
+    tags: Option<HashMap<String, String>>,
 }
 
 pub fn read_video_metadata(input_file: &str) -> Result<VideoMetadataResult, CommandError> {
@@ -120,6 +126,49 @@ pub fn read_video_metadata(input_file: &str) -> Result<VideoMetadataResult, Comm
         .map_err(|err| CommandError::new("json_parse_error", err.to_string()))?;
 
     Ok(convert_probe_output(input_file, parsed))
+}
+
+/** 通过累加视频流 packet size 获取视频轨道实际字节数。 */
+pub fn read_video_track_size_bytes(input_file: &str) -> Result<u64, CommandError> {
+    if input_file.trim().is_empty() {
+        return Err(CommandError::new(
+            "invalid_payload",
+            "inputFile cannot be empty",
+        ));
+    }
+
+    if !Path::new(input_file).exists() {
+        return Err(CommandError::new("not_found", "input file does not exist"));
+    }
+
+    if !ffprobe_exists() {
+        return Err(CommandError::new(
+            "ffprobe_unavailable",
+            "ffprobe not found in PATH",
+        ));
+    }
+
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=size",
+            "-of",
+            "csv=p=0",
+            input_file,
+        ])
+        .output()
+        .map_err(|err| CommandError::new("probe_failed", err.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(CommandError::new("probe_failed", stderr));
+    }
+
+    Ok(sum_packet_sizes(&String::from_utf8_lossy(&output.stdout)))
 }
 
 fn ffprobe_exists() -> bool {
@@ -240,6 +289,7 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
             .as_deref()
             .and_then(parse_u64)
             .map(|value| value / 1000),
+        size_bytes: stream_tag_u64(stream, "NUMBER_OF_BYTES"),
         color_primaries: stream.color_primaries.clone(),
         color_transfer: stream.color_transfer.clone(),
         color_space: stream.color_space.clone(),
@@ -250,6 +300,25 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         mastering_display_max_luminance,
         mastering_display_min_luminance,
     }
+}
+
+/** 从 ffprobe stream tags 中读取数字字段。 */
+fn stream_tag_u64(stream: &FfprobeStream, key: &str) -> Option<u64> {
+    let tags = stream.tags.as_ref()?;
+    // 不同容器输出的 tag key 大小写可能不一致，读取时做一次大小写兼容。
+    tags.iter()
+        .find(|(tag_key, _)| tag_key.eq_ignore_ascii_case(key))
+        .and_then(|(_, value)| parse_u64(value))
+}
+
+/** 累加 ffprobe csv 输出中的 packet size。 */
+fn sum_packet_sizes(value: &str) -> u64 {
+    value.lines().filter_map(parse_packet_size_line).sum()
+}
+
+/** 解析单行 packet size；兼容 csv 里可能出现的逗号后缀字段。 */
+fn parse_packet_size_line(line: &str) -> Option<u64> {
+    line.split(',').next()?.trim().parse::<u64>().ok()
 }
 
 fn map_audio_stream(stream: &FfprobeStream) -> AudioStreamMetadata {
@@ -610,6 +679,7 @@ mod tests {
             sample_rate: None,
             channel_layout: None,
             side_data_list: None,
+            tags: None,
         };
         assert_eq!(detect_hdr_type(&stream), HdrType::Hdr10);
 
@@ -643,6 +713,7 @@ mod tests {
             sample_rate: None,
             channel_layout: None,
             side_data_list: None,
+            tags: None,
         };
 
         assert_eq!(detect_hdr_type(&stream), HdrType::Sdr);
@@ -670,6 +741,7 @@ mod tests {
             sample_rate: None,
             channel_layout: None,
             side_data_list: None,
+            tags: None,
         };
 
         assert_eq!(detect_hdr_type(&stream), HdrType::Unknown);
@@ -686,6 +758,7 @@ mod tests {
             pix_fmt: Some("yuv420p10le".to_string()),
             fps: Some(23.976),
             bit_rate_kbps: Some(9000),
+            size_bytes: Some(123_456),
             color_primaries: Some("bt2020".to_string()),
             color_transfer: Some("smpte2084".to_string()),
             color_space: None,
@@ -738,6 +811,7 @@ mod tests {
                     "min_luminance": "50/10000"
                 }),
             ]),
+            tags: None,
         };
 
         let video = map_video_stream(&stream);
@@ -746,5 +820,12 @@ mod tests {
         assert_eq!(video.max_frame_average_light_level, Some(400));
         assert_eq!(video.mastering_display_max_luminance, Some(1000.0));
         assert_eq!(video.mastering_display_min_luminance, Some(0.005));
+    }
+
+    #[test]
+    fn sum_packet_sizes_should_ignore_invalid_lines() {
+        let value = "100\ninvalid\n200,extra\n\n";
+
+        assert_eq!(sum_packet_sizes(value), 300);
     }
 }

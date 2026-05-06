@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     commands::error::{CommandError, CommandResult},
-    models::{task::Resolution, TaskConfigPayload, Validate},
+    models::{task::Resolution, FileLocation, TaskConfigPayload, Validate},
     transcode::command_builder::{
         build_preview_decode_frame_command_args, build_preview_encoded_frame_command_args,
         build_source_frame_command_args, PreviewCommandOptions,
@@ -35,6 +35,9 @@ pub struct PreviewClipRange {
 #[serde(rename_all = "camelCase")]
 pub struct PreviewConfig {
     pub input_file: String,
+    /** 可选输入节点位置；当前预览执行仍使用 input_file 保持本机兼容。 */
+    #[serde(default)]
+    pub input_location: Option<FileLocation>,
     pub clip_range: Option<PreviewClipRange>,
     pub render_scale: f64,
     pub compare_orientation: CompareOrientation,
@@ -793,6 +796,7 @@ mod tests {
     fn payload() -> PreviewConfig {
         PreviewConfig {
             input_file: "/tmp/demo.mp4".to_string(),
+            input_location: None,
             clip_range: None,
             render_scale: 0.5,
             compare_orientation: CompareOrientation::Vertical,
@@ -831,6 +835,7 @@ mod tests {
                     dir: String::new(),
                     file_name_pattern: "{inputName}_{taskName}".to_string(),
                     overwrite: "autoRename".to_string(),
+                    location: None,
                 },
             },
         }

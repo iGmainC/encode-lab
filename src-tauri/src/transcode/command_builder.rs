@@ -364,6 +364,12 @@ fn append_audio_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> Sto
 }
 
 fn append_container_args(payload: &TaskConfigPayload, args: &mut Vec<String>) {
+    if matches!(payload.container.format, ContainerFormat::Mp4) {
+        // TrueHD 等音频 copy 到 MP4 时 FFmpeg 需要 experimental 开关，否则 header 写入失败。
+        args.push("-strict".to_string());
+        args.push("-2".to_string());
+    }
+
     if payload.container.faststart.unwrap_or(false)
         && matches!(payload.container.format, ContainerFormat::Mp4)
     {
@@ -533,7 +539,7 @@ fn is_flag_without_value(flag: &str) -> bool {
     matches!(flag, "-y" | "-n" | "-an" | "-vn" | "-sn" | "-dn")
 }
 
-fn build_passlog_path(input_file: &str, output_file: &str) -> String {
+pub(crate) fn build_passlog_path(input_file: &str, output_file: &str) -> String {
     let mut hasher = DefaultHasher::new();
     input_file.hash(&mut hasher);
     output_file.hash(&mut hasher);
@@ -648,6 +654,7 @@ mod tests {
                 dir: String::new(),
                 file_name_pattern: "{inputName}_{taskName}".to_string(),
                 overwrite: "autoRename".to_string(),
+                location: None,
             },
         }
     }
@@ -659,6 +666,7 @@ mod tests {
         assert!(result.commands[0].contains("-c:v libx264"));
         assert!(result.commands[0].contains("-crf 23"));
         assert!(result.commands[0].contains("-c:a copy"));
+        assert!(result.commands[0].contains("-strict -2"));
         assert!(result.commands[0].contains("-movflags +faststart"));
     }
 

@@ -18,6 +18,7 @@ import type {
   EnqueueTranscodeJobResponse,
   FfmpegProbeResult,
   JobHistory,
+  JobMetricsEvent,
   SaveTemplateResponse,
   TaskConfig,
   Template,
@@ -57,6 +58,7 @@ function AppRoutes({
   settings,
   tasks,
   jobs,
+  jobMetrics,
   templates,
   ffmpegProbe,
   encoderCapabilities,
@@ -71,6 +73,7 @@ function AppRoutes({
   settings: AppSettings | null;
   tasks: TaskConfig[];
   jobs: JobHistory[];
+  jobMetrics: Record<string, JobMetricsEvent>;
   templates: Template[];
   ffmpegProbe: FfmpegProbeResult | null;
   encoderCapabilities: EncoderCapabilityResult | null;
@@ -244,7 +247,10 @@ function AppRoutes({
               />
             }
           />
-          <Route path="/jobs" element={<JobsPage jobs={jobs} />} />
+          <Route
+            path="/jobs"
+            element={<JobsPage jobs={jobs} jobMetrics={jobMetrics} onJobsChanged={onJobsChanged} />}
+          />
           <Route
             path="/templates"
             element={
@@ -271,6 +277,7 @@ function WorkbenchApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [tasks, setTasks] = useState<TaskConfig[]>([]);
   const [jobs, setJobs] = useState<JobHistory[]>([]);
+  const [jobMetrics, setJobMetrics] = useState<Record<string, JobMetricsEvent>>({});
   const [templates, setTemplates] = useState<Template[]>([]);
   const [ffmpegProbe, setFfmpegProbe] = useState<FfmpegProbeResult | null>(null);
   const [encoderCapabilities, setEncoderCapabilities] = useState<EncoderCapabilityResult | null>(null);
@@ -331,16 +338,29 @@ function WorkbenchApp() {
   }, [fetchAll]);
 
   useEffect(() => {
-    let dispose: (() => void) | undefined;
+    let disposeUpdated: (() => void) | undefined;
+    let disposeMetrics: (() => void) | undefined;
     void listen<JobHistory>("job:updated", () => {
       void fetchAll();
     }).then((unlisten) => {
-      dispose = unlisten;
+      disposeUpdated = unlisten;
+    });
+
+    void listen<JobMetricsEvent>("job:metrics", (event) => {
+      setJobMetrics((current) => ({
+        ...current,
+        [event.payload.jobId]: event.payload,
+      }));
+    }).then((unlisten) => {
+      disposeMetrics = unlisten;
     });
 
     return () => {
-      if (dispose) {
-        dispose();
+      if (disposeUpdated) {
+        disposeUpdated();
+      }
+      if (disposeMetrics) {
+        disposeMetrics();
       }
     };
   }, [fetchAll]);
@@ -351,6 +371,7 @@ function WorkbenchApp() {
         settings={settings}
         tasks={tasks}
         jobs={jobs}
+        jobMetrics={jobMetrics}
         templates={templates}
         ffmpegProbe={ffmpegProbe}
         encoderCapabilities={encoderCapabilities}

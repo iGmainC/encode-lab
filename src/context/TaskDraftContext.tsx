@@ -33,6 +33,8 @@ type TaskDraftContextValue = {
   setFormPreset: (value: string) => void;
   keepOriginalResolution: boolean;
   setKeepOriginalResolution: (value: boolean) => void;
+  keepOriginalFps: boolean;
+  setKeepOriginalFps: (value: boolean) => void;
   preserveDolbyVisionMetadata: boolean;
   setPreserveDolbyVisionMetadata: (value: boolean) => void;
   formWidth: string;
@@ -67,6 +69,10 @@ type TaskDraftContextValue = {
   setAv1SvtTune: (value: string) => void;
   av1FilmGrain: string;
   setAv1FilmGrain: (value: string) => void;
+  containerFormat: "mp4" | "mkv" | "mov";
+  setContainerFormat: (value: "mp4" | "mkv" | "mov") => void;
+  containerFaststart: boolean;
+  setContainerFaststart: (value: boolean) => void;
   sourceFilePath: string;
   setSourceFilePath: (value: string) => void;
   videoMetadata: VideoMetadataResult | null;
@@ -89,6 +95,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [formCrf, setFormCrf] = useState(23);
   const [formPreset, setFormPreset] = useState("medium");
   const [keepOriginalResolution, setKeepOriginalResolution] = useState(true);
+  const [keepOriginalFps, setKeepOriginalFps] = useState(true);
   const [preserveDolbyVisionMetadata, setPreserveDolbyVisionMetadata] = useState(false);
   const [formWidth, setFormWidth] = useState("1920");
   const [formHeight, setFormHeight] = useState("1080");
@@ -106,6 +113,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [av1TileRows, setAv1TileRows] = useState("1");
   const [av1SvtTune, setAv1SvtTune] = useState("0");
   const [av1FilmGrain, setAv1FilmGrain] = useState("0");
+  const [containerFormat, setContainerFormat] = useState<"mp4" | "mkv" | "mov">("mp4");
+  const [containerFaststart, setContainerFaststart] = useState(true);
   const [sourceFilePath, setSourceFilePath] = useState("");
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadataResult | null>(null);
   const [videoMetadataLoading, setVideoMetadataLoading] = useState(false);
@@ -200,6 +209,18 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setFormHeight(String(height));
     }
   }, [keepOriginalResolution, videoMetadata?.video?.width, videoMetadata?.video?.height]);
+
+  useEffect(() => {
+    if (!keepOriginalFps) {
+      return;
+    }
+
+    const sourceFps = videoMetadata?.video?.fps;
+    if (sourceFps) {
+      // 跟随源帧率时仍同步输入框展示值，方便用户关闭开关后基于源值微调。
+      setFormFps(sourceFps.toFixed(3).replace(/\.?0+$/, ""));
+    }
+  }, [keepOriginalFps, videoMetadata?.video?.fps]);
 
   useEffect(() => {
     if (videoMetadata?.video?.hdrType !== "DolbyVision") {
@@ -331,6 +352,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
         crf: formMode === "CRF" ? formCrf : undefined,
         preset: formPreset || undefined,
         keepOriginalResolution,
+        keepOriginalFps,
         preserveDolbyVisionMetadata,
         // 保持原始尺寸时不传 resolution，让后端跳过 scale 参数并保留源尺寸语义。
         resolution:
@@ -340,7 +362,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
                 height: Number(formHeight),
               }
             : undefined,
-        fps: formFps ? Number(formFps) : undefined,
+        // 跟随源视频帧率时不传 fps，让后端跳过 -r 参数并保留源帧率语义。
+        fps: !keepOriginalFps && formFps ? Number(formFps) : undefined,
         pixelFormat: formPixelFormat || undefined,
         enableTwoPass: formTwoPass,
       },
@@ -348,8 +371,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
         mode: "copy",
       },
       container: {
-        format: "mp4",
-        faststart: true,
+        format: containerFormat,
+        faststart: containerFormat === "mp4" ? containerFaststart : false,
       },
       advancedArgs: buildAdvancedArgs(),
       output: {
@@ -365,6 +388,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formCrf,
       formPreset,
       keepOriginalResolution,
+      keepOriginalFps,
       preserveDolbyVisionMetadata,
       formWidth,
       formHeight,
@@ -374,6 +398,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formBitrateKbps,
       formMaxrateKbps,
       formBufsizeKbps,
+      containerFormat,
+      containerFaststart,
       buildAdvancedArgs,
     ],
   );
@@ -396,6 +422,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setFormPreset,
       keepOriginalResolution,
       setKeepOriginalResolution,
+      keepOriginalFps,
+      setKeepOriginalFps,
       preserveDolbyVisionMetadata,
       setPreserveDolbyVisionMetadata,
       formWidth,
@@ -430,6 +458,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setAv1SvtTune,
       av1FilmGrain,
       setAv1FilmGrain,
+      containerFormat,
+      setContainerFormat,
+      containerFaststart,
+      setContainerFaststart,
       sourceFilePath,
       setSourceFilePath,
       videoMetadata,
@@ -449,6 +481,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formCrf,
       formPreset,
       keepOriginalResolution,
+      keepOriginalFps,
       preserveDolbyVisionMetadata,
       formWidth,
       formHeight,
@@ -466,6 +499,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       av1TileRows,
       av1SvtTune,
       av1FilmGrain,
+      containerFormat,
+      containerFaststart,
       sourceFilePath,
       videoMetadata,
       videoMetadataLoading,
