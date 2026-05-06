@@ -1,8 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    thread,
 };
 
 use chrono::Utc;
@@ -14,6 +12,7 @@ use crate::{
     commands::error::{CommandError, CommandResult},
     models::{JobHistory, TaskConfigPayload, Validate},
     transcode::command_builder::{build_ffmpeg_command_args, build_ffmpeg_commands},
+    transcode::job_manager::TranscodeJobRequest,
     AppState,
 };
 
@@ -79,7 +78,8 @@ pub fn enqueue_transcode_job<R: Runtime>(
 ) -> CommandResult<EnqueueTranscodeJobResponse> {
     request.payload.validate()?;
 
-    let output_file = resolve_output_file(&request.payload, &request.input_file)?;
+    let job_id = Uuid::new_v4().to_string();
+    let output_file = resolve_output_file(&request.payload, &request.input_file, &job_id)?;
     let command_args =
         build_ffmpeg_command_args(&request.payload, &request.input_file, &output_file)
             .map_err(CommandError::from)?;
@@ -92,7 +92,6 @@ pub fn enqueue_transcode_job<R: Runtime>(
         .tasks
         .create(request.payload.clone())
         .map_err(CommandError::from)?;
-    let job_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let job = JobHistory {
         id: job_id.clone(),
@@ -115,10 +114,18 @@ pub fn enqueue_transcode_job<R: Runtime>(
         .map_err(CommandError::from)?;
     let _ = app.emit("job:updated", &job);
 
-    let storage = state.storage.clone();
-    thread::spawn(move || {
-        run_transcode_job(app, storage, job, command_args);
-    });
+    let concurrency_n = state
+        .storage
+        .settings
+        .get()
+        .map(|settings| settings.concurrency_n)
+        .unwrap_or(1);
+    state.transcode_manager.enqueue(
+        app,
+        state.storage.clone(),
+        TranscodeJobRequest { job, command_args },
+        concurrency_n,
+    );
 
     Ok(EnqueueTranscodeJobResponse {
         task_id,
@@ -127,45 +134,11 @@ pub fn enqueue_transcode_job<R: Runtime>(
     })
 }
 
-fn run_transcode_job<R: Runtime>(
-    app: AppHandle<R>,
-    storage: crate::storage::AppStorage,
-    mut job: JobHistory,
-    command_args: Vec<Vec<String>>,
-) {
-    job.status = "running".to_string();
-    job.started_at = Some(Utc::now().to_rfc3339());
-    let _ = storage.jobs_history.update(&job);
-    let _ = app.emit("job:updated", &job);
-
-    for args in command_args {
-        match Command::new("ffmpeg").args(args).output() {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                let stderr_tail = tail_text(&String::from_utf8_lossy(&output.stderr));
-                job.status = "failed".to_string();
-                job.error = Some(stderr_tail);
-                break;
-            }
-            Err(err) => {
-                job.status = "failed".to_string();
-                job.error = Some(err.to_string());
-                break;
-            }
-        }
-    }
-
-    if job.status != "failed" {
-        job.status = "completed".to_string();
-        job.error = None;
-    }
-
-    job.ended_at = Some(Utc::now().to_rfc3339());
-    let _ = storage.jobs_history.update(&job);
-    let _ = app.emit("job:updated", &job);
-}
-
-fn resolve_output_file(payload: &TaskConfigPayload, input_file: &str) -> CommandResult<String> {
+fn resolve_output_file(
+    payload: &TaskConfigPayload,
+    input_file: &str,
+    job_id: &str,
+) -> CommandResult<String> {
     let input_path = Path::new(input_file);
     let output_dir = if payload.output.dir.trim().is_empty() {
         input_path
@@ -190,9 +163,10 @@ fn resolve_output_file(payload: &TaskConfigPayload, input_file: &str) -> Command
         .replace("{taskName}", &payload.name);
     let extension = container_extension(&payload.container.format);
     let sanitized = sanitize_file_stem(&base_name);
+    let job_suffix = job_id.get(..8).unwrap_or(job_id);
 
     Ok(
-        next_available_path(output_dir.join(format!("{sanitized}.{extension}")))
+        next_available_path(output_dir.join(format!("{sanitized}-{job_suffix}.{extension}")))
             .to_string_lossy()
             .to_string(),
     )
@@ -251,9 +225,4 @@ fn next_available_path(path: PathBuf) -> PathBuf {
     }
 
     path
-}
-
-fn tail_text(value: &str) -> String {
-    let lines: Vec<&str> = value.lines().rev().take(20).collect();
-    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
 }

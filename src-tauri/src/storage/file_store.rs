@@ -75,11 +75,54 @@ impl FileStore {
         self.write_atomic(path, &content)
     }
 
+    /// 在同一把文件锁内完成读取、修改和写回，避免并发读改写互相覆盖。
+    pub fn mutate_data_or_default<T, F>(
+        &self,
+        path: &Path,
+        default_data: T,
+        mutate: F,
+    ) -> StorageResult<T>
+    where
+        T: Clone + Serialize + DeserializeOwned,
+        F: FnOnce(&mut T) -> StorageResult<()>,
+    {
+        // 文件级锁覆盖完整读改写事务，保证调用方基于最新快照修改。
+        let lock = self.lock_registry.lock_for(path);
+        let _guard = lock.lock().expect("file lock poisoned");
+
+        let mut data = match fs::read_to_string(path) {
+            Ok(content) => self.parse_or_recover_unlocked(path, &content)?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => default_data,
+            Err(err) => return Err(StorageError::IoError(err)),
+        };
+
+        mutate(&mut data)?;
+        self.write_envelope_unlocked(path, &data)?;
+        Ok(data)
+    }
+
     fn write_atomic(&self, path: &Path, content: &[u8]) -> StorageResult<()> {
         // 文件级锁：同一文件串行写，不同文件可并行写。
         let lock = self.lock_registry.lock_for(path);
         let _guard = lock.lock().expect("file lock poisoned");
+        self.write_atomic_unlocked(path, content)
+    }
 
+    fn write_envelope_unlocked<T>(&self, path: &Path, data: &T) -> StorageResult<()>
+    where
+        T: Serialize + ?Sized,
+    {
+        // mutate 调用方已经持锁，这里只负责统一 envelope 格式。
+        let envelope = StoredEnvelope {
+            schema_version: self.expected_schema_version,
+            updated_at: Utc::now().to_rfc3339(),
+            data,
+        };
+        let content = serde_json::to_vec_pretty(&envelope)?;
+        self.write_atomic_unlocked(path, &content)
+    }
+
+    fn write_atomic_unlocked(&self, path: &Path, content: &[u8]) -> StorageResult<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -111,6 +154,18 @@ impl FileStore {
             Ok(data) => Ok(data),
             // 主文件 JSON 损坏时，尝试从 .bak 恢复。
             Err(StorageError::JsonParseError(_)) => self.try_restore_from_backup(path),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn parse_or_recover_unlocked<T>(&self, path: &Path, content: &str) -> StorageResult<T>
+    where
+        T: DeserializeOwned + Serialize + Clone,
+    {
+        match self.parse_envelope(content) {
+            Ok(data) => Ok(data),
+            // mutate 调用方已经持锁，恢复时必须走无锁写入，避免重复加锁。
+            Err(StorageError::JsonParseError(_)) => self.try_restore_from_backup_unlocked(path),
             Err(err) => Err(err),
         }
     }
@@ -151,6 +206,23 @@ impl FileStore {
         let data = self.parse_envelope::<T>(&backup_content)?;
         // 恢复成功后回写主文件，确保下次读取走主文件即可。
         self.write_atomic(path, backup_content.as_bytes())?;
+        Ok(data)
+    }
+
+    fn try_restore_from_backup_unlocked<T>(&self, path: &Path) -> StorageResult<T>
+    where
+        T: DeserializeOwned + Serialize + Clone,
+    {
+        let backup = backup_path(path);
+        let backup_content =
+            fs::read_to_string(&backup).map_err(|err| StorageError::BackupRecoveryFailed {
+                path: backup.clone(),
+                reason: err.to_string(),
+            })?;
+
+        // 备份内容也要经过 schema 校验，避免恢复到不合法数据。
+        let data = self.parse_envelope::<T>(&backup_content)?;
+        self.write_atomic_unlocked(path, backup_content.as_bytes())?;
         Ok(data)
     }
 }

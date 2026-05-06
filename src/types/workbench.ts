@@ -101,7 +101,14 @@ export type VideoMetadataResult = {
   rawProbeVersion?: string;
 };
 
-export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "canceled";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "canceled"
+  | "interrupted";
 
 /** 后端任务历史记录。 */
 export type JobHistory = {

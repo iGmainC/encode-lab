@@ -25,19 +25,27 @@ impl JobsHistoryRepo {
     }
 
     pub fn append(&self, job: JobHistory) -> StorageResult<()> {
-        let mut jobs = self.list()?;
-        jobs.push(job);
-        self.save_all(&jobs)
+        self.store
+            .mutate_data_or_default(&self.path, Vec::new(), |jobs: &mut Vec<JobHistory>| {
+                jobs.push(job);
+                Ok(())
+            })
+            .map(|_| ())
     }
 
     pub fn update(&self, job: &JobHistory) -> StorageResult<()> {
-        let mut jobs = self.list()?;
-        let existing = jobs
-            .iter_mut()
-            .find(|item| item.id == job.id)
-            .ok_or_else(|| crate::storage::errors::StorageError::NotFound(job.id.clone()))?;
+        self.store
+            .mutate_data_or_default(&self.path, Vec::new(), |jobs: &mut Vec<JobHistory>| {
+                let existing = jobs
+                    .iter_mut()
+                    .find(|item| item.id == job.id)
+                    .ok_or_else(|| {
+                        crate::storage::errors::StorageError::NotFound(job.id.clone())
+                    })?;
 
-        *existing = job.clone();
-        self.save_all(&jobs)
+                *existing = job.clone();
+                Ok(())
+            })
+            .map(|_| ())
     }
 }

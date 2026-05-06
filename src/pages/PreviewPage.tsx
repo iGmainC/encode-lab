@@ -69,6 +69,8 @@ export function PreviewPage({
   const [runtime, setRuntime] = useState<ComparePreviewRuntime>(emptyRuntime);
   const runtimeRef = useRef<ComparePreviewRuntime>(emptyRuntime);
   const [detachedPreviewError, setDetachedPreviewError] = useState<string | null>(null);
+  const [enqueueError, setEnqueueError] = useState<string | null>(null);
+  const [isEnqueuing, setIsEnqueuing] = useState(false);
 
   /**
    * 同步预览运行态，并保留 ref 供打开独立窗口时读取最新帧。
@@ -77,6 +79,27 @@ export function PreviewPage({
   const handleRuntimeChange = (value: ComparePreviewRuntime) => {
     runtimeRef.current = value;
     setRuntime(value);
+  };
+
+  /**
+   * 加入转码队列；失败时停留在预览页并展示后端错误。
+   */
+  const handleEnqueue = async () => {
+    if (!sourceFilePath || isEnqueuing) {
+      return;
+    }
+
+    setEnqueueError(null);
+    setIsEnqueuing(true);
+    try {
+      await onEnqueue();
+      setStep("enqueue");
+    } catch (error) {
+      // Tauri invoke 失败通常是字符串或 Error，这里统一转成可展示文案。
+      setEnqueueError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsEnqueuing(false);
+    }
   };
 
   /**
@@ -187,16 +210,18 @@ export function PreviewPage({
                     系统全屏预览
                   </Button>
                   <Button
-                    disabled={!sourceFilePath}
-                    onClick={() => {
-                      setStep("enqueue");
-                      void onEnqueue();
-                    }}
+                    disabled={!sourceFilePath || isEnqueuing}
+                    onClick={() => void handleEnqueue()}
                   >
-                    加入队列
+                    {isEnqueuing ? "加入中..." : "加入队列"}
                   </Button>
                 </div>
               </div>
+              {enqueueError ? (
+                <div className="mb-3 rounded-2xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                  {enqueueError}
+                </div>
+              ) : null}
               {detachedPreviewError ? (
                 <div className="mb-3 rounded-2xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                   {detachedPreviewError}

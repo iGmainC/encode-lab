@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, Runtime, State};
 
 use crate::{
     commands::error::{CommandError, CommandResult},
@@ -17,7 +17,8 @@ pub fn get_settings(state: State<'_, AppState>) -> CommandResult<AppSettings> {
 }
 
 #[tauri::command]
-pub fn update_settings(
+pub fn update_settings<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     payload: AppSettings,
 ) -> CommandResult<UpdateSettingsResponse> {
@@ -28,6 +29,10 @@ pub fn update_settings(
         .settings
         .update(&payload)
         .map_err(CommandError::from)?;
+
+    state
+        .transcode_manager
+        .update_concurrency(app, state.storage.clone(), payload.concurrency_n);
 
     Ok(UpdateSettingsResponse { ok: true })
 }

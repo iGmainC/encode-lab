@@ -18,11 +18,13 @@ use preview::PreviewManager;
 use storage::errors::StorageError;
 use tauri::{menu::MenuBuilder, tray::TrayIconBuilder, AppHandle, Manager, Runtime, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use transcode::job_manager::TranscodeManager;
 
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) storage: storage::AppStorage,
     pub(crate) preview_manager: PreviewManager,
+    pub(crate) transcode_manager: TranscodeManager,
     pub(crate) allow_exit: Arc<AtomicBool>,
 }
 
@@ -36,6 +38,7 @@ fn build_state<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<AppState, Stora
     Ok(AppState {
         storage: storage::AppStorage::new(app_data_dir),
         preview_manager: PreviewManager::new(runtime_dir),
+        transcode_manager: TranscodeManager::new(),
         allow_exit: Arc::new(AtomicBool::new(false)),
     })
 }
@@ -109,6 +112,10 @@ fn mark_exit_allowed_and_quit<R: Runtime>(app_handle: AppHandle<R>) {
     if let Some(state) = app_handle.try_state::<AppState>() {
         // 二次确认通过后允许本次退出，避免 ExitRequested 再次拦截。
         state.allow_exit.store(true, Ordering::SeqCst);
+        // 退出前统一中断排队/运行中的任务，并回写 history，避免下次启动误判。
+        state
+            .transcode_manager
+            .shutdown(&app_handle, &state.storage);
     }
     app_handle.exit(0);
 }

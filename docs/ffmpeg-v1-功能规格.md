@@ -183,9 +183,9 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 
 1. 可单选或多选输入视频。
 2. 复用同一任务配置批量入队。
-3. 统一输出目录，自动处理重名。
+3. 统一输出目录，自动处理重名；入队时输出文件名包含 `jobId` 短后缀，避免并发任务在 FFmpeg 创建文件前选中同一路径。
 4. 单个预览任务确认后可直接创建 task 与 job，job 写入 `jobs-history.json`，任务中心从真实历史读取，不使用前端 mock 数据。
-5. V1 后台转码任务先记录 `queued`，启动 FFmpeg 后更新为 `running`，结束后更新为 `completed` 或 `failed`，并通过 `job:updated` 事件触发前端刷新。
+5. V1 后台转码任务先记录 `queued`，调度器分配并发槽位后更新为 `running`，结束后更新为 `completed` 或 `failed`；应用退出中断时更新为 `interrupted`，并通过 `job:updated` 事件触发前端刷新。
 
 ### 4.4.2 队列策略
 
