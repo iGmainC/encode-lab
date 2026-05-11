@@ -220,7 +220,7 @@ fn build_single_pass_args(
     output_file: &str,
     sanitized_advanced: Option<&str>,
 ) -> StorageResult<Vec<String>> {
-    let mut args = base_input_args(input_file);
+    let mut args = base_input_args(payload, input_file);
     append_video_args(payload, &mut args)?;
     append_audio_args(payload, &mut args)?;
     append_container_args(payload, &mut args);
@@ -237,7 +237,7 @@ fn build_pass1_args(
     sanitized_advanced: Option<&str>,
 ) -> StorageResult<Vec<String>> {
     let mut args = vec!["-y".to_string()];
-    args.extend(base_input_args(input_file));
+    args.extend(base_input_args(payload, input_file));
 
     append_video_args(payload, &mut args)?;
     append_advanced_args(sanitized_advanced, &mut args);
@@ -260,7 +260,7 @@ fn build_pass2_args(
     passlog_path: &str,
     sanitized_advanced: Option<&str>,
 ) -> StorageResult<Vec<String>> {
-    let mut args = base_input_args(input_file);
+    let mut args = base_input_args(payload, input_file);
 
     append_video_args(payload, &mut args)?;
     args.push("-pass".to_string());
@@ -276,8 +276,27 @@ fn build_pass2_args(
     Ok(args)
 }
 
-fn base_input_args(input_file: &str) -> Vec<String> {
-    vec!["-i".to_string(), input_file.to_string()]
+fn base_input_args(payload: &TaskConfigPayload, input_file: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(clip_range) = &payload.clip_range {
+        // 正式转码使用输入前 seek 加输出时长限制；比仅在滤镜中裁剪更稳定覆盖音视频。
+        args.push("-ss".to_string());
+        args.push(format_seconds(clip_range.start_ms));
+    }
+
+    args.push("-i".to_string());
+    args.push(input_file.to_string());
+
+    if let Some(clip_range) = &payload.clip_range {
+        args.push("-t".to_string());
+        args.push(format_seconds(clip_range.end_ms - clip_range.start_ms));
+    }
+
+    args
+}
+
+fn format_seconds(value_ms: u64) -> String {
+    format!("{:.3}", value_ms as f64 / 1000.0)
 }
 
 fn append_video_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> StorageResult<()> {
@@ -614,8 +633,8 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::models::task::{
-        AudioConfig, AudioMode, ContainerConfig, ContainerFormat, OutputConfig, TaskConfigPayload,
-        VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
+        AudioConfig, AudioMode, ClipRange, ContainerConfig, ContainerFormat, OutputConfig,
+        TaskConfigPayload, VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
     };
 
     use super::{
@@ -626,6 +645,7 @@ mod tests {
     fn payload() -> TaskConfigPayload {
         TaskConfigPayload {
             name: "demo".to_string(),
+            clip_range: None,
             video: VideoConfig {
                 codec_format: VideoCodecFormat::H264,
                 encoder: VideoEncoder::Libx264,
@@ -668,6 +688,21 @@ mod tests {
         assert!(result.commands[0].contains("-c:a copy"));
         assert!(result.commands[0].contains("-strict -2"));
         assert!(result.commands[0].contains("-movflags +faststart"));
+    }
+
+    #[test]
+    fn build_single_pass_command_should_apply_clip_range() {
+        let mut value = payload();
+        value.clip_range = Some(ClipRange {
+            start_ms: 1_000,
+            end_ms: 4_500,
+        });
+
+        let result = build_ffmpeg_commands(&value, "input.mp4", "output.mp4").expect("build");
+        let cmd = &result.commands[0];
+
+        assert!(cmd.contains("-ss 1.000"));
+        assert!(cmd.contains("-i input.mp4 -t 3.500"));
     }
 
     #[test]

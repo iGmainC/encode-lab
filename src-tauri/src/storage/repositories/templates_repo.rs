@@ -99,4 +99,21 @@ impl TemplatesRepo {
         self.store.save_data(&self.path, &templates)?;
         Ok(new_id)
     }
+
+    /** 应用模板并更新最近使用时间。 */
+    pub fn apply(&self, template_id: &str) -> StorageResult<Template> {
+        let mut templates = self.list()?;
+        let template = templates
+            .iter_mut()
+            .find(|item| item.id == template_id)
+            .ok_or_else(|| StorageError::NotFound(template_id.to_string()))?;
+
+        // 应用模板本身不修改模板内容，只记录最近使用时间用于排序和追踪。
+        template.last_used_at = Some(Utc::now().to_rfc3339());
+        template.updated_at = Utc::now().to_rfc3339();
+        let applied = template.clone();
+
+        self.store.save_data(&self.path, &templates)?;
+        Ok(applied)
+    }
 }

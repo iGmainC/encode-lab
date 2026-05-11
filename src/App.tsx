@@ -11,6 +11,7 @@ import { PreviewPage } from "./pages/PreviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { TaskConfigPage } from "./pages/TaskConfigPage";
 import { TemplatesPage } from "./pages/TemplatesPage";
+import { useI18n } from "./i18n/I18nProvider";
 import type {
   AppSettings,
   CreateTaskResponse,
@@ -23,14 +24,6 @@ import type {
   TaskConfig,
   Template,
 } from "./types/workbench";
-
-const navItems = [
-  { label: "任务配置", to: "/task-config" },
-  { label: "预览", to: "/preview" },
-  { label: "任务中心", to: "/jobs" },
-  { label: "模板", to: "/templates" },
-  { label: "设置", to: "/settings" },
-];
 
 function buildSeedPayload(suffix: string) {
   return {
@@ -85,6 +78,7 @@ function AppRoutes({
   onSeed: () => void;
   onJobsChanged: () => void;
 }) {
+  const { t } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
   const [splitMode, setSplitMode] = useState<"vertical" | "horizontal">("vertical");
@@ -102,37 +96,48 @@ function AppRoutes({
     setFormTwoPass,
     sourceFilePath,
     taskDraftSnapshot,
+    applyTemplateSnapshot,
   } = useTaskDraft();
+
+  const navItems = useMemo(
+    () => [
+      { label: t("nav.workbench"), to: "/task-config" },
+      { label: t("nav.presets"), to: "/templates" },
+      { label: t("nav.jobs"), to: "/jobs" },
+      { label: t("nav.settings"), to: "/settings" },
+    ],
+    [t],
+  );
 
   const pageMeta = useMemo(() => {
     switch (location.pathname) {
       case "/preview":
         return {
-          title: "预览工作台",
-          description: "在单播放器对比视图中验证参数，尽量贴近真实转码性能。",
+          title: t("app.workbench.title"),
+          description: t("app.workbench.previewDescription"),
         };
       case "/jobs":
         return {
-          title: "任务中心",
-          description: "持续关注运行任务、排队任务和失败任务，并查看单任务详细信息。",
+          title: t("app.jobs.title"),
+          description: t("app.jobs.description"),
         };
       case "/templates":
         return {
-          title: "模板库",
-          description: "集中管理模板，并从模板直接进入预览与发起转码。",
+          title: t("app.presets.title"),
+          description: t("app.presets.description"),
         };
       case "/settings":
         return {
-          title: "应用设置",
-          description: "管理全局运行参数、默认目录和环境探测状态。",
+          title: t("app.settings.title"),
+          description: t("app.settings.description"),
         };
       default:
         return {
-          title: "任务配置工作台",
-          description: "以向导流组织源文件、参数配置、预览和发起转码。",
+          title: t("app.workbench.title"),
+          description: t("app.workbench.description"),
         };
     }
-  }, [location.pathname]);
+  }, [location.pathname, t]);
 
   const filteredEncoders = useMemo(
     () => (encoderCapabilities?.items ?? []).filter((item) => item.codecFormat === formCodec),
@@ -209,14 +214,14 @@ function AppRoutes({
       <div className="space-y-4">
         {error ? (
           <Alert className="border-destructive/30 bg-destructive/10">
-            <AlertTitle>请求失败</AlertTitle>
+            <AlertTitle>{t("app.error.title")}</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         ) : null}
 
         {seedMessage ? (
           <Alert className="border-primary/30 bg-primary/5">
-            <AlertTitle>写入完成</AlertTitle>
+            <AlertTitle>{t("app.seed.title")}</AlertTitle>
             <AlertDescription>{seedMessage}</AlertDescription>
           </Alert>
         ) : null}
@@ -230,6 +235,7 @@ function AppRoutes({
                 selectedEncoderCapability={selectedEncoderCapability}
                 ffmpegProbe={ffmpegProbe}
                 onGoPreview={() => navigate("/preview")}
+                onTemplatesChanged={onRefresh}
               />
             }
           />
@@ -243,6 +249,7 @@ function AppRoutes({
                 setSplitterPosition={setSplitterPosition}
                 compareOrder={compareOrder}
                 setCompareOrder={setCompareOrder}
+                onBackConfig={() => navigate("/task-config")}
                 onEnqueue={enqueueCurrentDraft}
               />
             }
@@ -258,6 +265,11 @@ function AppRoutes({
                 templateCount={templates.length}
                 taskCount={tasks.length}
                 templates={templates}
+                onTemplatesChanged={onRefresh}
+                onApplyTemplate={(template) => {
+                  applyTemplateSnapshot(template.taskConfigSnapshot);
+                  navigate("/task-config");
+                }}
               />
             }
           />
@@ -270,6 +282,7 @@ function AppRoutes({
 }
 
 function WorkbenchApp() {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(true);
   const [seeding, setSeeding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -325,13 +338,13 @@ function WorkbenchApp() {
         },
       });
       await fetchAll();
-      setSeedMessage(`已创建 task=${createResult.taskId}，template=${templateResult.templateId}`);
+      setSeedMessage(t("app.seed.message", { taskId: createResult.taskId, templateId: templateResult.templateId }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSeeding(false);
     }
-  }, [fetchAll]);
+  }, [fetchAll, t]);
 
   useEffect(() => {
     void fetchAll();

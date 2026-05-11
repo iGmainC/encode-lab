@@ -16,7 +16,11 @@ use std::{
 
 use preview::PreviewManager;
 use storage::errors::StorageError;
-use tauri::{menu::MenuBuilder, tray::TrayIconBuilder, AppHandle, Manager, Runtime, WindowEvent};
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::TrayIconBuilder,
+    AppHandle, Manager, Runtime, WindowEvent,
+};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use transcode::job_manager::TranscodeManager;
 
@@ -47,14 +51,12 @@ fn build_runtime_dir(app_data_dir: &PathBuf) -> PathBuf {
     app_data_dir.join("runtime")
 }
 
+const TRAY_ID: &str = "encode-lab-tray"; // 托盘图标固定 id，用于任务状态变化时定位并刷新菜单。
+
 fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
-    let menu = MenuBuilder::new(app)
-        .text("show-main-window", "显示主窗口")
-        .separator()
-        .text("quit-app", "退出 Encode Lab")
-        .build()?;
+    let menu = build_tray_menu(app)?;
     let icon = app.default_window_icon().cloned();
-    let mut tray_builder = TrayIconBuilder::with_id("encode-lab-tray")
+    let mut tray_builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("Encode Lab")
@@ -71,6 +73,86 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 
     tray_builder.build(app)?;
     Ok(())
+}
+
+/** 构建托盘菜单；任务状态项为只读展示项，不参与点击交互。 */
+fn build_tray_menu<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<tauri::menu::Menu<R>> {
+    let task_status_item = MenuItemBuilder::with_id("task-status", tray_task_status_text(manager))
+        .enabled(false)
+        .build(manager)?;
+
+    let menu = MenuBuilder::new(manager)
+        .item(&task_status_item)
+        .separator()
+        .text("show-main-window", "显示主窗口")
+        .separator()
+        .text("quit-app", "退出 Encode Lab")
+        .build()?;
+
+    Ok(menu)
+}
+
+/** 从持久化任务历史中读取当前托盘状态文案。 */
+fn tray_task_status_text<R: Runtime, M: Manager<R>>(manager: &M) -> String {
+    let Some(state) = manager.try_state::<AppState>() else {
+        return "任务：状态读取中".to_string();
+    };
+
+    match state.storage.jobs_history.list() {
+        Ok(jobs) => format_task_status(&jobs),
+        Err(_) => "任务：状态读取失败".to_string(),
+    }
+}
+
+/** 将任务历史压缩成托盘菜单中的短状态摘要。 */
+fn format_task_status(jobs: &[models::JobHistory]) -> String {
+    let mut queued = 0;
+    let mut running = 0;
+    let mut failed = 0;
+    let mut interrupted = 0;
+
+    for job in jobs {
+        match job.status.as_str() {
+            "queued" => queued += 1,
+            "running" => running += 1,
+            "failed" => failed += 1,
+            "interrupted" => interrupted += 1,
+            _ => {}
+        }
+    }
+
+    let mut parts = Vec::new();
+    if running > 0 {
+        parts.push(format!("运行 {running}"));
+    }
+    if queued > 0 {
+        parts.push(format!("排队 {queued}"));
+    }
+    if failed > 0 {
+        parts.push(format!("失败 {failed}"));
+    }
+    if interrupted > 0 {
+        parts.push(format!("中断 {interrupted}"));
+    }
+
+    if parts.is_empty() {
+        "任务：空闲".to_string()
+    } else {
+        format!("任务：{}", parts.join("，"))
+    }
+}
+
+/** 刷新托盘菜单，确保原生菜单里的任务状态跟随后端任务写回变化。 */
+pub(crate) fn refresh_tray_menu<R: Runtime>(app_handle: &AppHandle<R>) {
+    let Some(tray) = app_handle.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let Ok(menu) = build_tray_menu(app_handle) else {
+        return;
+    };
+
+    // 托盘菜单是原生菜单，任务状态变更后需要替换菜单实例才能刷新文案。
+    let _ = tray.set_menu(Some(menu));
 }
 
 fn show_main_window<R: Runtime>(app_handle: &AppHandle<R>) {
@@ -159,6 +241,7 @@ pub fn run() {
             commands::templates::update_template,
             commands::templates::delete_template,
             commands::templates::duplicate_template,
+            commands::templates::apply_template,
             commands::templates::list_templates,
             commands::settings::get_settings,
             commands::settings::update_settings,

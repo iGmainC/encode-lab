@@ -53,6 +53,14 @@ impl Validate for TaskConfigPayload {
             ));
         }
 
+        if let Some(clip_range) = &self.clip_range {
+            if clip_range.end_ms <= clip_range.start_ms {
+                return Err(StorageError::InvalidPayload(
+                    "clipRange.endMs must be greater than clipRange.startMs".to_string(),
+                ));
+            }
+        }
+
         // 数值边界校验
         if let Some(resolution) = &self.video.resolution {
             if resolution.width == 0 || resolution.height == 0 {

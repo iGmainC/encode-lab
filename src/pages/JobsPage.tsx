@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { JobDetailPanel } from "../components/workbench/JobDetailPanel";
+import { useI18n } from "../i18n/I18nProvider";
 import type {
   ControlJobResponse,
   DeleteJobResponse,
@@ -17,6 +18,7 @@ type Props = {
 };
 
 export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
+  const { t } = useI18n();
   const sortedJobs = useMemo(() => sortJobsByCreatedAtDesc(jobs), [jobs]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(sortedJobs[0]?.id ?? null);
   const [cancelingJobId, setCancelingJobId] = useState<string | null>(null);
@@ -75,19 +77,19 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardContent className="p-5">
-            <div className="text-sm text-muted-foreground">运行中</div>
+            <div className="text-sm text-muted-foreground">{t("jobs.running")}</div>
             <div className="mt-2 text-3xl font-semibold">{runningCount}</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
-            <div className="text-sm text-muted-foreground">排队中</div>
+            <div className="text-sm text-muted-foreground">{t("jobs.queued")}</div>
             <div className="mt-2 text-3xl font-semibold">{queuedCount}</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
-            <div className="text-sm text-muted-foreground">失败</div>
+            <div className="text-sm text-muted-foreground">{t("jobs.failed")}</div>
             <div className="mt-2 text-3xl font-semibold">{failedCount}</div>
           </CardContent>
         </Card>
@@ -96,8 +98,8 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
         <Card>
           <CardHeader>
-            <CardTitle>任务中心</CardTitle>
-            <CardDescription>左侧列表用于浏览和筛选任务，右侧详情固定展示单任务状态。</CardDescription>
+            <CardTitle>{t("jobs.title")}</CardTitle>
+            <CardDescription>{t("jobs.description")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {sortedJobs.map((job) => (
@@ -113,7 +115,7 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
                   <div className="min-w-0 flex-1">
                     <div className="font-medium">{job.name ?? job.outputFile}</div>
                     <div className="mt-1 text-sm text-muted-foreground">
-                      输出 {job.outputFile}
+                      {t("jobs.output", { value: job.outputFile })}
                     </div>
                     <JobProgress metrics={jobMetrics[job.id]} />
                   </div>
@@ -153,6 +155,8 @@ function sortJobsByCreatedAtDesc(jobs: JobHistory[]) {
 }
 
 function JobProgress({ metrics }: { metrics?: JobMetricsEvent }) {
+  const { t } = useI18n();
+
   if (!metrics) {
     return null;
   }
@@ -166,7 +170,7 @@ function JobProgress({ metrics }: { metrics?: JobMetricsEvent }) {
         />
       </div>
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span>{formatProgress(metrics.progress)}</span>
+        <span>{formatProgress(metrics.progress, t("jobs.progressEmpty"))}</span>
         <span>fps {formatNumber(metrics.fps)}</span>
         <span>speed {formatSpeed(metrics.speed)}</span>
         <span>ETA {formatEta(metrics.etaSec)}</span>
@@ -176,8 +180,8 @@ function JobProgress({ metrics }: { metrics?: JobMetricsEvent }) {
   );
 }
 
-function formatProgress(value?: number | null) {
-  return typeof value === "number" ? `${value.toFixed(1)}%` : "进度 -";
+function formatProgress(value: number | null | undefined, emptyText: string) {
+  return typeof value === "number" ? `${value.toFixed(1)}%` : emptyText;
 }
 
 function formatNumber(value?: number | null) {

@@ -13,8 +13,8 @@ use chrono::Utc;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{
-    models::JobHistory, probe::video_metadata::read_video_track_size_bytes, storage::AppStorage,
-    transcode::command_builder::build_passlog_path,
+    models::JobHistory, probe::video_metadata::read_video_track_size_bytes, refresh_tray_menu,
+    storage::AppStorage, transcode::command_builder::build_passlog_path,
 };
 
 /** FFmpeg 子进程共享槽位，用于退出时从主线程中断后台进程。 */
@@ -297,6 +297,7 @@ impl TranscodeManager {
         if removed {
             let _ = storage.jobs_history.update(job);
             let _ = app.emit("job:updated", &*job);
+            refresh_tray_menu(&app);
         }
 
         self.start_available_jobs(app, storage);
@@ -340,6 +341,7 @@ fn run_transcode_job<R: Runtime>(
         job.started_at = Some(Utc::now().to_rfc3339());
         let _ = storage.jobs_history.update(&job);
         let _ = app.emit("job:updated", &job);
+        refresh_tray_menu(&app);
     }
 
     let step_count = command_args.len().max(1);
@@ -684,6 +686,7 @@ fn mark_interrupted<R: Runtime>(
     job.ended_at = Some(Utc::now().to_rfc3339());
     let _ = storage.jobs_history.update(job);
     let _ = app.emit("job:updated", &*job);
+    refresh_tray_menu(app);
 }
 
 /** 将任务标记为用户取消并广播给前端任务列表。 */
@@ -699,6 +702,7 @@ fn mark_canceled<R: Runtime>(
     cleanup_job_artifacts(job);
     let _ = storage.jobs_history.update(job);
     let _ = app.emit("job:updated", &*job);
+    refresh_tray_menu(app);
 }
 
 /** 判断当前任务是否由用户取消触发中断。 */

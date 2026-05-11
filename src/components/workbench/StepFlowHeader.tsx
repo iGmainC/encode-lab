@@ -1,11 +1,12 @@
 import { Badge } from "../ui/badge";
+import { useI18n } from "../../i18n/I18nProvider";
 import type { TaskDraftStep } from "../../types/workbench";
 
-const orderedSteps: { key: TaskDraftStep; label: string }[] = [
-  { key: "source", label: "选择源文件" },
-  { key: "config", label: "配置参数" },
-  { key: "preview", label: "预览校验" },
-  { key: "enqueue", label: "发起转码" },
+const orderedSteps: { key: TaskDraftStep; labelKey: Parameters<ReturnType<typeof useI18n>["t"]>[0] }[] = [
+  { key: "source", labelKey: "step.source" },
+  { key: "config", labelKey: "step.config" },
+  { key: "preview", labelKey: "step.preview" },
+  { key: "enqueue", labelKey: "step.enqueue" },
 ];
 
 export function StepFlowHeader({
@@ -13,14 +14,15 @@ export function StepFlowHeader({
 }: {
   currentStep: TaskDraftStep;
 }) {
+  const { t } = useI18n();
   const currentIndex = orderedSteps.findIndex((item) => item.key === currentStep);
 
   return (
     <div className="rounded-2xl border bg-card p-4">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <div className="text-sm font-medium">工作流向导</div>
-          <p className="text-sm text-muted-foreground">在任务配置页内保持顺序引导，但不影响左侧栏自由切换。</p>
+          <div className="text-sm font-medium">{t("step.title")}</div>
+          <p className="text-sm text-muted-foreground">{t("step.description")}</p>
         </div>
         <Badge variant="outline">V1 Flow</Badge>
       </div>
@@ -40,9 +42,9 @@ export function StepFlowHeader({
               }`}
             >
               <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
-                Step {index + 1}
+                {t("step.label", { index: index + 1 })}
               </div>
-              <div className="font-medium text-foreground">{item.label}</div>
+              <div className="font-medium text-foreground">{t(item.labelKey)}</div>
             </div>
           );
         })}

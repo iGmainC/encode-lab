@@ -7,6 +7,8 @@ use crate::models::node::FileLocation;
 pub struct TaskConfig {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub clip_range: Option<ClipRange>,
     pub video: VideoConfig,
     pub audio: AudioConfig,
     pub container: ContainerConfig,
@@ -20,11 +22,20 @@ pub struct TaskConfig {
 #[serde(rename_all = "camelCase")]
 pub struct TaskConfigPayload {
     pub name: String,
+    #[serde(default)]
+    pub clip_range: Option<ClipRange>,
     pub video: VideoConfig,
     pub audio: AudioConfig,
     pub container: ContainerConfig,
     pub advanced_args: Option<String>,
     pub output: OutputConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

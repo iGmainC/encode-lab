@@ -34,6 +34,7 @@ impl TasksRepo {
         tasks.push(TaskConfig {
             id: id.clone(),
             name: payload.name,
+            clip_range: payload.clip_range,
             video: payload.video,
             audio: payload.audio,
             container: payload.container,
@@ -55,6 +56,7 @@ impl TasksRepo {
             .ok_or_else(|| StorageError::NotFound(task_id.to_string()))?;
 
         task.name = payload.name;
+        task.clip_range = payload.clip_range;
         task.video = payload.video;
         task.audio = payload.audio;
         task.container = payload.container;

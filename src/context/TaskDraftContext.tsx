@@ -73,6 +73,10 @@ type TaskDraftContextValue = {
   setContainerFormat: (value: "mp4" | "mkv" | "mov") => void;
   containerFaststart: boolean;
   setContainerFaststart: (value: boolean) => void;
+  clipStartSec: number;
+  setClipStartSec: (value: number) => void;
+  clipEndSec: number;
+  setClipEndSec: (value: number) => void;
   sourceFilePath: string;
   setSourceFilePath: (value: string) => void;
   videoMetadata: VideoMetadataResult | null;
@@ -81,6 +85,7 @@ type TaskDraftContextValue = {
   isDragOverWindow: boolean;
   pickSourceFile: () => Promise<void>;
   retryVideoMetadata: () => Promise<void>;
+  applyTemplateSnapshot: (snapshot: TaskDraftSnapshot) => void;
   taskDraftSnapshot: TaskDraftSnapshot;
 };
 
@@ -115,6 +120,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [av1FilmGrain, setAv1FilmGrain] = useState("0");
   const [containerFormat, setContainerFormat] = useState<"mp4" | "mkv" | "mov">("mp4");
   const [containerFaststart, setContainerFaststart] = useState(true);
+  const [clipStartSec, setClipStartSec] = useState(0);
+  const [clipEndSec, setClipEndSec] = useState(0);
   const [sourceFilePath, setSourceFilePath] = useState("");
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadataResult | null>(null);
   const [videoMetadataLoading, setVideoMetadataLoading] = useState(false);
@@ -223,6 +230,23 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   }, [keepOriginalFps, videoMetadata?.video?.fps]);
 
   useEffect(() => {
+    const durationSec = videoMetadata?.durationSec;
+    if (!durationSec || durationSec <= 0) {
+      setClipStartSec(0);
+      setClipEndSec(0);
+      return;
+    }
+
+    setClipStartSec((current) => Math.min(Math.max(0, current), durationSec));
+    setClipEndSec((current) => {
+      if (current <= 0) {
+        return durationSec;
+      }
+      return Math.min(Math.max(current, 0), durationSec);
+    });
+  }, [videoMetadata?.durationSec]);
+
+  useEffect(() => {
     if (videoMetadata?.video?.hdrType !== "DolbyVision") {
       setPreserveDolbyVisionMetadata(false);
     }
@@ -251,6 +275,48 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const retryVideoMetadata = useCallback(async () => {
     await fetchVideoMetadata(sourceFilePath);
   }, [fetchVideoMetadata, sourceFilePath]);
+
+  /**
+   * 将模板快照写回当前任务草稿表单。
+   * @param snapshot 模板保存的任务参数快照
+   */
+  const applyTemplateSnapshot = useCallback((snapshot: TaskDraftSnapshot) => {
+    const video = snapshot.video;
+    const container = snapshot.container;
+    const advancedArgs = snapshot.advancedArgs ?? "";
+    const clipRange = snapshot.clipRange;
+
+    setClipStartSec(clipRange ? clipRange.startMs / 1000 : 0);
+    setClipEndSec(clipRange ? clipRange.endMs / 1000 : videoMetadata?.durationSec ?? 0);
+    setFormCodec(video.codecFormat);
+    setFormEncoder(video.encoder);
+    setFormMode(video.bitrateMode);
+    setFormTwoPass(Boolean(video.enableTwoPass));
+    setFormCrf(video.crf ?? 23);
+    setFormPreset(video.preset ?? "");
+    setKeepOriginalResolution(video.keepOriginalResolution ?? !video.resolution);
+    setKeepOriginalFps(video.keepOriginalFps ?? !video.fps);
+    setPreserveDolbyVisionMetadata(Boolean(video.preserveDolbyVisionMetadata));
+    setFormWidth(video.resolution?.width ? String(video.resolution.width) : "1920");
+    setFormHeight(video.resolution?.height ? String(video.resolution.height) : "1080");
+    setFormFps(video.fps ? String(video.fps) : "30");
+    setFormPixelFormat(video.pixelFormat ?? "yuv420p");
+    setContainerFormat(container.format);
+    setContainerFaststart(Boolean(container.faststart));
+    setFormBitrateKbps(readAdvancedArgValue(advancedArgs, "-b:v") ?? "5000");
+    setFormMaxrateKbps(readAdvancedArgValue(advancedArgs, "-maxrate") ?? "7000");
+    setFormBufsizeKbps(readAdvancedArgValue(advancedArgs, "-bufsize") ?? "10000");
+    setFormColorPrimaries(readAdvancedArgValue(advancedArgs, "-color_primaries") ?? "bt709");
+    setFormColorTrc(readAdvancedArgValue(advancedArgs, "-color_trc") ?? "bt709");
+    setFormColorspace(readAdvancedArgValue(advancedArgs, "-colorspace") ?? "bt709");
+    setAv1CpuUsed(readAdvancedArgValue(advancedArgs, "-cpu-used") ?? "6");
+    setAv1RowMt(readAdvancedArgValue(advancedArgs, "-row-mt") !== "0");
+    setAv1TileColumns(readTilePart(advancedArgs, 0) ?? "2");
+    setAv1TileRows(readTilePart(advancedArgs, 1) ?? "1");
+    setAv1SvtTune(readSvtParamValue(advancedArgs, "tune") ?? "0");
+    setAv1FilmGrain(readSvtParamValue(advancedArgs, "film-grain") ?? "0");
+    setStep("config");
+  }, [videoMetadata?.durationSec]);
 
   /**
    * 构建色彩元数据参数。
@@ -343,9 +409,22 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   ]);
 
   const taskDraftSnapshot = useMemo<TaskDraftSnapshot>(
-    () => ({
-      name: "preview-draft",
-      video: {
+    () => {
+      const durationSec = videoMetadata?.durationSec ?? 0;
+      const hasClipRange =
+        durationSec > 0 &&
+        clipEndSec > clipStartSec &&
+        (clipStartSec > 0 || clipEndSec < durationSec);
+
+      return {
+        name: "preview-draft",
+        clipRange: hasClipRange
+          ? {
+              startMs: Math.round(clipStartSec * 1000),
+              endMs: Math.round(clipEndSec * 1000),
+            }
+          : undefined,
+        video: {
         codecFormat: formCodec as TaskDraftSnapshot["video"]["codecFormat"],
         encoder: formEncoder,
         bitrateMode: formMode,
@@ -380,8 +459,11 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
         fileNamePattern: "{inputName}_{taskName}",
         overwrite: "autoRename",
       },
-    }),
+      };
+    },
     [
+      clipStartSec,
+      clipEndSec,
       formCodec,
       formEncoder,
       formMode,
@@ -401,6 +483,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       containerFormat,
       containerFaststart,
       buildAdvancedArgs,
+      videoMetadata?.durationSec,
     ],
   );
 
@@ -462,6 +545,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setContainerFormat,
       containerFaststart,
       setContainerFaststart,
+      clipStartSec,
+      setClipStartSec,
+      clipEndSec,
+      setClipEndSec,
       sourceFilePath,
       setSourceFilePath,
       videoMetadata,
@@ -470,6 +557,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       isDragOverWindow,
       pickSourceFile,
       retryVideoMetadata,
+      applyTemplateSnapshot,
       taskDraftSnapshot,
     }),
     [
@@ -501,6 +589,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       av1FilmGrain,
       containerFormat,
       containerFaststart,
+      clipStartSec,
+      clipEndSec,
       sourceFilePath,
       videoMetadata,
       videoMetadataLoading,
@@ -508,11 +598,47 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       isDragOverWindow,
       pickSourceFile,
       retryVideoMetadata,
+      applyTemplateSnapshot,
       taskDraftSnapshot,
     ],
   );
 
   return <TaskDraftContext.Provider value={value}>{children}</TaskDraftContext.Provider>;
+}
+
+/**
+ * 从高级参数中读取指定 flag 后面的值，并去掉常见码率单位。
+ * @param args 高级参数字符串
+ * @param flag 参数名
+ */
+function readAdvancedArgValue(args: string, flag: string) {
+  const tokens = args.trim().split(/\s+/);
+  const index = tokens.indexOf(flag);
+  const value = index >= 0 ? tokens[index + 1] : undefined;
+  return value?.replace(/k$/i, "");
+}
+
+/**
+ * 读取 libaom tiles 参数的列或行。
+ * @param args 高级参数字符串
+ * @param index 0 为 columns，1 为 rows
+ */
+function readTilePart(args: string, index: 0 | 1) {
+  const value = readAdvancedArgValue(args, "-tiles");
+  return value?.split("x")[index];
+}
+
+/**
+ * 读取 svtav1 参数值。
+ * @param args 高级参数字符串
+ * @param key svtav1 参数名
+ */
+function readSvtParamValue(args: string, key: string) {
+  const params = readAdvancedArgValue(args, "-svtav1-params");
+  return params
+    ?.split(":")
+    .map((item) => item.split("="))
+    .find(([name]) => name === key)?.[1];
 }
 
 export function useTaskDraft() {

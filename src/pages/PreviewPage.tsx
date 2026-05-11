@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../co
 import { ComparePreviewPlayer } from "../components/workbench/ComparePreviewPlayer";
 import { PreviewInspector } from "../components/workbench/PreviewInspector";
 import { useTaskDraft } from "../context/TaskDraftContext";
+import { useI18n } from "../i18n/I18nProvider";
 import {
   DETACHED_PREVIEW_UPDATE_EVENT,
   type DetachedPreviewPayload,
@@ -19,6 +20,7 @@ type Props = {
   setSplitterPosition: (value: number) => void;
   compareOrder: CompareImageOrder;
   setCompareOrder: (value: CompareImageOrder) => void;
+  onBackConfig: () => void;
   onEnqueue: () => Promise<void>;
 };
 
@@ -55,8 +57,10 @@ export function PreviewPage({
   setSplitterPosition,
   compareOrder,
   setCompareOrder,
+  onBackConfig,
   onEnqueue,
 }: Props) {
+  const { t } = useI18n();
   const {
     setStep,
     sourceFilePath,
@@ -71,6 +75,15 @@ export function PreviewPage({
   const [detachedPreviewError, setDetachedPreviewError] = useState<string | null>(null);
   const [enqueueError, setEnqueueError] = useState<string | null>(null);
   const [isEnqueuing, setIsEnqueuing] = useState(false);
+
+  /**
+   * 返回任务配置页，保留当前草稿供继续调整。
+   */
+  const handleBackConfig = () => {
+    // 预览页回退只改变流程阶段，不清空任何已配置参数。
+    setStep("config");
+    onBackConfig();
+  };
 
   /**
    * 同步预览运行态，并保留 ref 供打开独立窗口时读取最新帧。
@@ -107,7 +120,7 @@ export function PreviewPage({
    */
   const openDetachedPreviewWindow = async (runtimeOverride?: ComparePreviewRuntime) => {
     if (!sourceFilePath) {
-      setDetachedPreviewError("请先选择源视频后再打开独立预览窗口。");
+      setDetachedPreviewError(t("preview.detached.needSource"));
       return;
     }
 
@@ -165,7 +178,7 @@ export function PreviewPage({
         void lockDetachedPreviewWindow(previewWindow);
       });
       void previewWindow.once("tauri://error", (event) => {
-        setDetachedPreviewError(`独立预览窗口创建失败：${String(event.payload)}`);
+        setDetachedPreviewError(t("preview.detached.createFailed", { message: String(event.payload) }));
       });
     } catch (err) {
       setDetachedPreviewError(err instanceof Error ? err.message : String(err));
@@ -177,8 +190,8 @@ export function PreviewPage({
       <div className="space-y-4">
         <Card>
           <CardHeader>
-            <CardTitle>按帧图片对比预览</CardTitle>
-            <CardDescription>时间轴定位当前帧，源帧与参数预览帧通过分割线叠放对比。</CardDescription>
+            <CardTitle>{t("preview.card.title")}</CardTitle>
+            <CardDescription>{t("preview.card.description")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ComparePreviewPlayer
@@ -198,22 +211,25 @@ export function PreviewPage({
             <div className="rounded-2xl border p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <div className="font-medium">预览控制区</div>
-                  <p className="text-sm text-muted-foreground">进入队列前，在这里确认当前时间点、分割方式和预览状态是否符合预期。</p>
+                  <div className="font-medium">{t("preview.control.title")}</div>
+                  <p className="text-sm text-muted-foreground">{t("preview.control.description")}</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" onClick={handleBackConfig}>
+                    {t("preview.back")}
+                  </Button>
                   <Button
                     variant="secondary"
                     disabled={!sourceFilePath}
                     onClick={() => void openDetachedPreviewWindow()}
                   >
-                    系统全屏预览
+                    {t("preview.fullscreen")}
                   </Button>
                   <Button
                     disabled={!sourceFilePath || isEnqueuing}
                     onClick={() => void handleEnqueue()}
                   >
-                    {isEnqueuing ? "加入中..." : "加入队列"}
+                    {isEnqueuing ? t("preview.enqueuing") : t("preview.enqueue")}
                   </Button>
                 </div>
               </div>
@@ -234,7 +250,7 @@ export function PreviewPage({
                   splitter: {(splitterPosition * 100).toFixed(0)}%
                 </div>
                 <div className="rounded-2xl border p-3 text-sm md:col-span-3">
-                  compare: {compareOrder === "source-first" ? "原始在左/上，转码后在右/下" : "转码后在左/上，原始在右/下"}
+                  compare: {compareOrder === "source-first" ? t("preview.compare.sourceFirst") : t("preview.compare.previewFirst")}
                 </div>
               </div>
             </div>

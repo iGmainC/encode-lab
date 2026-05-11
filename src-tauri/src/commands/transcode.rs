@@ -12,6 +12,7 @@ use crate::{
     commands::error::{CommandError, CommandResult},
     models::{FileLocation, JobHistory, TaskConfigPayload, Validate, LOCAL_NODE_ID},
     probe::video_metadata::read_video_metadata,
+    refresh_tray_menu,
     transcode::command_builder::{build_ffmpeg_command_args, build_ffmpeg_commands},
     transcode::job_manager::TranscodeJobRequest,
     AppState,
@@ -132,9 +133,15 @@ pub fn enqueue_transcode_job<R: Runtime>(
         .map_err(CommandError::from)?
         .commands
         .join(" && ");
-    let duration_sec = read_video_metadata(&request.input_file)
+    let source_duration_sec = read_video_metadata(&request.input_file)
         .ok()
         .and_then(|metadata| metadata.duration_sec);
+    let duration_sec = request
+        .payload
+        .clip_range
+        .as_ref()
+        .map(|range| (range.end_ms - range.start_ms) as f64 / 1000.0)
+        .or(source_duration_sec);
     let input_location = request
         .input_location
         .clone()
@@ -185,6 +192,7 @@ pub fn enqueue_transcode_job<R: Runtime>(
         .append(job.clone())
         .map_err(CommandError::from)?;
     let _ = app.emit("job:updated", &job);
+    refresh_tray_menu(&app);
 
     let concurrency_n = state
         .storage
@@ -238,7 +246,8 @@ pub fn control_job<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn delete_job(
+pub fn delete_job<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     request: DeleteJobRequest,
 ) -> CommandResult<DeleteJobResponse> {
@@ -263,6 +272,7 @@ pub fn delete_job(
         .jobs_history
         .delete(&request.job_id)
         .map_err(CommandError::from)?;
+    refresh_tray_menu(&app);
 
     Ok(DeleteJobResponse { ok: true })
 }

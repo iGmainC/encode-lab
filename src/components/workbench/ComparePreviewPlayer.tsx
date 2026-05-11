@@ -5,6 +5,7 @@ import { Maximize2, Minimize2, X } from "lucide-react";
 import { Button } from "../ui/button";
 import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
+import { useI18n } from "../../i18n/I18nProvider";
 import type {
   CompareImageOrder,
   ComparePreviewFrameSnapshot,
@@ -303,6 +304,7 @@ function usePreviewFrameSession({
   initialFrame,
   deferSessionUntilInteraction,
   isScrubbingTimeline,
+  imageLoadFailedText,
 }: {
   sourceFile: string;
   taskDraftSnapshot: TaskDraftSnapshot;
@@ -314,6 +316,7 @@ function usePreviewFrameSession({
   initialFrame?: ComparePreviewFrameSnapshot;
   deferSessionUntilInteraction: boolean;
   isScrubbingTimeline: boolean;
+  imageLoadFailedText: string;
 }) {
   const sessionIdRef = useRef<string | null>(null);
   const desiredRenderKeyRef = useRef(desiredRenderKey);
@@ -447,7 +450,7 @@ function usePreviewFrameSession({
   const retryCurrentFrame = useCallback(() => {
     if (fallbackRenderKeyRef.current === desiredRenderKey) {
       setPreviewState("error");
-      setPreviewError("预览帧图片加载失败，请重新生成当前帧");
+      setPreviewError(imageLoadFailedText);
       return;
     }
 
@@ -455,7 +458,7 @@ function usePreviewFrameSession({
     fallbackRenderKeyRef.current = desiredRenderKey;
     clearFrameSnapshot();
     void requestFrame(desiredTimeMs, desiredRenderKey);
-  }, [clearFrameSnapshot, desiredRenderKey, desiredTimeMs, requestFrame]);
+  }, [clearFrameSnapshot, desiredRenderKey, desiredTimeMs, imageLoadFailedText, requestFrame]);
 
   useEffect(() => {
     let unlistenFrame: (() => void) | undefined;
@@ -734,6 +737,7 @@ export function ComparePreviewPlayer({
   onFullscreenButtonClick,
   fullscreenButtonIcon = "fullscreen",
 }: Props) {
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hideTimerRef = useRef<number | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -786,6 +790,7 @@ export function ComparePreviewPlayer({
     initialFrame,
     deferSessionUntilInteraction,
     isScrubbingTimeline: timeline.isScrubbingTimeline,
+    imageLoadFailedText: t("preview.imageLoadFailed"),
   });
   requestFrameRef.current = (timeMs, renderKey) => {
     void previewSession.requestFrame(timeMs, renderKey);
@@ -808,10 +813,10 @@ export function ComparePreviewPlayer({
       : sourceIsFirst
         ? `inset(${splitterPercent}% 0 0 0)`
         : `inset(0 0 ${100 - splitterPercent}% 0)`;
-  const firstPaneLabel = sourceIsFirst ? "原始图像" : "转码后图像";
-  const secondPaneLabel = sourceIsFirst ? "转码后图像" : "原始图像";
-  const firstPaneSideLabel = splitMode === "vertical" ? "左侧" : "上方";
-  const secondPaneSideLabel = splitMode === "vertical" ? "右侧" : "下方";
+  const firstPaneLabel = sourceIsFirst ? t("preview.frame.source") : t("preview.frame.preview");
+  const secondPaneLabel = sourceIsFirst ? t("preview.frame.preview") : t("preview.frame.source");
+  const firstPaneSideLabel = splitMode === "vertical" ? t("preview.side.left") : t("preview.side.top");
+  const secondPaneSideLabel = splitMode === "vertical" ? t("preview.side.right") : t("preview.side.bottom");
   const firstPaneClass = "left-4 top-20";
   const secondPaneClass =
     splitMode === "vertical" ? "right-4 top-20" : "left-4 bottom-28";
@@ -975,7 +980,7 @@ export function ComparePreviewPlayer({
               </>
             ) : (
               <div className="grid h-full place-items-center text-sm text-white/70">
-                {previewSession.previewState === "error" ? "预览帧生成失败" : "正在生成当前时间点预览帧..."}
+                {previewSession.previewState === "error" ? t("preview.frameFailed") : t("preview.frameLoading")}
               </div>
             )}
           </div>
@@ -985,7 +990,7 @@ export function ComparePreviewPlayer({
               previewFullscreenActive ? "h-full" : "aspect-video"
             }`}
           >
-            先在任务配置页选择源视频，再进入预览。
+            {t("preview.needSource")}
           </div>
         )}
 
@@ -1024,9 +1029,9 @@ export function ComparePreviewPlayer({
           }`}
         >
           <div className="text-sm text-white/90">
-            <div className="font-medium">按帧图片对比</div>
+            <div className="font-medium">{t("preview.player.title")}</div>
             <div className="text-xs text-white/70">
-              {previewSession.previewState} · {previewSession.degradedFromTwoPass ? "2-pass 预览降级为单帧参数预览" : "当前为单帧预览"}
+              {previewSession.previewState} · {previewSession.degradedFromTwoPass ? t("preview.degraded") : t("preview.singleFrame")}
             </div>
           </div>
           <Button
@@ -1079,21 +1084,21 @@ export function ComparePreviewPlayer({
               variant={splitMode === "vertical" ? "default" : "secondary"}
               onClick={() => onSplitModeChange("vertical")}
             >
-              左右
+              {t("preview.splitVertical")}
             </Button>
             <Button
               size="sm"
               variant={splitMode === "horizontal" ? "default" : "secondary"}
               onClick={() => onSplitModeChange("horizontal")}
             >
-              上下
+              {t("preview.splitHorizontal")}
             </Button>
             <label className="flex items-center gap-2 rounded-md bg-white/10 px-2 py-1 text-xs text-white/80">
-              <span>{sourceIsFirst ? "原始在前" : "转码后在前"}</span>
+              <span>{sourceIsFirst ? t("preview.sourceFirst") : t("preview.previewFirst")}</span>
               <Switch
                 size="sm"
                 checked={!sourceIsFirst}
-                aria-label="切换原始图像和转码后图像的显示方向"
+                aria-label={t("preview.switchOrder")}
                 onCheckedChange={(checked) => {
                   // 切换显示方向只影响前端裁剪和标签，不触发后端重新生成预览帧。
                   onCompareOrderChange(checked ? "preview-first" : "source-first");
@@ -1106,7 +1111,7 @@ export function ComparePreviewPlayer({
             <span>
               estimatedTranscodeSpeed: {previewSession.estimatedTranscodeSpeed ? `${previewSession.estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
             </span>
-            {timeline.isScrubbingTimeline ? <span>拖动中，松手后生成当前帧</span> : null}
+            {timeline.isScrubbingTimeline ? <span>{t("preview.scrubbing")}</span> : null}
             {previewSession.previewError ? <span className="text-red-200">error: {previewSession.previewError}</span> : null}
           </div>
         </div>

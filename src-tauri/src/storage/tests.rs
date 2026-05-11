@@ -29,6 +29,7 @@ fn test_base_dir() -> std::path::PathBuf {
 fn build_task_payload(name: &str) -> TaskConfigPayload {
     TaskConfigPayload {
         name: name.to_string(),
+        clip_range: None,
         video: VideoConfig {
             codec_format: VideoCodecFormat::H264,
             encoder: VideoEncoder::Libx264,

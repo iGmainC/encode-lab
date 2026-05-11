@@ -1,6 +1,7 @@
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { useI18n } from "../../i18n/I18nProvider";
 import type { ComparePreviewRuntime, VideoMetadataResult } from "../../types/workbench";
 
 type Props = {
@@ -48,6 +49,7 @@ function formatNitValue(value?: number | null) {
 }
 
 export function PreviewInspector({ splitMode, videoMetadata, codec, encoder, twoPass, runtime }: Props) {
+  const { t } = useI18n();
   const video = videoMetadata?.video;
   const shouldShowSdrNotice = isHdrSource(video?.hdrType);
 
@@ -55,21 +57,21 @@ export function PreviewInspector({ splitMode, videoMetadata, codec, encoder, two
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>预览状态</CardTitle>
-          <CardDescription>预览以当前时间点的源帧和参数帧进行近似对比。</CardDescription>
+          <CardTitle>{t("inspector.status.title")}</CardTitle>
+          <CardDescription>{t("inspector.status.description")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <div className="flex flex-wrap gap-2">
-            <Badge variant="outline">{splitMode === "vertical" ? "纵向分割" : "横向分割"}</Badge>
+            <Badge variant="outline">{splitMode === "vertical" ? t("inspector.vertical") : t("inspector.horizontal")}</Badge>
             <Badge variant="outline">{codec.toUpperCase()}</Badge>
             <Badge variant="outline">{encoder}</Badge>
           </div>
           <Alert>
-            <AlertTitle>2-pass 预览规则</AlertTitle>
+            <AlertTitle>{t("inspector.twoPass.title")}</AlertTitle>
             <AlertDescription>
               {runtime.degradedFromTwoPass || twoPass
-                ? "当前任务启用了 2-pass，预览阶段已降级为单帧参数预览。"
-                : "当前任务以单帧参数预览，适合快速检查画面变化。"}
+                ? t("inspector.twoPass.degraded")
+                : t("inspector.twoPass.single")}
             </AlertDescription>
           </Alert>
           <div className="grid gap-3 md:grid-cols-2">
@@ -80,33 +82,33 @@ export function PreviewInspector({ splitMode, videoMetadata, codec, encoder, two
             <div className="rounded-2xl border p-3">
               estimated: {runtime.estimatedTranscodeSpeed ? `${runtime.estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
             </div>
-            <div className="rounded-2xl border p-3">{runtime.isFullscreen ? "当前处于全屏模式" : "普通模式"}</div>
+            <div className="rounded-2xl border p-3">{runtime.isFullscreen ? t("inspector.fullscreen") : t("inspector.normal")}</div>
           </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>源视频摘要</CardTitle>
-          <CardDescription>预览页右侧固定展示素材、HDR 信息和参数关键字段。</CardDescription>
+          <CardTitle>{t("inspector.source.title")}</CardTitle>
+          <CardDescription>{t("inspector.source.description")}</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 text-sm">
           {shouldShowSdrNotice ? (
             <Alert>
-              <AlertTitle>HDR 源已按 SDR 图片显示</AlertTitle>
+              <AlertTitle>{t("inspector.hdr.title")}</AlertTitle>
               <AlertDescription>
-                当前对比帧通过 FFmpeg 抽取为普通图片，预览用于检查构图和参数差异，不代表真实 HDR 亮度显示效果。
+                {t("inspector.hdr.description")}
               </AlertDescription>
             </Alert>
           ) : null}
-          <div className="rounded-2xl border p-3">分辨率: {video?.width ?? "-"} x {video?.height ?? "-"}</div>
-          <div className="rounded-2xl border p-3">帧率: {video?.fps?.toFixed(2) ?? "-"}</div>
-          <div className="rounded-2xl border p-3">像素格式: {formatMetadataValue(video?.pixFmt)}</div>
-          <div className="rounded-2xl border p-3">位深: {video?.bitDepth ? `${video.bitDepth}-bit` : "-"}</div>
-          <div className="rounded-2xl border p-3">HDR 类型: {formatMetadataValue(video?.hdrType)}</div>
-          <div className="rounded-2xl border p-3">色彩原色: {formatMetadataValue(video?.colorPrimaries)}</div>
-          <div className="rounded-2xl border p-3">传递函数: {formatMetadataValue(video?.colorTransfer)}</div>
-          <div className="rounded-2xl border p-3">色彩空间: {formatMetadataValue(video?.colorSpace)}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.resolution")}: {video?.width ?? "-"} x {video?.height ?? "-"}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.fps")}: {video?.fps?.toFixed(2) ?? "-"}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.pixelFormat")}: {formatMetadataValue(video?.pixFmt)}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.bitDepth")}: {video?.bitDepth ? `${video.bitDepth}-bit` : "-"}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.hdrType")}: {formatMetadataValue(video?.hdrType)}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.primaries")}: {formatMetadataValue(video?.colorPrimaries)}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.transfer")}: {formatMetadataValue(video?.colorTransfer)}</div>
+          <div className="rounded-2xl border p-3">{t("inspector.colorspace")}: {formatMetadataValue(video?.colorSpace)}</div>
           <div className="rounded-2xl border p-3">MaxCLL: {formatNitValue(video?.maxContentLightLevel)}</div>
           <div className="rounded-2xl border p-3">MaxFALL: {formatNitValue(video?.maxFrameAverageLightLevel)}</div>
           <div className="rounded-2xl border p-3">

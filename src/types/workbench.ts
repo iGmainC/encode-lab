@@ -13,7 +13,12 @@ export type TaskConfig = {
 export type Template = {
   id: string;
   name: string;
+  tags: string[];
   version: number;
+  taskConfigSnapshot: TaskDraftSnapshot;
+  lastUsedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type CreateTaskResponse = {
@@ -22,6 +27,21 @@ export type CreateTaskResponse = {
 
 export type SaveTemplateResponse = {
   templateId: string;
+};
+
+/** 通用模板写操作响应。 */
+export type TemplateMutationResponse = {
+  ok: boolean;
+};
+
+/** 复制模板响应。 */
+export type DuplicateTemplateResponse = {
+  templateId: string;
+};
+
+/** 应用模板响应。 */
+export type ApplyTemplateResponse = {
+  template: Template;
 };
 
 export type FfmpegProbeResult = {
@@ -289,6 +309,8 @@ export type TaskDraftStep = "source" | "config" | "preview" | "enqueue";
 
 export type TaskDraftSnapshot = {
   name: string;
+  /** 可选转码截取范围，单位毫秒；缺省表示完整源视频。 */
+  clipRange?: { startMs: number; endMs: number };
   video: {
     codecFormat: "h264" | "h265" | "av1" | "vp9" | "copy";
     encoder: string;

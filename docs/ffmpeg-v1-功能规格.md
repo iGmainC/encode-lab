@@ -97,6 +97,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 2. 音频参数：仅 `copy` 或原始参数输入框。
 3. 高级参数：原始命令行参数输入（文本区）。
 4. 容器参数：输出容器支持 `mp4` / `mkv` / `mov`，MP4 可配置 `faststart`。
+5. 时长截取：通过双向拖动条和起止时间输入框设置 `clipRange`，拖动步长按源视频帧率精确到一帧。
 
 ### 4.2.2 视频参数（结构化）字段
 
@@ -247,6 +248,7 @@ type AppSettings = {
 type TaskConfig = {
   id: string;
   name: string;
+  clipRange?: { startMs: number; endMs: number };
   video: {
     codecFormat: "h264" | "h265" | "copy";
     encoder:
@@ -329,13 +331,19 @@ type Template = {
 12. `get_job_metrics(jobId) -> { progress, fps, speed, eta, frame, timeMs }`
 13. `get_job_thumbnail(jobId, atMs?) -> { imagePath|base64 }`
 14. `run_quality_evaluation({ jobId|taskId|referenceFile+distortedFile, metric: "vmaf", vmaf? }) -> { evaluationId, score, logPath }`
-15. `save_template(payload) / list_templates() / apply_template(templateId)`
+15. `save_template(payload) / list_templates() / apply_template(templateId)`（当前已接入前端保存、列表、应用到任务配置）
 
 为支持模板完整管理，V1 同步补充：
 
 1. `update_template(templateId, payload) -> { ok }`
-2. `delete_template(templateId) -> { ok }`
-3. `duplicate_template(templateId) -> { templateId }`
+2. `delete_template(templateId) -> { ok }`（当前已接入前端删除）
+3. `duplicate_template(templateId) -> { templateId }`（当前已接入前端复制）
+
+模板应用行为：
+
+1. `apply_template` 返回完整模板记录，并更新 `lastUsedAt`。
+2. 前端将 `taskConfigSnapshot` 写回当前任务配置草稿，不替换当前源视频文件。
+3. 模板列表按最近使用时间或更新时间倒序展示。
 
 ## 6.2 事件通道（建议）
 

@@ -28,6 +28,12 @@ pub struct DuplicateTemplateResponse {
     pub template_id: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyTemplateResponse {
+    pub template: Template,
+}
+
 #[tauri::command]
 pub fn save_template(
     state: State<'_, AppState>,
@@ -87,6 +93,20 @@ pub fn duplicate_template(
         .map_err(CommandError::from)?;
 
     Ok(DuplicateTemplateResponse { template_id })
+}
+
+#[tauri::command]
+pub fn apply_template(
+    state: State<'_, AppState>,
+    template_id: String,
+) -> CommandResult<ApplyTemplateResponse> {
+    let template = state
+        .storage
+        .templates
+        .apply(&template_id)
+        .map_err(CommandError::from)?;
+
+    Ok(ApplyTemplateResponse { template })
 }
 
 #[tauri::command]

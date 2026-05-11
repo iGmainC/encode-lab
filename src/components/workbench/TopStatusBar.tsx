@@ -1,5 +1,6 @@
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { useI18n } from "../../i18n/I18nProvider";
 import type { FfmpegProbeResult } from "../../types/workbench";
 
 type Props = {
@@ -23,6 +24,8 @@ export function TopStatusBar({
   loading,
   seeding,
 }: Props) {
+  const { t } = useI18n();
+
   return (
     <header className="border-b bg-background/95 px-4 py-4 backdrop-blur md:px-6">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
@@ -34,19 +37,19 @@ export function TopStatusBar({
         <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-center md:justify-end">
           <div className="flex flex-wrap gap-2">
             <Badge variant={ffmpegProbe?.ffmpegFound ? "default" : "secondary"}>
-              ffmpeg {ffmpegProbe?.ffmpegFound ? "已连接" : "未找到"}
+              ffmpeg {ffmpegProbe?.ffmpegFound ? t("top.connected") : t("top.notFound")}
             </Badge>
             <Badge variant={ffmpegProbe?.ffprobeFound ? "default" : "secondary"}>
-              ffprobe {ffmpegProbe?.ffprobeFound ? "已连接" : "未找到"}
+              ffprobe {ffmpegProbe?.ffprobeFound ? t("top.connected") : t("top.notFound")}
             </Badge>
-            <Badge variant="outline">并发 {concurrencyN}</Badge>
+            <Badge variant="outline">{t("top.concurrency", { value: concurrencyN })}</Badge>
           </div>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={onRefresh} disabled={loading || seeding}>
-              {loading ? "刷新中..." : "刷新状态"}
+              {loading ? t("top.refreshing") : t("top.refresh")}
             </Button>
             <Button onClick={onSeed} disabled={loading || seeding}>
-              {seeding ? "写入中..." : "生成样例数据"}
+              {seeding ? t("top.seeding") : t("top.seed")}
             </Button>
           </div>
         </div>

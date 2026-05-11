@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import {
@@ -14,13 +15,15 @@ import { SourceVideoCard } from "../components/workbench/SourceVideoCard";
 import { StepFlowHeader } from "../components/workbench/StepFlowHeader";
 import { TaskSummaryCard } from "../components/workbench/TaskSummaryCard";
 import { useTaskDraft } from "../context/TaskDraftContext";
-import type { EncoderCapability, FfmpegProbeResult } from "../types/workbench";
+import { useI18n } from "../i18n/I18nProvider";
+import type { EncoderCapability, FfmpegProbeResult, SaveTemplateResponse } from "../types/workbench";
 
 type Props = {
   filteredEncoders: EncoderCapability[];
   selectedEncoderCapability?: EncoderCapability;
   ffmpegProbe: FfmpegProbeResult | null;
   onGoPreview: () => void;
+  onTemplatesChanged: () => void;
 };
 
 /**
@@ -33,56 +36,58 @@ function buildDolbyVisionPreserveCopy({
   formCodec,
   formEncoder,
   ffmpegProbe,
+  t,
 }: {
   isDolbyVisionSource: boolean;
   formCodec: string;
   formEncoder: string;
   ffmpegProbe: FfmpegProbeResult | null;
+  t: ReturnType<typeof useI18n>["t"];
 }) {
   if (!isDolbyVisionSource) {
     return {
-      hint: "仅当源视频识别为 Dolby Vision 时显示该能力。",
-      disabledReason: "当前源视频未被识别为 Dolby Vision。",
+      hint: t("config.dv.nonDv.hint"),
+      disabledReason: t("config.dv.nonDv.disabled"),
     };
   }
 
   if (!ffmpegProbe) {
     return {
-      hint: "正在等待 FFmpeg 能力探测结果，探测完成后会显示是否可保留。",
-      disabledReason: "FFmpeg 能力尚未完成探测。",
+      hint: t("config.dv.probing.hint"),
+      disabledReason: t("config.dv.probing.disabled"),
     };
   }
 
   if (!ffmpegProbe.ffmpegFound) {
     return {
-      hint: "当前环境未找到 ffmpeg，无法确认或执行 Dolby Vision 元数据保留链路。",
-      disabledReason: "未找到 ffmpeg。",
+      hint: t("config.dv.noFfmpeg.hint"),
+      disabledReason: t("config.dv.noFfmpeg.disabled"),
     };
   }
 
   if (!ffmpegProbe.dolbyVision.supportsDoviRpu) {
     return {
-      hint: "当前 FFmpeg 未提供 dovi_rpu bitstream filter，无法提取/写回 Dolby Vision RPU 元数据。",
-      disabledReason: "缺少 dovi_rpu bitstream filter。",
+      hint: t("config.dv.noRpu.hint"),
+      disabledReason: t("config.dv.noRpu.disabled"),
     };
   }
 
   if (!ffmpegProbe.dolbyVision.supportsDolbyVisionEncode) {
     return {
-      hint: "当前 libx265 未暴露 Dolby Vision 编码参数，无法在输出 H.265 中写入 Dolby Vision 元数据。",
-      disabledReason: "libx265 不支持 Dolby Vision 编码参数。",
+      hint: t("config.dv.noEncode.hint"),
+      disabledReason: t("config.dv.noEncode.disabled"),
     };
   }
 
   if (formCodec !== "h265" || formEncoder !== "libx265") {
     return {
-      hint: "当前版本仅支持 H.265 + libx265 的 Dolby Vision 保留实验链路。",
-      disabledReason: `当前选择为 ${formCodec} / ${formEncoder}，请切换到 H.265 / libx265。`,
+      hint: t("config.dv.onlyLibx265.hint"),
+      disabledReason: t("config.dv.onlyLibx265.disabled", { codec: formCodec, encoder: formEncoder }),
     };
   }
 
   return {
-    hint: "尽量沿用源片的 Dolby Vision 相关色彩与元数据能力，实际结果仍取决于 FFmpeg 与编码器支持。",
+    hint: t("config.dv.ready.hint"),
     disabledReason: "",
   };
 }
@@ -92,7 +97,10 @@ export function TaskConfigPage({
   selectedEncoderCapability,
   ffmpegProbe,
   onGoPreview,
+  onTemplatesChanged,
 }: Props) {
+  const { t } = useI18n();
+  const [savingTemplate, setSavingTemplate] = useState(false);
   const {
     step,
     setStep,
@@ -150,6 +158,10 @@ export function TaskConfigPage({
     setContainerFormat,
     containerFaststart,
     setContainerFaststart,
+    clipStartSec,
+    setClipStartSec,
+    clipEndSec,
+    setClipEndSec,
     sourceFilePath,
     setSourceFilePath,
     videoMetadata,
@@ -158,6 +170,7 @@ export function TaskConfigPage({
     isDragOverWindow,
     pickSourceFile,
     retryVideoMetadata,
+    taskDraftSnapshot,
   } = useTaskDraft();
 
   const isDolbyVisionSource = videoMetadata?.video?.hdrType === "DolbyVision";
@@ -166,6 +179,7 @@ export function TaskConfigPage({
     formCodec,
     formEncoder,
     ffmpegProbe,
+    t,
   });
   const canPreserveDolbyVision =
     isDolbyVisionSource &&
@@ -181,14 +195,41 @@ export function TaskConfigPage({
 
   const presetHint =
     formPreset === ""
-      ? "当前编码器通常不提供 preset 档位。"
+      ? t("config.preset.noneHint")
       : formPreset === "ultrafast" || formPreset === "superfast" || formPreset === "veryfast"
-        ? "偏速度：编码更快，体积通常更大。"
+        ? t("config.preset.fastHint")
         : formPreset === "medium" || formPreset === "fast" || formPreset === "slow"
-          ? "均衡档：速度与压缩效率平衡，推荐先从这里开始。"
-          : "偏质量/压缩：编码更慢，体积通常更小。";
+          ? t("config.preset.balancedHint")
+          : t("config.preset.qualityHint");
 
   const isAv1SoftwareEncoder = formEncoder === "libaom-av1" || formEncoder === "svtav1";
+
+  /**
+   * 将当前参数面板保存为参数方案。
+   */
+  async function saveCurrentTemplate() {
+    const name = window.prompt(t("config.savePresetPrompt"), taskDraftSnapshot.name || "preview-draft");
+    if (!name?.trim()) {
+      return;
+    }
+
+    setSavingTemplate(true);
+    try {
+      await invoke<SaveTemplateResponse>("save_template", {
+        payload: {
+          name: name.trim(),
+          tags: [],
+          taskConfigSnapshot: {
+            ...taskDraftSnapshot,
+            name: name.trim(),
+          },
+        },
+      });
+      onTemplatesChanged();
+    } finally {
+      setSavingTemplate(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -214,12 +255,31 @@ export function TaskConfigPage({
             twoPass={formTwoPass}
             preserveDolbyVisionMetadata={preserveDolbyVisionMetadata}
           />
+          <TrimRangeControl
+            durationSec={videoMetadata?.durationSec ?? 0}
+            fps={videoMetadata?.video?.fps}
+            startSec={clipStartSec}
+            endSec={clipEndSec}
+            onChange={(startSec, endSec) => {
+              setClipStartSec(startSec);
+              setClipEndSec(endSec);
+            }}
+            labels={{
+              title: t("trim.title"),
+              description: t("trim.description"),
+              start: t("trim.start"),
+              end: t("trim.end"),
+              duration: t("trim.duration"),
+              full: t("trim.full"),
+              unavailable: t("trim.unavailable"),
+            }}
+          />
         </div>
 
         <Card>
           <CardHeader>
-            <CardTitle>参数面板</CardTitle>
-            <CardDescription>右侧固定承载视频、音频、容器和高级参数。优先保持信息密度和可连续调参体验。</CardDescription>
+            <CardTitle>{t("config.panel.title")}</CardTitle>
+            <CardDescription>{t("config.panel.description")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="grid gap-4 md:grid-cols-2">
@@ -227,7 +287,7 @@ export function TaskConfigPage({
                 <span className="text-muted-foreground">Codec</span>
                 <Select value={formCodec} onValueChange={setFormCodec}>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择 Codec" />
+                    <SelectValue placeholder={t("config.selectCodec")} />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="h264">H.264</SelectItem>
@@ -242,12 +302,12 @@ export function TaskConfigPage({
                 <span className="text-muted-foreground">Encoder</span>
                 <Select value={formEncoder} onValueChange={setFormEncoder}>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择 Encoder" />
+                    <SelectValue placeholder={t("config.selectEncoder")} />
                   </SelectTrigger>
                   <SelectContent>
                     {filteredEncoders.map((item) => (
                       <SelectItem key={item.encoder} value={item.encoder}>
-                        {item.displayName} {item.available ? "" : "(不可用)"}
+                        {item.displayName} {item.available ? "" : `(${t("config.unavailable")})`}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -266,7 +326,7 @@ export function TaskConfigPage({
                   }}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="选择码率模式" />
+                    <SelectValue placeholder={t("config.selectRateMode")} />
                   </SelectTrigger>
                   <SelectContent>
                     {selectedEncoderCapability?.supportsCrf ? <SelectItem value="CRF">CRF</SelectItem> : null}
@@ -284,11 +344,11 @@ export function TaskConfigPage({
                   disabled={!selectedEncoderCapability?.supportsTwoPass}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="选择 2-pass" />
+                    <SelectValue placeholder={t("config.selectTwoPass")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="no">关闭</SelectItem>
-                    <SelectItem value="yes">开启</SelectItem>
+                    <SelectItem value="no">{t("common.off")}</SelectItem>
+                    <SelectItem value="yes">{t("common.on")}</SelectItem>
                   </SelectContent>
                 </Select>
               </label>
@@ -298,7 +358,7 @@ export function TaskConfigPage({
               <Card className="border-dashed shadow-none">
                 <CardContent className="space-y-3 p-4">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">CRF 质量</span>
+                    <span className="text-muted-foreground">{t("config.crf")}</span>
                     <span className="font-medium">{formCrf}</span>
                   </div>
                   <Slider
@@ -309,13 +369,13 @@ export function TaskConfigPage({
                     onValueChange={(value) => setFormCrf(value[0] ?? 23)}
                     disabled={!selectedEncoderCapability?.supportsCrf}
                   />
-                  <p className="text-xs text-muted-foreground">数值越低质量越高，体积通常更大。</p>
+                  <p className="text-xs text-muted-foreground">{t("config.crfHint")}</p>
                 </CardContent>
               </Card>
             ) : (
               <div className="grid gap-4 rounded-2xl border p-4 md:grid-cols-3">
                 <label className="space-y-1 text-sm">
-                  <span className="text-muted-foreground">目标码率</span>
+                  <span className="text-muted-foreground">{t("config.targetBitrate")}</span>
                   <input
                     className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
                     value={formBitrateKbps}
@@ -348,13 +408,13 @@ export function TaskConfigPage({
               <div className="space-y-4 rounded-2xl border bg-muted/20 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="space-y-1">
-                    <div className="text-sm font-medium">AV1 高级参数</div>
+                    <div className="text-sm font-medium">{t("config.av1.title")}</div>
                     <p className="text-xs text-muted-foreground">
-                      根据当前 AV1 编码器生成软件编码高级参数，并追加到 advancedArgs。
+                      {t("config.av1.description")}
                     </p>
                   </div>
                   <div className="rounded-full border px-3 py-1 text-xs text-muted-foreground">
-                    {isAv1SoftwareEncoder ? "软件编码" : "硬件编码"}
+                    {isAv1SoftwareEncoder ? t("config.av1.software") : t("config.av1.hardware")}
                   </div>
                 </div>
 
@@ -364,7 +424,7 @@ export function TaskConfigPage({
                       <span className="text-muted-foreground">cpu-used</span>
                       <Select value={av1CpuUsed} onValueChange={setAv1CpuUsed}>
                         <SelectTrigger>
-                          <SelectValue placeholder="选择速度档" />
+                          <SelectValue placeholder={t("config.av1.speedSelect")} />
                         </SelectTrigger>
                         <SelectContent>
                           {["0", "1", "2", "3", "4", "5", "6", "7", "8"].map((value) => (
@@ -374,14 +434,14 @@ export function TaskConfigPage({
                           ))}
                         </SelectContent>
                       </Select>
-                      <p className="text-xs text-muted-foreground">越高越快，压缩效率通常越低。</p>
+                      <p className="text-xs text-muted-foreground">{t("config.av1.speedHint")}</p>
                     </label>
 
                     <div className="rounded-2xl border bg-background/60 p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="space-y-1">
                           <div className="text-sm font-medium">row-mt</div>
-                          <p className="text-xs text-muted-foreground">启用行级多线程。</p>
+                          <p className="text-xs text-muted-foreground">{t("config.av1.rowMt")}</p>
                         </div>
                         <Switch checked={av1RowMt} onCheckedChange={setAv1RowMt} />
                       </div>
@@ -415,7 +475,7 @@ export function TaskConfigPage({
                       <span className="text-muted-foreground">SVT Tune</span>
                       <Select value={av1SvtTune} onValueChange={setAv1SvtTune}>
                         <SelectTrigger>
-                          <SelectValue placeholder="选择 Tune" />
+                          <SelectValue placeholder={t("config.av1.tuneSelect")} />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="0">VQ</SelectItem>
@@ -429,13 +489,13 @@ export function TaskConfigPage({
                       <span className="text-muted-foreground">Film Grain</span>
                       <Select value={av1FilmGrain} onValueChange={setAv1FilmGrain}>
                         <SelectTrigger>
-                          <SelectValue placeholder="选择颗粒强度" />
+                          <SelectValue placeholder={t("config.av1.grainSelect")} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="0">关闭</SelectItem>
-                          <SelectItem value="4">轻微</SelectItem>
-                          <SelectItem value="8">中等</SelectItem>
-                          <SelectItem value="12">明显</SelectItem>
+                          <SelectItem value="0">{t("common.off")}</SelectItem>
+                          <SelectItem value="4">{t("config.av1.grainLight")}</SelectItem>
+                          <SelectItem value="8">{t("config.av1.grainMedium")}</SelectItem>
+                          <SelectItem value="12">{t("config.av1.grainStrong")}</SelectItem>
                         </SelectContent>
                       </Select>
                     </label>
@@ -444,7 +504,7 @@ export function TaskConfigPage({
 
                 {!isAv1SoftwareEncoder ? (
                   <div className="rounded-2xl border bg-background/60 p-3 text-sm text-muted-foreground">
-                    当前硬件 AV1 编码器暂不暴露软件编码高级项，仅沿用码率、分辨率、FPS、像素格式等通用参数。
+                    {t("config.av1.hardwareHint")}
                   </div>
                 ) : null}
               </div>
@@ -455,7 +515,7 @@ export function TaskConfigPage({
                 <span className="text-muted-foreground">Preset</span>
                 <Select value={formPreset || "none"} onValueChange={(value) => setFormPreset(value === "none" ? "" : value)}>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择 preset" />
+                    <SelectValue placeholder={t("config.selectPreset")} />
                   </SelectTrigger>
                   <SelectContent>
                     {selectedEncoderCapability?.presets?.length ? (
@@ -465,7 +525,7 @@ export function TaskConfigPage({
                         </SelectItem>
                       ))
                     ) : (
-                      <SelectItem value="none">当前编码器无 preset</SelectItem>
+                      <SelectItem value="none">{t("config.noPreset")}</SelectItem>
                     )}
                   </SelectContent>
                 </Select>
@@ -474,15 +534,15 @@ export function TaskConfigPage({
               <div className="rounded-2xl border bg-muted/30 p-3 md:col-span-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
-                    <div className="text-sm font-medium">保持原始尺寸</div>
+                    <div className="text-sm font-medium">{t("config.keepResolution")}</div>
                     <p className="text-xs text-muted-foreground">
-                      打开后自动使用源视频分辨率，并禁用手动宽高输入。
+                      {t("config.keepResolutionHint")}
                     </p>
                   </div>
                   <Switch checked={keepOriginalResolution} onCheckedChange={setKeepOriginalResolution} />
                 </div>
                 <div className="mt-3 text-xs text-muted-foreground">
-                  当前源尺寸：{videoMetadata?.video?.width ?? "-"} x {videoMetadata?.video?.height ?? "-"}
+                  {t("config.sourceSize", { width: videoMetadata?.video?.width ?? "-", height: videoMetadata?.video?.height ?? "-" })}
                 </div>
               </div>
               <label className="space-y-1 text-sm">
@@ -509,11 +569,11 @@ export function TaskConfigPage({
               <div className="rounded-2xl border bg-muted/30 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
-                    <div className="text-sm font-medium">保留 Dolby Vision 元数据（实验性）</div>
+                    <div className="text-sm font-medium">{t("config.dv.title")}</div>
                     <p className="text-xs text-muted-foreground">{dolbyVisionCopy.hint}</p>
                     {!canPreserveDolbyVision ? (
                       <p className="text-xs font-medium text-destructive">
-                        无法开启：{dolbyVisionCopy.disabledReason}
+                        {t("config.dv.disabledPrefix", { reason: dolbyVisionCopy.disabledReason })}
                       </p>
                     ) : null}
                   </div>
@@ -524,8 +584,8 @@ export function TaskConfigPage({
                   />
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <span>源 HDR: {videoMetadata?.video?.hdrType ?? "-"}</span>
-                  <span>推荐编码器: {ffmpegProbe?.dolbyVision.recommendedEncoder ?? "-"}</span>
+                  <span>{t("config.sourceHdr", { value: videoMetadata?.video?.hdrType ?? "-" })}</span>
+                  <span>{t("config.recommendedEncoder", { value: ffmpegProbe?.dolbyVision.recommendedEncoder ?? "-" })}</span>
                   <span>dovi_rpu: {ffmpegProbe?.dolbyVision.supportsDoviRpu ? "yes" : "no"}</span>
                   <span>
                     libx265 DV encode: {ffmpegProbe?.dolbyVision.supportsDolbyVisionEncode ? "yes" : "no"}
@@ -536,10 +596,10 @@ export function TaskConfigPage({
 
             <div className="grid gap-4 md:grid-cols-4">
               <label className="space-y-1 text-sm">
-                <span className="text-muted-foreground">输出容器</span>
+                <span className="text-muted-foreground">{t("config.outputContainer")}</span>
                 <Select value={containerFormat} onValueChange={(value) => setContainerFormat(value as "mp4" | "mkv" | "mov")}>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择输出容器" />
+                    <SelectValue placeholder={t("config.selectOutputContainer")} />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="mp4">MP4</SelectItem>
@@ -552,7 +612,7 @@ export function TaskConfigPage({
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">Fast Start</div>
-                    <p className="text-xs text-muted-foreground">仅 MP4 生效，用于优化边下边播。</p>
+                    <p className="text-xs text-muted-foreground">{t("config.faststartHint")}</p>
                   </div>
                   <Switch
                     checked={containerFaststart}
@@ -564,15 +624,15 @@ export function TaskConfigPage({
               <div className="rounded-2xl border bg-muted/30 p-3 md:col-span-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
-                    <div className="text-sm font-medium">保持原始帧率</div>
+                    <div className="text-sm font-medium">{t("config.keepFps")}</div>
                     <p className="text-xs text-muted-foreground">
-                      打开后不生成 FPS 覆盖参数，沿用源视频帧率。
+                      {t("config.keepFpsHint")}
                     </p>
                   </div>
                   <Switch checked={keepOriginalFps} onCheckedChange={setKeepOriginalFps} />
                 </div>
                 <div className="mt-3 text-xs text-muted-foreground">
-                  当前源帧率：{videoMetadata?.video?.fps?.toFixed(3).replace(/\.?0+$/, "") ?? "-"}
+                  {t("config.sourceFps", { value: videoMetadata?.video?.fps?.toFixed(3).replace(/\.?0+$/, "") ?? "-" })}
                 </div>
               </div>
               <label className="space-y-1 text-sm">
@@ -588,7 +648,7 @@ export function TaskConfigPage({
                 <span className="text-muted-foreground">Pixel Format</span>
                 <Select value={formPixelFormat} onValueChange={setFormPixelFormat}>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择像素格式" />
+                    <SelectValue placeholder={t("config.selectPixelFormat")} />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="yuv420p">yuv420p</SelectItem>
@@ -602,7 +662,7 @@ export function TaskConfigPage({
                 <span className="text-muted-foreground">Primaries</span>
                 <Select value={formColorPrimaries} onValueChange={setFormColorPrimaries}>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择色域原色" />
+                    <SelectValue placeholder={t("config.selectPrimaries")} />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="bt709">bt709</SelectItem>
@@ -616,7 +676,7 @@ export function TaskConfigPage({
                 <div className="grid gap-3">
                   <Select value={formColorTrc} onValueChange={setFormColorTrc}>
                     <SelectTrigger>
-                      <SelectValue placeholder="选择 TRC" />
+                      <SelectValue placeholder={t("config.selectTrc")} />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="bt709">bt709</SelectItem>
@@ -626,7 +686,7 @@ export function TaskConfigPage({
                   </Select>
                   <Select value={formColorspace} onValueChange={setFormColorspace}>
                     <SelectTrigger>
-                      <SelectValue placeholder="选择色彩矩阵" />
+                      <SelectValue placeholder={t("config.selectColorspace")} />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="bt709">bt709</SelectItem>
@@ -640,11 +700,11 @@ export function TaskConfigPage({
 
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-muted/30 p-4">
               <div className="space-y-1">
-                <div className="font-medium">下一步操作</div>
-                <p className="text-sm text-muted-foreground">当前页面同时支持保存草稿、进入预览和保存为模板。</p>
+                <div className="font-medium">{t("config.next.title")}</div>
+                <p className="text-sm text-muted-foreground">{t("config.next.description")}</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline">保存草稿</Button>
+                <Button variant="outline">{t("config.saveDraft")}</Button>
                 <Button
                   variant="secondary"
                   onClick={() => {
@@ -652,14 +712,13 @@ export function TaskConfigPage({
                     onGoPreview();
                   }}
                 >
-                  进入预览
+                  {t("config.goPreview")}
                 </Button>
                 <Button
-                  onClick={() => {
-                    setStep("enqueue");
-                  }}
+                  disabled={savingTemplate}
+                  onClick={() => void saveCurrentTemplate()}
                 >
-                  保存为模板
+                  {savingTemplate ? t("config.saving") : t("config.savePreset")}
                 </Button>
               </div>
             </div>
@@ -668,4 +727,174 @@ export function TaskConfigPage({
       </div>
     </div>
   );
+}
+
+function TrimRangeControl({
+  durationSec,
+  fps,
+  startSec,
+  endSec,
+  onChange,
+  labels,
+}: {
+  durationSec: number;
+  fps?: number;
+  startSec: number;
+  endSec: number;
+  onChange: (startSec: number, endSec: number) => void;
+  labels: {
+    title: string;
+    description: string;
+    start: string;
+    end: string;
+    duration: string;
+    full: string;
+    unavailable: string;
+  };
+}) {
+  const frameStepSec = fps && fps > 0 ? 1 / fps : 1 / 30;
+  const hasDuration = durationSec > 0;
+  const safeEndSec = hasDuration ? Math.min(Math.max(endSec || durationSec, frameStepSec), durationSec) : 0;
+  const safeStartSec = hasDuration ? Math.min(Math.max(startSec, 0), Math.max(0, safeEndSec - frameStepSec)) : 0;
+  const isFullRange = hasDuration && safeStartSec <= 0 && Math.abs(safeEndSec - durationSec) < frameStepSec / 2;
+  const [startText, setStartText] = useState(() => formatTimecode(safeStartSec));
+  const [endText, setEndText] = useState(() => formatTimecode(safeEndSec));
+
+  useEffect(() => {
+    setStartText(formatTimecode(safeStartSec));
+    setEndText(formatTimecode(safeEndSec));
+  }, [safeStartSec, safeEndSec]);
+
+  function commitTextValue(which: "start" | "end") {
+    const rawValue = which === "start" ? startText : endText;
+    const parsedSec = parseTimecode(rawValue);
+    if (parsedSec === null || !hasDuration) {
+      setStartText(formatTimecode(safeStartSec));
+      setEndText(formatTimecode(safeEndSec));
+      return;
+    }
+
+    const snappedSec = snapToFrame(parsedSec, frameStepSec, durationSec);
+    if (which === "start") {
+      onChange(Math.max(0, Math.min(snappedSec, safeEndSec - frameStepSec)), safeEndSec);
+      return;
+    }
+
+    onChange(safeStartSec, Math.min(durationSec, Math.max(snappedSec, safeStartSec + frameStepSec)));
+  }
+
+  function updateRange(values: number[]) {
+    if (!hasDuration) {
+      return;
+    }
+
+    const nextStart = snapToFrame(values[0] ?? 0, frameStepSec, durationSec);
+    const nextEnd = snapToFrame(values[1] ?? durationSec, frameStepSec, durationSec);
+    if (nextEnd <= nextStart) {
+      return;
+    }
+
+    onChange(nextStart, nextEnd);
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{labels.title}</CardTitle>
+        <CardDescription>{labels.description}</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {hasDuration ? (
+          <>
+            <Slider
+              min={0}
+              max={durationSec}
+              step={frameStepSec}
+              value={[safeStartSec, safeEndSec]}
+              onValueChange={updateRange}
+            />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-sm">
+                <span className="text-muted-foreground">{labels.start}</span>
+                <input
+                  className="h-10 rounded-xl border bg-background px-3 text-sm"
+                  value={startText}
+                  onChange={(event) => setStartText(event.target.value)}
+                  onBlur={() => commitTextValue("start")}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      commitTextValue("start");
+                    }
+                  }}
+                />
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="text-muted-foreground">{labels.end}</span>
+                <input
+                  className="h-10 rounded-xl border bg-background px-3 text-sm"
+                  value={endText}
+                  onChange={(event) => setEndText(event.target.value)}
+                  onBlur={() => commitTextValue("end")}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      commitTextValue("end");
+                    }
+                  }}
+                />
+              </label>
+            </div>
+            <div className="rounded-2xl border p-3 text-sm text-muted-foreground">
+              {labels.duration}: {formatTimecode(Math.max(0, safeEndSec - safeStartSec))}
+              {isFullRange ? ` · ${labels.full}` : ""}
+            </div>
+          </>
+        ) : (
+          <div className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
+            {labels.unavailable}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function snapToFrame(valueSec: number, frameStepSec: number, durationSec: number) {
+  const clamped = Math.min(Math.max(valueSec, 0), durationSec);
+  return Math.min(durationSec, Math.max(0, Math.round(clamped / frameStepSec) * frameStepSec));
+}
+
+function formatTimecode(valueSec: number) {
+  const totalMs = Math.max(0, Math.round(valueSec * 1000));
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const seconds = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
+}
+
+function parseTimecode(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+
+  const parts = trimmed.split(":");
+  if (parts.length < 2 || parts.length > 3) {
+    return null;
+  }
+
+  const [hoursPart, minutesPart, secondsPart] =
+    parts.length === 3 ? parts : ["0", parts[0], parts[1]];
+  const hours = Number(hoursPart);
+  const minutes = Number(minutesPart);
+  const seconds = Number(secondsPart);
+  if (![hours, minutes, seconds].every(Number.isFinite)) {
+    return null;
+  }
+
+  return hours * 3600 + minutes * 60 + seconds;
 }

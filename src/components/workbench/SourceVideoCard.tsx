@@ -2,6 +2,7 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { useI18n } from "../../i18n/I18nProvider";
 import type { VideoMetadataResult } from "../../types/workbench";
 
 type Props = {
@@ -25,27 +26,29 @@ export function SourceVideoCard({
   onPickSourceFile,
   isDragOverWindow,
 }: Props) {
+  const { t } = useI18n();
+
   return (
     <Card className={isDragOverWindow ? "border-primary bg-primary/5" : ""}>
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <CardTitle>源文件</CardTitle>
-            <CardDescription>支持文件选择器和直接拖拽到窗口。</CardDescription>
+            <CardTitle>{t("source.title")}</CardTitle>
+            <CardDescription>{t("source.description")}</CardDescription>
           </div>
           <div className="flex gap-2">
             <Button size="sm" variant="secondary" onClick={onPickSourceFile}>
-              选择文件
+              {t("source.pick")}
             </Button>
             <Button size="sm" variant="outline" onClick={onRetry} disabled={videoMetadataLoading}>
-              {videoMetadataLoading ? "读取中..." : "重试读取"}
+              {videoMetadataLoading ? t("source.loading") : t("source.retry")}
             </Button>
           </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
         <label className="block space-y-1 text-sm">
-          <span className="text-muted-foreground">文件路径</span>
+          <span className="text-muted-foreground">{t("source.path")}</span>
           <input
             className="h-11 w-full rounded-xl border bg-background px-3 text-sm"
             value={sourceFilePath}
@@ -55,12 +58,12 @@ export function SourceVideoCard({
         </label>
 
         <div className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
-          拖拽视频到当前窗口即可自动填入并读取媒体参数。
+          {t("source.dropHint")}
         </div>
 
         {videoMetadataError ? (
           <Alert className="border-destructive/30 bg-destructive/10">
-            <AlertTitle>读取失败</AlertTitle>
+            <AlertTitle>{t("source.errorTitle")}</AlertTitle>
             <AlertDescription>{videoMetadataError}</AlertDescription>
           </Alert>
         ) : null}
@@ -77,7 +80,7 @@ export function SourceVideoCard({
             </div>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">选中文件后会自动进入下一步并生成原视频摘要。</p>
+          <p className="text-sm text-muted-foreground">{t("source.empty")}</p>
         )}
       </CardContent>
     </Card>

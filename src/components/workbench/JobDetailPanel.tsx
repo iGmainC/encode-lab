@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { useI18n } from "../../i18n/I18nProvider";
 import type { JobHistory, JobMetricsEvent } from "../../types/workbench";
 
 export function JobDetailPanel({
@@ -19,6 +20,7 @@ export function JobDetailPanel({
   canceling: boolean;
   deleting: boolean;
 }) {
+  const { t } = useI18n();
   const canCancel = job?.status === "queued" || job?.status === "running";
   const canDelete = Boolean(job && !canCancel);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -39,65 +41,65 @@ export function JobDetailPanel({
   return (
     <Card className="h-full">
       <CardHeader>
-        <CardTitle>任务详情</CardTitle>
-        <CardDescription>展示进度、指标、命令行和错误位，后续直接接真实任务事件流。</CardDescription>
+        <CardTitle>{t("jobDetail.title")}</CardTitle>
+        <CardDescription>{t("jobDetail.description")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
         {job ? (
           <>
             <div className="rounded-2xl border p-4">
               <div className="font-medium">{job.name ?? job.outputFile}</div>
-              <div className="mt-1 text-muted-foreground">状态: {job.status}</div>
+              <div className="mt-1 text-muted-foreground">{t("jobDetail.status", { value: job.status })}</div>
             </div>
             <div className="grid gap-3">
               <div className="grid gap-3 sm:grid-cols-2">
-                <DetailField label="进度" value={formatProgress(metrics?.progress)} />
+                <DetailField label={t("jobDetail.progress")} value={formatProgress(metrics?.progress)} />
                 <DetailField
-                  label="阶段"
+                  label={t("jobDetail.step")}
                   value={metrics && metrics.stepCount > 1 ? `${metrics.stepIndex}/${metrics.stepCount}` : "-"}
                 />
                 <DetailField label="FPS" value={formatNumber(metrics?.fps)} />
                 <DetailField label="Speed" value={formatSpeed(metrics?.speed)} />
                 <DetailField label="ETA" value={formatEta(metrics?.etaSec)} />
-                <DetailField label="已处理" value={formatTimeMs(metrics?.timeMs)} />
+                <DetailField label={t("jobDetail.processed")} value={formatTimeMs(metrics?.timeMs)} />
                 <SizeDeltaField
-                  label="体积变化"
+                  label={t("jobDetail.sizeChange")}
                   percent={job.sizeChangePercent}
                   inputSize={job.inputSizeBytes}
                   outputSize={job.outputSizeBytes}
                 />
                 <SizeDeltaField
-                  label="视频轨道变化"
+                  label={t("jobDetail.videoSizeChange")}
                   percent={job.videoSizeChangePercent}
                   inputSize={job.inputVideoSizeBytes}
                   outputSize={job.outputVideoSizeBytes}
                 />
               </div>
               <CopyableDiagnosticField
-                label="输入"
+                label={t("jobDetail.input")}
                 value={job.inputFile}
                 copied={copiedKey === "input"}
                 onCopy={() => void copyText("input", job.inputFile)}
               />
               <CopyableDiagnosticField
-                label="输出"
+                label={t("jobDetail.output")}
                 value={job.outputFile}
                 copied={copiedKey === "output"}
                 onCopy={() => void copyText("output", job.outputFile)}
               />
-              <DetailField label="创建" value={job.createdAt} />
-              <DetailField label="结束" value={job.endedAt ?? "-"} />
+              <DetailField label={t("jobDetail.created")} value={job.createdAt} />
+              <DetailField label={t("jobDetail.ended")} value={job.endedAt ?? "-"} />
             </div>
             <CopyableDiagnosticField
-              label="命令行"
-              value={job.commandLine ?? "暂无命令行"}
+              label={t("jobDetail.command")}
+              value={job.commandLine ?? t("jobDetail.noCommand")}
               copied={copiedKey === "command"}
               onCopy={() => void copyText("command", job.commandLine ?? "")}
               multiline
             />
             {job.error ? (
               <CopyableDiagnosticField
-                label="错误"
+                label={t("jobDetail.error")}
                 value={job.error}
                 copied={copiedKey === "error"}
                 onCopy={() => void copyText("error", job.error ?? "")}
@@ -106,26 +108,26 @@ export function JobDetailPanel({
               />
             ) : null}
             <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" disabled>暂停</Button>
-              <Button variant="outline" disabled>继续</Button>
+              <Button variant="secondary" disabled>{t("jobDetail.pause")}</Button>
+              <Button variant="outline" disabled>{t("jobDetail.resume")}</Button>
               <Button
                 variant="outline"
                 disabled={!canCancel || canceling}
                 onClick={() => onCancelJob(job.id)}
               >
-                {canceling ? "取消中" : "取消"}
+                {canceling ? t("jobDetail.canceling") : t("jobDetail.cancel")}
               </Button>
               <Button
                 variant="outline"
                 disabled={!canDelete || deleting}
                 onClick={() => onDeleteJob(job.id)}
               >
-                {deleting ? "删除中" : "删除记录"}
+                {deleting ? t("jobDetail.deleting") : t("jobDetail.deleteRecord")}
               </Button>
             </div>
           </>
         ) : (
-          <div className="rounded-2xl border border-dashed p-6 text-muted-foreground">从左侧列表选择一个任务查看详细信息。</div>
+          <div className="rounded-2xl border border-dashed p-6 text-muted-foreground">{t("jobDetail.empty")}</div>
         )}
       </CardContent>
     </Card>
@@ -225,7 +227,9 @@ function CopyableDiagnosticField({
 }
 
 function CopyButton({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
+  const { t } = useI18n();
   const Icon = copied ? Check : Copy;
+  const label = copied ? t("common.copied") : t("common.copy");
 
   return (
     <button
@@ -235,8 +239,8 @@ function CopyButton({ copied, onCopy }: { copied: boolean; onCopy: () => void })
         event.stopPropagation();
         onCopy();
       }}
-      title={copied ? "已复制" : "复制"}
-      aria-label={copied ? "已复制" : "复制"}
+      title={label}
+      aria-label={label}
     >
       <Icon className="h-3.5 w-3.5" />
     </button>

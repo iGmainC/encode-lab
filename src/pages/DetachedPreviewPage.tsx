@@ -6,6 +6,7 @@ import {
   readDetachedPreviewPayload,
   type DetachedPreviewPayload,
 } from "../lib/detachedPreview";
+import { useI18n } from "../i18n/I18nProvider";
 import type { CompareImageOrder, ComparePreviewRuntime } from "../types/workbench";
 
 /** 独立预览窗口的默认运行态，用于接收预览组件回传状态。 */
@@ -37,6 +38,7 @@ async function lockCurrentPreviewWindow(currentWindow: ReturnType<typeof getCurr
  * @returns 仅包含按帧对比组件的窗口级预览界面
  */
 export function DetachedPreviewPage() {
+  const { t } = useI18n();
   const [payload, setPayload] = useState<DetachedPreviewPayload | null>(() => readDetachedPreviewPayload());
   const [splitMode, setSplitMode] = useState<"vertical" | "horizontal">(
     () => payload?.splitMode ?? "vertical",
@@ -115,7 +117,7 @@ export function DetachedPreviewPage() {
   if (!payload?.sourceFile) {
     return (
       <div className="grid h-screen place-items-center bg-black px-6 text-center text-sm text-white/70">
-        请先在主窗口选择源视频，再打开独立预览窗口。
+        {t("preview.detached.noSource")}
       </div>
     );
   }

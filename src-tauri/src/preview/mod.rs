@@ -804,6 +804,7 @@ mod tests {
             time_ms: Some(1200),
             task_config_snapshot: crate::models::TaskConfigPayload {
                 name: "preview".to_string(),
+                clip_range: None,
                 video: VideoConfig {
                     codec_format: VideoCodecFormat::H264,
                     encoder: VideoEncoder::Libx264,
