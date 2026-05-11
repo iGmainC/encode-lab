@@ -109,7 +109,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build and publish Tauri release
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -121,6 +121,6 @@ jobs:
           # updater 使用 GitHub latest 端点；beta 也必须作为普通 Release 才能被 latest.json 发现。
           prerelease: false
           generateReleaseNotes: true
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           tauriScript: bun run tauri
           args: ${{ matrix.platform.args }} --config '${{ needs.verify-tag.outputs.tauri_config }}'
