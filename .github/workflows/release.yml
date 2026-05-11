@@ -18,24 +18,24 @@ jobs:
     outputs:
       tag_name: ${{ steps.release_tag.outputs.tag_name }}
       app_version: ${{ steps.release_tag.outputs.app_version }}
+      tauri_config: ${{ steps.release_tag.outputs.tauri_config }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install release script dependencies
+        run: bun install --frozen-lockfile
+
       - name: Resolve tag name
         id: release_tag
-        shell: bash
-        run: |
-          # tag push 事件的 ref 格式固定为 refs/tags/<tag>，这里提取 Release 名称。
-          tag_name="${GITHUB_REF#refs/tags/}"
-          if [[ ! "$tag_name" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]; then
-            echo "Release tag must match vx.x.x or vx.x.x-beta" >&2
-            exit 1
-          fi
-          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
-          echo "app_version=${tag_name#v}" >> "$GITHUB_OUTPUT"
+        run: bun run release:version
 
       - name: Ensure tag is on main
         shell: bash
@@ -123,4 +123,4 @@ jobs:
           generateReleaseNotes: true
           uploadUpdaterJson: true
           tauriScript: bun run tauri
-          args: ${{ matrix.platform.args }} --config '{"version":"${{ needs.verify-tag.outputs.app_version }}"}'
+          args: ${{ matrix.platform.args }} --config '${{ needs.verify-tag.outputs.tauri_config }}'

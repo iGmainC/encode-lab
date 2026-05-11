@@ -11,6 +11,7 @@
 - 产品模块调整：见 [`docs/产品业务逻辑与功能模块调整.md`](./docs/产品业务逻辑与功能模块调整.md)
 - 前端偏好设置：内置轻量 i18n 与主题 Provider，当前支持 `zh-CN / en-US` 和 `浅色 / 深色 / 跟随系统`
 - 自动更新：接入 Tauri updater，Release tag 仅接受 `vx.x.x` / `vx.x.x-beta`，版本比较遵循 SemVer
+- 版本注入：发布构建通过 `bun run release:version` 从 tag 生成 Tauri `--config`，不要手动改多个版本文件发布
 
 ## 里程碑 TODO
 
