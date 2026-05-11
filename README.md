@@ -10,6 +10,7 @@
 - 当前阶段：`M1` 进行中（数据底座已完成，进入转码链路开发）
 - 产品模块调整：见 [`docs/产品业务逻辑与功能模块调整.md`](./docs/产品业务逻辑与功能模块调整.md)
 - 前端偏好设置：内置轻量 i18n 与主题 Provider，当前支持 `zh-CN / en-US` 和 `浅色 / 深色 / 跟随系统`
+- 自动更新：接入 Tauri updater，Release tag 仅接受 `vx.x.x` / `vx.x.x-beta`，版本比较遵循 SemVer
 
 ## 里程碑 TODO
 

@@ -332,6 +332,7 @@ type Template = {
 13. `get_job_thumbnail(jobId, atMs?) -> { imagePath|base64 }`
 14. `run_quality_evaluation({ jobId|taskId|referenceFile+distortedFile, metric: "vmaf", vmaf? }) -> { evaluationId, score, logPath }`
 15. `save_template(payload) / list_templates() / apply_template(templateId)`（当前已接入前端保存、列表、应用到任务配置）
+16. `check_update() / download_and_install_update()`：通过 Tauri updater 插件完成签名校验、下载和安装，前端承载触发与进度展示。
 
 为支持模板完整管理，V1 同步补充：
 
@@ -344,6 +345,12 @@ type Template = {
 1. `apply_template` 返回完整模板记录，并更新 `lastUsedAt`。
 2. 前端将 `taskConfigSnapshot` 写回当前任务配置草稿，不替换当前源视频文件。
 3. 模板列表按最近使用时间或更新时间倒序展示。
+
+自动更新行为：
+
+1. 发布 tag 必须为 `vx.x.x` 或 `vx.x.x-beta`，CI 会把 tag 中的版本号注入 Tauri 构建配置。
+2. 版本比较使用 SemVer 规则，`v10.0.0` 大于 `v9.99.99`，`v10.0.0` 大于 `v10.0.0-beta`。
+3. 更新包必须由 CI 使用 `TAURI_SIGNING_PRIVATE_KEY` 签名，客户端使用 `tauri.conf.json` 中的公钥校验。
 
 ## 6.2 事件通道（建议）
 
