@@ -77,12 +77,22 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          # 缓存 Bun 下载包，node_modules 仍由 lockfile 重新展开，避免跨平台产物污染。
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
+          # 缓存 Cargo registry/git 与 Tauri release target，显著减少重复 tag 构建时间。
           workspaces: "./src-tauri -> target"
 
       - name: Install frontend dependencies
