@@ -57,7 +57,7 @@ jobs:
             args: ""
           - name: Windows
             runner: windows-latest
-            args: ""
+            args: "--bundles nsis"
           - name: Linux
             runner: ubuntu-latest
             args: ""
