@@ -40,12 +40,12 @@ export function JobDetailPanel({
   }
 
   return (
-    <Card className="h-full">
+    <Card className="flex h-full min-h-0 flex-col">
       <CardHeader>
         <CardTitle>{t("jobDetail.title")}</CardTitle>
         <CardDescription>{t("jobDetail.description")}</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4 text-sm">
+      <CardContent className="min-h-0 flex-1 space-y-4 overflow-auto text-sm">
         {job ? (
           <>
             <div className="rounded-2xl border p-4">

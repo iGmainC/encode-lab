@@ -74,7 +74,7 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col gap-6 xl:h-[calc(100vh-12rem)] xl:min-h-[620px]">
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardContent className="p-5">
@@ -96,13 +96,13 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
         </Card>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-        <Card>
+      <div className="grid gap-6 xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_380px]">
+        <Card className="flex flex-col xl:min-h-0">
           <CardHeader>
             <CardTitle>{t("jobs.title")}</CardTitle>
             <CardDescription>{t("jobs.description")}</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-auto">
             {sortedJobs.map((job) => (
               <button
                 key={job.id}

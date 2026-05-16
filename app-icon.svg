@@ -1,0 +1,46 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="158" y1="105" x2="866" y2="919" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="0.45" stop-color="#22C55E"/>
+      <stop offset="1" stop-color="#0F766E"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="258" y1="286" x2="766" y2="738" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DFF7EC"/>
+    </linearGradient>
+    <linearGradient id="play" x1="412" y1="360" x2="648" y2="624" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#14532D"/>
+    </linearGradient>
+    <filter id="shadow" x="121" y="112" width="782" height="820" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="38" stdDeviation="36" flood-color="#064E3B" flood-opacity="0.32"/>
+    </filter>
+    <filter id="soft" x="232" y="255" width="560" height="520" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="20" stdDeviation="22" flood-color="#052E16" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <path d="M170 170C170 133.549 199.549 104 236 104H788C824.451 104 854 133.549 854 170V854C854 890.451 824.451 920 788 920H236C199.549 920 170 890.451 170 854V170Z" fill="white" opacity="0.1"/>
+
+  <g filter="url(#shadow)">
+    <rect x="150" y="178" width="724" height="690" rx="168" fill="#052E16" opacity="0.18"/>
+    <rect x="176" y="158" width="672" height="672" rx="160" fill="url(#panel)"/>
+  </g>
+
+  <rect x="250" y="284" width="524" height="354" rx="70" fill="#ECFDF5"/>
+  <rect x="250" y="284" width="524" height="354" rx="70" stroke="#0F766E" stroke-width="34"/>
+  <path d="M454 388C454 361.524 482.681 345.001 505.581 358.285L649.186 441.588C671.972 454.806 671.972 487.194 649.186 500.412L505.581 583.715C482.681 596.999 454 580.476 454 554V388Z" fill="url(#play)"/>
+
+  <g filter="url(#soft)">
+    <rect x="296" y="722" width="432" height="64" rx="32" fill="#0F172A" opacity="0.16"/>
+    <rect x="296" y="700" width="432" height="64" rx="32" fill="#FFFFFF"/>
+    <circle cx="438" cy="732" r="52" fill="#16A34A"/>
+    <circle cx="438" cy="732" r="20" fill="#ECFDF5"/>
+  </g>
+
+  <circle cx="320" cy="358" r="21" fill="#22C55E"/>
+  <circle cx="394" cy="358" r="21" fill="#22C55E"/>
+  <path d="M238 146C322 82 474 58 626 88" stroke="white" stroke-width="34" stroke-linecap="round" opacity="0.24"/>
+</svg>
