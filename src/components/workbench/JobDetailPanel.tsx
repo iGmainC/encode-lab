@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { FilePathActions, formatPathName } from "../common/FilePathActions";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { JobHistory, JobMetricsEvent } from "../../types/workbench";
 
@@ -48,7 +49,7 @@ export function JobDetailPanel({
         {job ? (
           <>
             <div className="rounded-2xl border p-4">
-              <div className="font-medium">{job.name ?? job.outputFile}</div>
+              <div className="font-medium">{job.name ?? formatPathName(job.outputFile)}</div>
               <div className="mt-1 text-muted-foreground">{t("jobDetail.status", { value: job.status })}</div>
             </div>
             <div className="grid gap-3">
@@ -75,18 +76,8 @@ export function JobDetailPanel({
                   outputSize={job.outputVideoSizeBytes}
                 />
               </div>
-              <CopyableDiagnosticField
-                label={t("jobDetail.input")}
-                value={job.inputFile}
-                copied={copiedKey === "input"}
-                onCopy={() => void copyText("input", job.inputFile)}
-              />
-              <CopyableDiagnosticField
-                label={t("jobDetail.output")}
-                value={job.outputFile}
-                copied={copiedKey === "output"}
-                onCopy={() => void copyText("output", job.outputFile)}
-              />
+              <PathDetailField label={t("jobDetail.input")} path={job.inputFile} />
+              <PathDetailField label={t("jobDetail.output")} path={job.outputFile} />
               <DetailField label={t("jobDetail.created")} value={job.createdAt} />
               <DetailField label={t("jobDetail.ended")} value={job.endedAt ?? "-"} />
             </div>
@@ -131,6 +122,22 @@ export function JobDetailPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * 任务详情中的输入/输出路径字段。
+ * @param label 字段名称
+ * @param path 本机文件路径
+ */
+function PathDetailField({ label, path }: { label: string; path: string }) {
+  return (
+    <div className="min-w-0 rounded-2xl border p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-2">
+        <FilePathActions path={path} />
+      </div>
+    </div>
   );
 }
 

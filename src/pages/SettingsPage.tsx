@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { FilePathActions } from "../components/common/FilePathActions";
 import {
   Select,
   SelectContent,
@@ -172,7 +173,9 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
           </div>
           <div className="rounded-2xl border p-4">
             <div className="text-sm text-muted-foreground">{t("settings.defaultOutputDir")}</div>
-            <div className="mt-2 break-all text-sm">{settings?.defaultOutputDir || t("settings.notSet")}</div>
+            <div className="mt-2">
+              <FilePathActions path={settings?.defaultOutputDir ?? ""} emptyText={t("settings.notSet")} />
+            </div>
           </div>
           <div className="rounded-2xl border p-4">
             <div className="text-sm text-muted-foreground">{t("settings.ffmpegStrategy")}</div>

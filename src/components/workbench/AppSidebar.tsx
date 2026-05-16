@@ -1,5 +1,6 @@
 import { Film, FolderKanban, Library, PlaySquare, Settings2 } from "lucide-react";
 import { NavLink } from "react-router-dom";
+import encodeLabIcon from "../../assets/encode-lab-icon.png";
 import { useI18n } from "../../i18n/I18nProvider";
 
 const iconMap = {
@@ -21,8 +22,17 @@ export function AppSidebar({ items }: { items: Item[] }) {
   return (
     <aside className="w-full rounded-3xl border bg-background p-3 shadow-sm lg:w-64 lg:p-4">
       <div className="mb-6 px-3 py-2">
-        <div className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Encode Lab</div>
-        <div className="mt-2 text-xl font-semibold">Workbench</div>
+        <div className="flex items-center gap-3">
+          <img
+            src={encodeLabIcon}
+            alt="Encode Lab"
+            className="size-11 rounded-xl border bg-background object-cover"
+          />
+          <div>
+            <div className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Encode Lab</div>
+            <div className="mt-1 text-xl font-semibold">Workbench</div>
+          </div>
+        </div>
         <p className="mt-2 text-sm text-muted-foreground">{t("sidebar.subtitle")}</p>
       </div>
 

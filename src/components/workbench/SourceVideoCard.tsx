@@ -2,6 +2,7 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import { FilePathActions } from "../common/FilePathActions";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { VideoMetadataResult } from "../../types/workbench";
 
@@ -49,12 +50,14 @@ export function SourceVideoCard({
       <CardContent className="space-y-3">
         <label className="block space-y-1 text-sm">
           <span className="text-muted-foreground">{t("source.path")}</span>
-          <input
-            className="h-11 w-full rounded-xl border bg-background px-3 text-sm"
-            value={sourceFilePath}
-            onChange={(event) => setSourceFilePath(event.target.value)}
-            placeholder="/Users/you/Videos/input.mp4"
-          />
+          <FilePathActions path={sourceFilePath} emptyText={t("source.emptyPath")}>
+            <input
+              className="h-11 w-full rounded-xl border bg-background px-3 text-sm"
+              value={sourceFilePath}
+              onChange={(event) => setSourceFilePath(event.target.value)}
+              placeholder="/Users/you/Videos/input.mp4"
+            />
+          </FilePathActions>
         </label>
 
         <div className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
@@ -70,7 +73,7 @@ export function SourceVideoCard({
 
         {videoMetadata ? (
           <div className="space-y-3 rounded-2xl border bg-muted/30 p-4">
-            <div className="text-xs text-muted-foreground">{videoMetadata.inputFile}</div>
+            <FilePathActions path={videoMetadata.inputFile} />
             <div className="flex flex-wrap gap-2">
               {videoMetadata.tags.map((tag) => (
                 <Badge key={tag} variant="outline">

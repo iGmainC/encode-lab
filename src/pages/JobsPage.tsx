@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { formatPathName } from "../components/common/FilePathActions";
 import { JobDetailPanel } from "../components/workbench/JobDetailPanel";
 import { useI18n } from "../i18n/I18nProvider";
 import type {
@@ -113,9 +114,9 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="font-medium">{job.name ?? job.outputFile}</div>
+                    <div className="font-medium">{job.name ?? formatPathName(job.outputFile)}</div>
                     <div className="mt-1 text-sm text-muted-foreground">
-                      {t("jobs.output", { value: job.outputFile })}
+                      {t("jobs.output", { value: formatPathName(job.outputFile) })}
                     </div>
                     <JobProgress metrics={jobMetrics[job.id]} />
                   </div>
