@@ -19,7 +19,7 @@ use storage::errors::StorageError;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use transcode::job_manager::TranscodeManager;
@@ -30,6 +30,7 @@ pub struct AppState {
     pub(crate) preview_manager: PreviewManager,
     pub(crate) transcode_manager: TranscodeManager,
     pub(crate) allow_exit: Arc<AtomicBool>,
+    pub(crate) open_jobs_on_next_activate: Arc<AtomicBool>,
 }
 
 fn build_state<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<AppState, StorageError> {
@@ -44,6 +45,7 @@ fn build_state<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<AppState, Stora
         preview_manager: PreviewManager::new(runtime_dir),
         transcode_manager: TranscodeManager::new(),
         allow_exit: Arc::new(AtomicBool::new(false)),
+        open_jobs_on_next_activate: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -155,12 +157,54 @@ pub(crate) fn refresh_tray_menu<R: Runtime>(app_handle: &AppHandle<R>) {
     let _ = tray.set_menu(Some(menu));
 }
 
-fn show_main_window<R: Runtime>(app_handle: &AppHandle<R>) {
+pub(crate) fn show_main_window<R: Runtime>(app_handle: &AppHandle<R>) {
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/** 主窗口隐藏时，标记下一次应用被通知激活后进入任务中心。 */
+pub(crate) fn mark_open_jobs_on_notification_activate_if_hidden<R: Runtime>(
+    app_handle: &AppHandle<R>,
+) {
+    if main_window_is_visible(app_handle) {
+        return;
+    }
+
+    if let Some(state) = app_handle.try_state::<AppState>() {
+        state
+            .open_jobs_on_next_activate
+            .store(true, Ordering::SeqCst);
+    }
+}
+
+/** 通知点击或系统重新激活应用后，消费挂起的任务中心跳转。 */
+fn open_jobs_if_requested<R: Runtime>(app_handle: &AppHandle<R>) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+
+    if !state
+        .open_jobs_on_next_activate
+        .swap(false, Ordering::SeqCst)
+    {
+        return;
+    }
+
+    show_main_window(app_handle);
+    // 导航由前端路由层负责，后端只广播目标页面，避免直接耦合 WebView URL 细节。
+    let _ = app_handle.emit("app:navigate", "/jobs");
+}
+
+/** 判断主窗口当前是否可见；读取失败时按不可见处理。 */
+fn main_window_is_visible<R: Runtime>(app_handle: &AppHandle<R>) -> bool {
+    let Some(window) = app_handle.get_webview_window("main") else {
+        return false;
+    };
+
+    window.is_visible().unwrap_or(false)
 }
 
 fn request_app_exit<R: Runtime>(app_handle: AppHandle<R>) {
@@ -276,10 +320,20 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Focused(true),
+                ..
+            } if label == "main" => {
+                open_jobs_if_requested(app_handle);
+            }
             tauri::RunEvent::ExitRequested { api, .. } if should_confirm_exit(app_handle) => {
                 // 处理 Cmd+Q 等系统退出路径，和托盘退出保持同一套二次确认。
                 api.prevent_exit();
                 confirm_exit_with_running_jobs(app_handle.clone());
+            }
+            tauri::RunEvent::Reopen { .. } => {
+                open_jobs_if_requested(app_handle);
             }
             _ => {}
         });

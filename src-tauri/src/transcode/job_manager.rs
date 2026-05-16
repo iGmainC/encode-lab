@@ -13,8 +13,9 @@ use chrono::Utc;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{
-    models::JobHistory, probe::video_metadata::read_video_track_size_bytes, refresh_tray_menu,
-    storage::AppStorage, transcode::command_builder::build_passlog_path,
+    mark_open_jobs_on_notification_activate_if_hidden, models::JobHistory,
+    probe::video_metadata::read_video_track_size_bytes, refresh_tray_menu, storage::AppStorage,
+    transcode::command_builder::build_passlog_path,
 };
 
 /** FFmpeg 子进程共享槽位，用于退出时从主线程中断后台进程。 */
@@ -298,10 +299,73 @@ impl TranscodeManager {
             let _ = storage.jobs_history.update(job);
             let _ = app.emit("job:updated", &*job);
             refresh_tray_menu(&app);
+            notify_job_completed(&app, job);
         }
 
         self.start_available_jobs(app, storage);
     }
+}
+
+/** 在任务成功完成后发送系统通知；通知失败不影响任务历史和后续调度。 */
+fn notify_job_completed<R: Runtime>(app: &AppHandle<R>, job: &JobHistory) {
+    if job.status != "completed" {
+        return;
+    }
+
+    let output_name = Path::new(&job.output_file)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&job.output_file);
+    let title = job.name.as_deref().unwrap_or("转码任务");
+
+    // 系统通知属于完成后的附加反馈，权限或平台失败都不能反向影响任务状态。
+    mark_open_jobs_on_notification_activate_if_hidden(app);
+    show_completed_notification(
+        app.clone(),
+        format!("{title} 已完成"),
+        format!("输出文件：{output_name}"),
+    );
+}
+
+/** 展示完成通知；Linux 支持监听默认点击，其他桌面平台依赖系统点击激活应用。 */
+fn show_completed_notification<R: Runtime>(app: AppHandle<R>, title: String, body: String) {
+    tauri::async_runtime::spawn(async move {
+        #[cfg(target_os = "linux")]
+        {
+            show_clickable_completed_notification(app, &title, &body);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = &app;
+            let _ = notify_rust::Notification::new()
+                .summary(&title)
+                .body(&body)
+                .auto_icon()
+                .show();
+        }
+    });
+}
+
+/** Linux 通知中心会回传 default action，点击后立即通知前端跳转任务中心。 */
+#[cfg(target_os = "linux")]
+fn show_clickable_completed_notification<R: Runtime>(app: AppHandle<R>, title: &str, body: &str) {
+    let Ok(handle) = notify_rust::Notification::new()
+        .summary(title)
+        .body(body)
+        .auto_icon()
+        .action("default", "打开任务中心")
+        .show()
+    else {
+        return;
+    };
+
+    handle.wait_for_action(|action| {
+        if action == "default" {
+            crate::show_main_window(&app);
+            let _ = app.emit("app:navigate", "/jobs");
+        }
+    });
 }
 
 /** 取消目标，区分排队任务和运行任务。 */

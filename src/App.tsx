@@ -156,6 +156,22 @@ function AppRoutes({
   }, [filteredEncoders, formEncoder, setFormEncoder]);
 
   useEffect(() => {
+    let disposeNavigate: (() => void) | undefined;
+    void listen<string>("app:navigate", (event) => {
+      // 后端只下发内部路由目标，具体跳转保持在 React Router 边界内完成。
+      navigate(event.payload);
+    }).then((unlisten) => {
+      disposeNavigate = unlisten;
+    });
+
+    return () => {
+      if (disposeNavigate) {
+        disposeNavigate();
+      }
+    };
+  }, [navigate]);
+
+  useEffect(() => {
     if (!selectedEncoderCapability?.supportsTwoPass && formTwoPass) {
       setFormTwoPass(false);
     }
