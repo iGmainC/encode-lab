@@ -332,7 +332,9 @@ pub fn run() {
                 api.prevent_exit();
                 confirm_exit_with_running_jobs(app_handle.clone());
             }
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
+                // macOS Dock 重新打开应用时同步处理待打开的任务页面。
                 open_jobs_if_requested(app_handle);
             }
             _ => {}
