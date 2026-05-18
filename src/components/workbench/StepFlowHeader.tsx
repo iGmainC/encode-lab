@@ -1,5 +1,6 @@
 import { Badge } from "../ui/badge";
 import { useI18n } from "../../i18n/I18nProvider";
+import { cn } from "../../lib/utils";
 import type { TaskDraftStep } from "../../types/workbench";
 
 const orderedSteps: { key: TaskDraftStep; labelKey: Parameters<ReturnType<typeof useI18n>["t"]>[0] }[] = [
@@ -18,8 +19,8 @@ export function StepFlowHeader({
   const currentIndex = orderedSteps.findIndex((item) => item.key === currentStep);
 
   return (
-    <div className="rounded-2xl border bg-card p-4">
-      <div className="mb-3 flex items-center justify-between">
+    <div className="rounded-lg border bg-card p-4 shadow-sm">
+      <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-medium">{t("step.title")}</div>
           <p className="text-sm text-muted-foreground">{t("step.description")}</p>
@@ -33,13 +34,14 @@ export function StepFlowHeader({
           return (
             <div
               key={item.key}
-              className={`rounded-2xl border px-4 py-3 text-sm ${
+              className={cn(
+                "rounded-lg border px-4 py-3 text-sm",
                 active
                   ? "border-primary bg-primary/5"
                   : completed
                     ? "border-border bg-muted/50"
-                    : "border-dashed text-muted-foreground"
-              }`}
+                    : "border-dashed text-muted-foreground",
+              )}
             >
               <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">
                 {t("step.label", { index: index + 1 })}

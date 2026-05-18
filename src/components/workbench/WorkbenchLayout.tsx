@@ -1,5 +1,4 @@
 import { ReactNode } from "react";
-import { AppSidebar } from "./AppSidebar";
 import { TopStatusBar } from "./TopStatusBar";
 import type { FfmpegProbeResult } from "../../types/workbench";
 
@@ -34,22 +33,22 @@ export function WorkbenchLayout({
   children,
 }: Props) {
   return (
-    <div className="min-h-screen bg-muted/30">
-      <div className="mx-auto flex min-h-screen max-w-[1600px] flex-col gap-4 p-4 lg:flex-row lg:p-6">
-        <AppSidebar items={navItems} />
-        <div className="flex min-h-[calc(100vh-3rem)] flex-1 flex-col overflow-hidden rounded-3xl border bg-background shadow-sm">
-          <TopStatusBar
-            title={title}
-            description={description}
-            ffmpegProbe={ffmpegProbe}
-            concurrencyN={concurrencyN}
-            onRefresh={onRefresh}
-            onSeed={onSeed}
-            loading={loading}
-            seeding={seeding}
-          />
-          <main className="flex-1 overflow-auto p-4 md:p-6">{children}</main>
-        </div>
+    <div className="h-screen overflow-hidden bg-background text-foreground">
+      <div className="flex h-full min-w-0 flex-col overflow-hidden bg-muted/20">
+        <TopStatusBar
+          title={title}
+          description={description}
+          navItems={navItems}
+          ffmpegProbe={ffmpegProbe}
+          concurrencyN={concurrencyN}
+          onRefresh={onRefresh}
+          onSeed={onSeed}
+          loading={loading}
+          seeding={seeding}
+        />
+        <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+          <div className="mx-auto w-full max-w-[1480px] px-4 py-4 md:px-6 lg:px-8">{children}</div>
+        </main>
       </div>
     </div>
   );

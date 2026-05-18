@@ -4,6 +4,7 @@ import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 import { FilePathActions } from "../common/FilePathActions";
 import { useI18n } from "../../i18n/I18nProvider";
+import { cn } from "../../lib/utils";
 import type { VideoMetadataResult } from "../../types/workbench";
 
 type Props = {
@@ -30,14 +31,14 @@ export function SourceVideoCard({
   const { t } = useI18n();
 
   return (
-    <Card className={isDragOverWindow ? "border-primary bg-primary/5" : ""}>
-      <CardHeader>
+    <Card className={cn("shadow-sm", isDragOverWindow ? "border-primary bg-primary/5" : "")}>
+      <CardHeader className="gap-1 p-4">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <CardTitle>{t("source.title")}</CardTitle>
             <CardDescription>{t("source.description")}</CardDescription>
           </div>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 gap-2">
             <Button size="sm" variant="secondary" onClick={onPickSourceFile}>
               {t("source.pick")}
             </Button>
@@ -47,20 +48,22 @@ export function SourceVideoCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <label className="block space-y-1 text-sm">
+      <CardContent className="flex flex-col gap-3 p-4 pt-0">
+        <label className="block text-sm">
           <span className="text-muted-foreground">{t("source.path")}</span>
           <FilePathActions path={sourceFilePath} emptyText={t("source.emptyPath")}>
             <input
-              className="h-11 w-full rounded-xl border bg-background px-3 text-sm"
+              className="mt-1 h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              name="source-file-path"
+              autoComplete="off"
               value={sourceFilePath}
               onChange={(event) => setSourceFilePath(event.target.value)}
-              placeholder="/Users/you/Videos/input.mp4"
+              placeholder="/Users/you/Videos/input.mp4…"
             />
           </FilePathActions>
         </label>
 
-        <div className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
+        <div className="rounded-lg border border-dashed bg-muted/30 p-4 text-sm leading-6 text-muted-foreground">
           {t("source.dropHint")}
         </div>
 
@@ -72,7 +75,7 @@ export function SourceVideoCard({
         ) : null}
 
         {videoMetadata ? (
-          <div className="space-y-3 rounded-2xl border bg-muted/30 p-4">
+          <div className="flex flex-col gap-3 rounded-lg border bg-background p-4">
             <FilePathActions path={videoMetadata.inputFile} />
             <div className="flex flex-wrap gap-2">
               {videoMetadata.tags.map((tag) => (

@@ -232,11 +232,11 @@ export function TaskConfigPage({
   }
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col gap-5">
       <StepFlowHeader currentStep={step} />
 
-      <div className="grid gap-6 xl:grid-cols-[420px_minmax(0,1fr)]">
-        <div className="space-y-6">
+      <div className="grid gap-5 xl:grid-cols-[380px_minmax(0,1fr)]">
+        <div className="flex flex-col gap-5">
           <SourceVideoCard
             sourceFilePath={sourceFilePath}
             setSourceFilePath={setSourceFilePath}
@@ -276,12 +276,12 @@ export function TaskConfigPage({
           />
         </div>
 
-        <Card>
-          <CardHeader>
+        <Card className="shadow-sm">
+          <CardHeader className="border-b p-4 md:p-5">
             <CardTitle>{t("config.panel.title")}</CardTitle>
             <CardDescription>{t("config.panel.description")}</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-6">
+          <CardContent className="flex flex-col gap-5 p-4 md:p-5">
             <div className="grid gap-4 md:grid-cols-2">
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Codec</span>
@@ -355,8 +355,8 @@ export function TaskConfigPage({
             </div>
 
             {formMode === "CRF" ? (
-              <Card className="border-dashed shadow-none">
-                <CardContent className="space-y-3 p-4">
+              <Card className="border-dashed bg-muted/20 shadow-none">
+                <CardContent className="flex flex-col gap-3 p-4">
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground">{t("config.crf")}</span>
                     <span className="font-medium">{formCrf}</span>
@@ -373,39 +373,48 @@ export function TaskConfigPage({
                 </CardContent>
               </Card>
             ) : (
-              <div className="grid gap-4 rounded-2xl border p-4 md:grid-cols-3">
+              <div className="grid gap-4 rounded-lg border bg-muted/20 p-4 md:grid-cols-3">
                 <label className="space-y-1 text-sm">
                   <span className="text-muted-foreground">{t("config.targetBitrate")}</span>
                   <input
-                    className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                    className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                    name="target-bitrate-kbps"
+                    inputMode="numeric"
+                    autoComplete="off"
                     value={formBitrateKbps}
                     onChange={(event) => setFormBitrateKbps(event.target.value)}
-                    placeholder="5000"
+                    placeholder="5000…"
                   />
                 </label>
                 <label className="space-y-1 text-sm">
                   <span className="text-muted-foreground">maxrate</span>
                   <input
-                    className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                    className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                    name="maxrate-kbps"
+                    inputMode="numeric"
+                    autoComplete="off"
                     value={formMaxrateKbps}
                     onChange={(event) => setFormMaxrateKbps(event.target.value)}
-                    placeholder="7000"
+                    placeholder="7000…"
                   />
                 </label>
                 <label className="space-y-1 text-sm">
                   <span className="text-muted-foreground">bufsize</span>
                   <input
-                    className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                    className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                    name="bufsize-kbps"
+                    inputMode="numeric"
+                    autoComplete="off"
                     value={formBufsizeKbps}
                     onChange={(event) => setFormBufsizeKbps(event.target.value)}
-                    placeholder="10000"
+                    placeholder="10000…"
                   />
                 </label>
               </div>
             )}
 
             {formCodec === "av1" ? (
-              <div className="space-y-4 rounded-2xl border bg-muted/20 p-4">
+              <div className="flex flex-col gap-4 rounded-lg border bg-muted/20 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">{t("config.av1.title")}</div>
@@ -413,7 +422,7 @@ export function TaskConfigPage({
                       {t("config.av1.description")}
                     </p>
                   </div>
-                  <div className="rounded-full border px-3 py-1 text-xs text-muted-foreground">
+                  <div className="rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground">
                     {isAv1SoftwareEncoder ? t("config.av1.software") : t("config.av1.hardware")}
                   </div>
                 </div>
@@ -437,7 +446,7 @@ export function TaskConfigPage({
                       <p className="text-xs text-muted-foreground">{t("config.av1.speedHint")}</p>
                     </label>
 
-                    <div className="rounded-2xl border bg-background/60 p-3">
+                    <div className="rounded-lg border bg-background/80 p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="space-y-1">
                           <div className="text-sm font-medium">row-mt</div>
@@ -450,20 +459,26 @@ export function TaskConfigPage({
                     <label className="space-y-1 text-sm">
                       <span className="text-muted-foreground">Tile Columns</span>
                       <input
-                        className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                        className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                        name="av1-tile-columns"
+                        inputMode="numeric"
+                        autoComplete="off"
                         value={av1TileColumns}
                         onChange={(event) => setAv1TileColumns(event.target.value)}
-                        placeholder="2"
+                        placeholder="2…"
                       />
                     </label>
 
                     <label className="space-y-1 text-sm">
                       <span className="text-muted-foreground">Tile Rows</span>
                       <input
-                        className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
+                        className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                        name="av1-tile-rows"
+                        inputMode="numeric"
+                        autoComplete="off"
                         value={av1TileRows}
                         onChange={(event) => setAv1TileRows(event.target.value)}
-                        placeholder="1"
+                        placeholder="1…"
                       />
                     </label>
                   </div>
@@ -503,7 +518,7 @@ export function TaskConfigPage({
                 ) : null}
 
                 {!isAv1SoftwareEncoder ? (
-                  <div className="rounded-2xl border bg-background/60 p-3 text-sm text-muted-foreground">
+                  <div className="rounded-lg border bg-background/80 p-3 text-sm text-muted-foreground">
                     {t("config.av1.hardwareHint")}
                   </div>
                 ) : null}
@@ -531,7 +546,7 @@ export function TaskConfigPage({
                 </Select>
                 <p className="text-xs text-muted-foreground">{presetHint}</p>
               </label>
-              <div className="rounded-2xl border bg-muted/30 p-3 md:col-span-2">
+              <div className="rounded-lg border bg-muted/30 p-3 md:col-span-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">{t("config.keepResolution")}</div>
@@ -548,7 +563,10 @@ export function TaskConfigPage({
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Width</span>
                 <input
-                  className="h-10 w-full rounded-xl border bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+                  name="output-width"
+                  inputMode="numeric"
+                  autoComplete="off"
                   value={formWidth}
                   onChange={(event) => setFormWidth(event.target.value)}
                   disabled={keepOriginalResolution}
@@ -557,7 +575,10 @@ export function TaskConfigPage({
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Height</span>
                 <input
-                  className="h-10 w-full rounded-xl border bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+                  name="output-height"
+                  inputMode="numeric"
+                  autoComplete="off"
                   value={formHeight}
                   onChange={(event) => setFormHeight(event.target.value)}
                   disabled={keepOriginalResolution}
@@ -566,7 +587,7 @@ export function TaskConfigPage({
             </div>
 
             {isDolbyVisionSource ? (
-              <div className="rounded-2xl border bg-muted/30 p-4">
+              <div className="rounded-lg border bg-muted/30 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">{t("config.dv.title")}</div>
@@ -608,7 +629,7 @@ export function TaskConfigPage({
                   </SelectContent>
                 </Select>
               </label>
-              <div className="rounded-2xl border bg-muted/30 p-3">
+              <div className="rounded-lg border bg-muted/30 p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">Fast Start</div>
@@ -621,7 +642,7 @@ export function TaskConfigPage({
                   />
                 </div>
               </div>
-              <div className="rounded-2xl border bg-muted/30 p-3 md:col-span-2">
+              <div className="rounded-lg border bg-muted/30 p-3 md:col-span-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">{t("config.keepFps")}</div>
@@ -638,7 +659,10 @@ export function TaskConfigPage({
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">FPS</span>
                 <input
-                  className="h-10 w-full rounded-xl border bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  className="h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+                  name="output-fps"
+                  inputMode="decimal"
+                  autoComplete="off"
                   value={formFps}
                   onChange={(event) => setFormFps(event.target.value)}
                   disabled={keepOriginalFps}
@@ -698,7 +722,7 @@ export function TaskConfigPage({
               </label>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-muted/30 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-accent/35 p-4">
               <div className="space-y-1">
                 <div className="font-medium">{t("config.next.title")}</div>
                 <p className="text-sm text-muted-foreground">{t("config.next.description")}</p>
@@ -798,12 +822,12 @@ function TrimRangeControl({
   }
 
   return (
-    <Card>
-      <CardHeader>
+    <Card className="shadow-sm">
+      <CardHeader className="gap-1 p-4">
         <CardTitle>{labels.title}</CardTitle>
         <CardDescription>{labels.description}</CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-4">
+      <CardContent className="grid gap-4 p-4 pt-0">
         {hasDuration ? (
           <>
             <Slider
@@ -817,7 +841,10 @@ function TrimRangeControl({
               <label className="grid gap-1 text-sm">
                 <span className="text-muted-foreground">{labels.start}</span>
                 <input
-                  className="h-10 rounded-xl border bg-background px-3 text-sm"
+                  className="h-10 rounded-lg border bg-background px-3 text-sm font-mono tabular-nums outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  name="trim-start-timecode"
+                  inputMode="decimal"
+                  autoComplete="off"
                   value={startText}
                   onChange={(event) => setStartText(event.target.value)}
                   onBlur={() => commitTextValue("start")}
@@ -831,7 +858,10 @@ function TrimRangeControl({
               <label className="grid gap-1 text-sm">
                 <span className="text-muted-foreground">{labels.end}</span>
                 <input
-                  className="h-10 rounded-xl border bg-background px-3 text-sm"
+                  className="h-10 rounded-lg border bg-background px-3 text-sm font-mono tabular-nums outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  name="trim-end-timecode"
+                  inputMode="decimal"
+                  autoComplete="off"
                   value={endText}
                   onChange={(event) => setEndText(event.target.value)}
                   onBlur={() => commitTextValue("end")}
@@ -843,13 +873,13 @@ function TrimRangeControl({
                 />
               </label>
             </div>
-            <div className="rounded-2xl border p-3 text-sm text-muted-foreground">
+            <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
               {labels.duration}: {formatTimecode(Math.max(0, safeEndSec - safeStartSec))}
               {isFullRange ? ` · ${labels.full}` : ""}
             </div>
           </>
         ) : (
-          <div className="rounded-2xl border border-dashed p-4 text-sm text-muted-foreground">
+          <div className="rounded-lg border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground">
             {labels.unavailable}
           </div>
         )}

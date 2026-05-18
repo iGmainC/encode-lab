@@ -23,12 +23,12 @@ export function TaskSummaryCard({
   const { t } = useI18n();
 
   return (
-    <Card>
-      <CardHeader>
+    <Card className="shadow-sm">
+      <CardHeader className="gap-1 p-4">
         <CardTitle>{t("summary.title")}</CardTitle>
         <CardDescription>{t("summary.description")}</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="flex flex-col gap-4 p-4 pt-0">
         <div className="flex flex-wrap gap-2">
           <Badge variant="outline">{codec.toUpperCase()}</Badge>
           <Badge variant="outline">{encoder}</Badge>
@@ -38,21 +38,21 @@ export function TaskSummaryCard({
         </div>
 
         <div className="grid grid-cols-2 gap-3 text-sm">
-          <div className="rounded-2xl border p-3">
+          <div className="rounded-lg border bg-background p-3">
             <div className="text-muted-foreground">{t("summary.source")}</div>
             <div className="mt-1 font-medium">
               {videoMetadata?.video?.width ?? "-"} x {videoMetadata?.video?.height ?? "-"}
             </div>
           </div>
-          <div className="rounded-2xl border p-3">
+          <div className="rounded-lg border bg-background p-3">
             <div className="text-muted-foreground">{t("summary.codec")}</div>
             <div className="mt-1 font-medium">{videoMetadata?.video?.codecName ?? "-"}</div>
           </div>
-          <div className="rounded-2xl border p-3">
+          <div className="rounded-lg border bg-background p-3">
             <div className="text-muted-foreground">{t("summary.fps")}</div>
             <div className="mt-1 font-medium">{videoMetadata?.video?.fps?.toFixed(2) ?? "-"}</div>
           </div>
-          <div className="rounded-2xl border p-3">
+          <div className="rounded-lg border bg-background p-3">
             <div className="text-muted-foreground">{t("summary.container")}</div>
             <div className="mt-1 font-medium">{videoMetadata?.containerFormat ?? "-"}</div>
           </div>
