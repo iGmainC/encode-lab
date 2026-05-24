@@ -146,7 +146,7 @@ jobs:
         shell: bash
         run: |
           # latest.json 是客户端固定访问的更新清单，缺失会导致更新检测直接失败。
-          asset_names="$(gh release view "$TAG_NAME" --json assets --jq '.assets[].name')"
+          asset_names="$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           echo "$asset_names"
 
           if ! grep -Fxq "latest.json" <<< "$asset_names"; then
