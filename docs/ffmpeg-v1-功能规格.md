@@ -352,6 +352,7 @@ type Template = {
 2. 版本比较使用 SemVer 规则，`v10.0.0` 大于 `v9.99.99`，`v10.0.0` 大于 `v10.0.0-beta`。
 3. 更新包必须由 CI 使用 `TAURI_SIGNING_PRIVATE_KEY` 签名，客户端使用 `tauri.conf.json` 中的公钥校验。
 4. Release 必须包含 `latest.json` 和 `.sig` updater 资产；客户端固定通过 GitHub latest 端点读取 `latest.json`。
+5. 更换 updater 签名密钥时必须同步更新 GitHub Secrets 和 `tauri.conf.json` 公钥；已安装旧公钥版本无法校验新密钥签出的更新包。
 
 ## 6.2 事件通道（建议）
 
