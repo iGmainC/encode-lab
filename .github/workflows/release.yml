@@ -160,3 +160,7 @@ jobs:
             echo "::error::Release $TAG_NAME is missing updater signature assets"
             exit 1
           fi
+
+          # updater 客户端不会携带 GitHub 登录态，必须验证公开端点能匿名返回 JSON。
+          curl -LfsS "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" >/tmp/latest.json
+          jq -e '.version and .platforms and (.platforms | length > 0)' /tmp/latest.json >/dev/null
