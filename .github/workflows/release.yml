@@ -143,6 +143,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.verify-tag.outputs.tag_name }}
+          APP_VERSION: ${{ needs.verify-tag.outputs.app_version }}
         shell: bash
         run: |
           # latest.json 是客户端固定访问的更新清单，缺失会导致更新检测直接失败。
@@ -163,4 +164,15 @@ jobs:
 
           # updater 客户端不会携带 GitHub 登录态，必须验证公开端点能匿名返回 JSON。
           curl -LfsS "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" >/tmp/latest.json
-          jq -e '.version and .platforms and (.platforms | length > 0)' /tmp/latest.json >/dev/null
+          jq -e --arg version "$APP_VERSION" --arg repo "$GITHUB_REPOSITORY" --arg tag "$TAG_NAME" '
+            .version == $version
+            and (.platforms | type == "object")
+            and (.platforms | length > 0)
+            and ([.platforms[] | (.signature | type == "string" and length > 0)] | all)
+            and ([.platforms[] | (.url | startswith("https://github.com/" + $repo + "/releases/download/" + $tag + "/"))] | all)
+          ' /tmp/latest.json >/dev/null
+
+          jq -r '.platforms[].url' /tmp/latest.json | sort -u | while read -r url; do
+            # 清单中的安装包 URL 也必须匿名可访问，否则客户端拿到清单后仍会安装失败。
+            curl -LfsS --head "$url" >/dev/null
+          done
