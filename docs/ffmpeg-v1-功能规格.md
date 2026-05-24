@@ -351,9 +351,9 @@ type Template = {
 1. 发布 tag 必须为 `vx.x.x` 或 `vx.x.x-beta`，CI 通过 `bun run release:version` 把 tag 中的版本号注入 Tauri 构建配置。
 2. 版本比较使用 SemVer 规则，`v10.0.0` 大于 `v9.99.99`，`v10.0.0` 大于 `v10.0.0-beta`。
 3. 更新包必须由 CI 使用 `TAURI_SIGNING_PRIVATE_KEY` 签名，客户端使用 `tauri.conf.json` 中的公钥校验。
-4. Release 必须包含 `latest.json` 和 `.sig` updater 资产；客户端固定通过公开 mirror 的 GitHub latest 端点读取 `latest.json`。
+4. Release 必须包含 `latest.json` 和 `.sig` updater 资产；客户端固定通过公开主仓库的 GitHub latest 端点读取 `latest.json`。
 5. 更换 updater 签名密钥时必须同步更新 GitHub Secrets 和 `tauri.conf.json` 公钥；已安装旧公钥版本无法校验新密钥签出的更新包。
-6. updater 端点必须能匿名访问；主仓库保持私有时，CI 必须把更新清单和安装包镜像到公开 Release 仓库。
+6. updater 端点必须能匿名访问；主仓库必须保持公开，否则客户端无法读取更新清单和安装包。
 
 ## 6.2 事件通道（建议）
 

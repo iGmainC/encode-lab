@@ -10,7 +10,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_MIRROR_REPO: iGmainC/encode-lab-releases
 
 jobs:
   verify-tag:
@@ -127,61 +126,27 @@ jobs:
           tauriScript: bun run tauri
           args: ${{ matrix.platform.args }} --config '${{ needs.verify-tag.outputs.tauri_config }}'
 
-  publish-updater-mirror:
-    name: Publish updater mirror
-    needs: [verify-tag, build-tauri]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mirror updater artifacts to public release repository
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
-          TAG_NAME: ${{ needs.verify-tag.outputs.tag_name }}
-        shell: bash
-        run: |
-          # 主仓库保持私有，客户端只访问公开 mirror 仓库中的 updater 资产。
-          mkdir -p /tmp/updater-assets
-          gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --dir /tmp/updater-assets
-
-          # Tauri 生成的 latest.json 默认指向主仓库，需要改写为公开 mirror 下载地址。
-          jq \
-            --arg source "https://github.com/$GITHUB_REPOSITORY/releases/download/" \
-            --arg mirror "https://github.com/$RELEASE_MIRROR_REPO/releases/download/" \
-            '(.platforms[]?.url) |= gsub($source; $mirror)' \
-            /tmp/updater-assets/latest.json > /tmp/updater-assets/latest.mirror.json
-          mv /tmp/updater-assets/latest.mirror.json /tmp/updater-assets/latest.json
-
-          if gh release view "$TAG_NAME" --repo "$RELEASE_MIRROR_REPO" >/dev/null 2>&1; then
-            gh release delete "$TAG_NAME" --repo "$RELEASE_MIRROR_REPO" --yes
-          fi
-
-          gh release create "$TAG_NAME" /tmp/updater-assets/* \
-            --repo "$RELEASE_MIRROR_REPO" \
-            --title "Encode Lab $TAG_NAME" \
-            --notes "Public updater artifacts mirrored from $GITHUB_REPOSITORY $TAG_NAME." \
-            --latest
-
   verify-updater-release:
     name: Verify updater release assets
-    needs: [verify-tag, build-tauri, publish-updater-mirror]
+    needs: [verify-tag, build-tauri]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Stop when build or mirror failed
-        if: needs.build-tauri.result != 'success' || needs.publish-updater-mirror.result != 'success'
+      - name: Stop when build failed
+        if: needs.build-tauri.result != 'success'
         run: |
-          # 构建或公开 mirror 失败时不能继续检查，避免把半成品误判为可更新版本。
+          # 构建失败时不能继续检查，避免把半成品误判为可更新版本。
           echo "build-tauri result: ${{ needs.build-tauri.result }}"
-          echo "publish-updater-mirror result: ${{ needs.publish-updater-mirror.result }}"
           exit 1
 
       - name: Verify updater manifest and signatures
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.verify-tag.outputs.tag_name }}
         shell: bash
         run: |
           # latest.json 是客户端固定访问的更新清单，缺失会导致更新检测直接失败。
-          asset_names="$(gh release view "$TAG_NAME" --repo "$RELEASE_MIRROR_REPO" --json assets --jq '.assets[].name')"
+          asset_names="$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           echo "$asset_names"
 
           if ! grep -Fxq "latest.json" <<< "$asset_names"; then
@@ -197,5 +162,5 @@ jobs:
           fi
 
           # updater 客户端不会携带 GitHub 登录态，必须验证公开端点能匿名返回 JSON。
-          curl -LfsS "https://github.com/$RELEASE_MIRROR_REPO/releases/latest/download/latest.json" >/tmp/latest.json
+          curl -LfsS "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" >/tmp/latest.json
           jq -e '.version and .platforms and (.platforms | length > 0)' /tmp/latest.json >/dev/null
