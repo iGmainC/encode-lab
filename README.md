@@ -135,23 +135,23 @@
 
 ### 发布前本地检查
 
-- [ ] `git status --short --branch` 确认只包含本次计划内改动。
-- [ ] `bun run build` 通过。
-- [ ] `cd src-tauri && cargo test` 通过。
-- [ ] `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/release.yml")'` 通过。
-- [ ] `git diff --check` 无空白错误。
-- [ ] 版本 tag 使用 `vx.x.x` 或 `vx.x.x-beta`，并通过 `bun run release:version` 生成 Tauri 发布配置。
+- [x] `git status --short --branch` 确认只包含本次计划内改动。
+- [x] `bun run build` 通过。
+- [x] `cd src-tauri && cargo test` 通过。
+- [x] `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/release.yml")'` 通过。
+- [x] `git diff --check` 无空白错误。
+- [x] 版本 tag 使用 `vx.x.x` 或 `vx.x.x-beta`，并通过 `bun run release:version` 生成 Tauri 发布配置。
 
 ### v0.0.8-beta 发布检查
 
-- [ ] `v0.0.8-beta` tag 位于 `main` 历史上。
-- [ ] GitHub Actions `Release` workflow 全部 job 成功。
-- [ ] Release 包含 `latest.json`、安装包和对应 `.sig` 签名资产。
-- [ ] `https://github.com/iGmainC/encode-lab/releases/latest/download/latest.json` 可匿名访问。
-- [ ] `latest.json.version` 等于 `0.0.8-beta`。
-- [ ] `latest.json.platforms` 中每个平台都有非空 `signature`。
-- [ ] `latest.json.platforms` 中每个 `url` 都指向 `iGmainC/encode-lab` 主仓库 Release，并且可匿名访问。
-- [ ] 新安装包内置 updater endpoint 指向主仓库，不再依赖 `iGmainC/encode-lab-releases`。
+- [x] `v0.0.8-beta` tag 位于 `main` 历史上。
+- [x] GitHub Actions `Release` workflow 全部 job 成功。
+- [x] Release 包含 `latest.json`、安装包和对应 `.sig` 签名资产。
+- [x] `https://github.com/iGmainC/encode-lab/releases/latest/download/latest.json` 可匿名访问。
+- [x] `latest.json.version` 等于 `0.0.8-beta`。
+- [x] `latest.json.platforms` 中每个平台都有非空 `signature`。
+- [x] `latest.json.platforms` 中每个 `url` 都指向 `iGmainC/encode-lab` 主仓库 Release，并且可匿名访问。
+- [x] 新安装包内置 updater endpoint 指向主仓库，不再依赖 `iGmainC/encode-lab-releases`。
 
 ### V1 主链路人工验收
 
