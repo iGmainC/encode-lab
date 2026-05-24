@@ -3,6 +3,9 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { formatReleaseVersion, isNewerReleaseVersion } from "./version";
 
+/** Tauri 在远端 updater manifest 缺失或不是 JSON 时返回的固定错误片段。 */
+const INVALID_RELEASE_JSON_ERROR = "Could not fetch a valid release JSON from the remote";
+
 export type UpdateCheckResult =
   | {
       /** 是否发现可安装更新。 */
@@ -36,7 +39,18 @@ export type UpdateInstallProgress = {
  */
 export async function checkForAppUpdate(): Promise<UpdateCheckResult> {
   const currentVersion = await getVersion();
-  const update = await check();
+  let update: Update | null;
+
+  try {
+    update = await check();
+  } catch (error) {
+    // 远端 latest.json 缺失时，插件只能给出通用解析错误；这里补充发布产物根因提示。
+    if (error instanceof Error && error.message.includes(INVALID_RELEASE_JSON_ERROR)) {
+      throw new Error("GitHub Release 缺少有效的 latest.json 更新清单，请检查发布流水线是否生成并上传签名 updater 产物。");
+    }
+
+    throw error;
+  }
 
   if (!update || !isNewerReleaseVersion(update.version, currentVersion)) {
     update?.close();

@@ -125,3 +125,38 @@ jobs:
           includeUpdaterJson: true
           tauriScript: bun run tauri
           args: ${{ matrix.platform.args }} --config '${{ needs.verify-tag.outputs.tauri_config }}'
+
+  verify-updater-release:
+    name: Verify updater release assets
+    needs: [verify-tag, build-tauri]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop when a platform build failed
+        if: needs.build-tauri.result != 'success'
+        run: |
+          # 构建失败时不能继续检查 Release 资产，避免把半成品发布误判为可更新版本。
+          echo "build-tauri result: ${{ needs.build-tauri.result }}"
+          exit 1
+
+      - name: Verify updater manifest and signatures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.verify-tag.outputs.tag_name }}
+        shell: bash
+        run: |
+          # latest.json 是客户端固定访问的更新清单，缺失会导致更新检测直接失败。
+          asset_names="$(gh release view "$TAG_NAME" --json assets --jq '.assets[].name')"
+          echo "$asset_names"
+
+          if ! grep -Fxq "latest.json" <<< "$asset_names"; then
+            echo "::error::Release $TAG_NAME is missing latest.json for Tauri updater"
+            exit 1
+          fi
+
+          # .sig 是 latest.json 中 signature 字段的来源，缺失说明安装包没有可校验签名。
+          signature_count="$(grep -Ec '\.sig$' <<< "$asset_names" || true)"
+          if [[ "$signature_count" -eq 0 ]]; then
+            echo "::error::Release $TAG_NAME is missing updater signature assets"
+            exit 1
+          fi
