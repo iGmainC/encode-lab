@@ -1,5 +1,6 @@
 mod commands;
 mod evaluation;
+mod ffmpeg_runtime;
 mod models;
 mod preview;
 mod probe;
@@ -274,6 +275,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let resource_dir = app.path().resource_dir().ok();
+            ffmpeg_runtime::init_ffmpeg_runtime(resource_dir);
             let state = build_state(app).map_err(|err| err.to_string())?;
             app.manage(state);
             setup_tray(app)?;

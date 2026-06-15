@@ -3,8 +3,8 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    process::{Child, Stdio},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -15,14 +15,19 @@ use uuid::Uuid;
 
 use crate::{
     commands::error::{CommandError, CommandResult},
+    ffmpeg_runtime::ffmpeg_command,
     models::{task::Resolution, FileLocation, TaskConfigPayload, Validate},
     transcode::command_builder::{
         build_preview_decode_frame_command_args, build_preview_encoded_frame_command_args,
-        build_source_frame_command_args, PreviewCommandOptions,
+        build_source_frame_command_args, PreviewCommandOptions, PreviewSdrTonemapMode,
+        PreviewSourceColor,
     },
 };
 
 const MIN_RENDER_INTERVAL_MS: u64 = 500;
+
+/** 预览 HDR/DV 转 SDR 的 FFmpeg filter 能力缓存，避免每次拖动时间轴都探测一次。 */
+static PREVIEW_SDR_TONEMAP_SUPPORT: OnceLock<PreviewSdrTonemapSupport> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +43,21 @@ pub struct PreviewConfig {
     /** 可选输入节点位置；当前预览执行仍使用 input_file 保持本机兼容。 */
     #[serde(default)]
     pub input_location: Option<FileLocation>,
+    /** 源视频 HDR 类型；仅用于决定预览 PNG 是否需要 SDR 映射。 */
+    #[serde(default)]
+    pub source_hdr_type: Option<String>,
+    /** 源视频色彩原色；普通 HDR fallback 映射时传给 zscale 的输入端。 */
+    #[serde(default)]
+    pub source_color_primaries: Option<String>,
+    /** 源视频传递函数；普通 HDR fallback 映射时传给 zscale 的输入端。 */
+    #[serde(default)]
+    pub source_color_transfer: Option<String>,
+    /** 源视频色彩矩阵；普通 HDR fallback 映射时传给 zscale 的输入端。 */
+    #[serde(default)]
+    pub source_color_space: Option<String>,
+    /** 源视频色彩范围；普通 HDR fallback 映射时传给 zscale 的输入端。 */
+    #[serde(default)]
+    pub source_color_range: Option<String>,
     pub clip_range: Option<PreviewClipRange>,
     pub render_scale: f64,
     pub compare_orientation: CompareOrientation,
@@ -69,6 +89,8 @@ pub enum CompareOrientation {
 pub struct StartPreviewResponse {
     pub preview_session_id: String,
     pub degraded_from_two_pass: bool,
+    pub degraded_from_dolby_vision: bool,
+    pub degraded_from_sdr_tonemap: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +98,8 @@ pub struct StartPreviewResponse {
 pub struct UpdatePreviewResponse {
     pub ok: bool,
     pub degraded_from_two_pass: bool,
+    pub degraded_from_dolby_vision: bool,
+    pub degraded_from_sdr_tonemap: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +128,8 @@ pub struct PreviewStateEvent {
     pub preview_speed: Option<f64>,
     pub estimated_transcode_speed: Option<f64>,
     pub degraded_from_two_pass: bool,
+    pub degraded_from_dolby_vision: bool,
+    pub degraded_from_sdr_tonemap: bool,
     pub error: Option<PreviewErrorEvent>,
 }
 
@@ -130,9 +156,24 @@ struct PreviewSession {
     id: String,
     config: PreviewConfig,
     degraded_from_two_pass: bool,
+    degraded_from_dolby_vision: bool,
+    degraded_from_sdr_tonemap: bool,
+    sdr_tonemap_mode: PreviewSdrTonemapMode,
     seq: u64,
     last_render_started_at: Option<Instant>,
     deferred_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreviewSdrToneMapDecision {
+    sdr_tonemap_mode: PreviewSdrTonemapMode,
+    degraded_from_sdr_tonemap: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PreviewSdrTonemapSupport {
+    zscale: bool,
+    libplacebo: bool,
 }
 
 #[derive(Clone)]
@@ -179,10 +220,15 @@ impl PreviewManager {
         validate_preview_input(&payload)?;
 
         let degraded_from_two_pass = payload.task_config_snapshot.video.enable_two_pass;
+        let degraded_from_dolby_vision = should_degrade_dolby_vision_preview(&payload);
+        let sdr_tonemap = resolve_preview_sdr_tonemap(&payload);
         let session = PreviewSession {
             id: Uuid::new_v4().to_string(),
             config: sanitize_preview_config(payload)?,
             degraded_from_two_pass,
+            degraded_from_dolby_vision,
+            degraded_from_sdr_tonemap: sdr_tonemap.degraded_from_sdr_tonemap,
+            sdr_tonemap_mode: sdr_tonemap.sdr_tonemap_mode,
             seq: 1,
             last_render_started_at: None,
             deferred_seq: None,
@@ -191,6 +237,8 @@ impl PreviewManager {
         let response = StartPreviewResponse {
             preview_session_id: session.id.clone(),
             degraded_from_two_pass,
+            degraded_from_dolby_vision,
+            degraded_from_sdr_tonemap: session.degraded_from_sdr_tonemap,
         };
 
         self.sessions
@@ -223,6 +271,8 @@ impl PreviewManager {
         let response = UpdatePreviewResponse {
             ok: true,
             degraded_from_two_pass: render_request.session.degraded_from_two_pass,
+            degraded_from_dolby_vision: render_request.session.degraded_from_dolby_vision,
+            degraded_from_sdr_tonemap: render_request.session.degraded_from_sdr_tonemap,
         };
 
         match render_request.decision {
@@ -263,6 +313,8 @@ impl PreviewManager {
                 preview_speed: None,
                 estimated_transcode_speed: None,
                 degraded_from_two_pass: false,
+                degraded_from_dolby_vision: false,
+                degraded_from_sdr_tonemap: false,
                 error: None,
             },
         );
@@ -276,7 +328,7 @@ impl PreviewManager {
         session: PreviewSession,
         transition: PreviewState,
     ) -> CommandResult<()> {
-        let process = self.spawn_preview_process(&session)?;
+        let (session, process) = self.spawn_preview_process_with_sdr_fallback(session)?;
         let manager = self.clone();
         std::thread::spawn(move || {
             let _ = app.emit(
@@ -287,12 +339,15 @@ impl PreviewManager {
                     preview_speed: None,
                     estimated_transcode_speed: None,
                     degraded_from_two_pass: session.degraded_from_two_pass,
+                    degraded_from_dolby_vision: session.degraded_from_dolby_vision,
+                    degraded_from_sdr_tonemap: session.degraded_from_sdr_tonemap,
                     error: None,
                 },
             );
 
             let started = Instant::now();
-            let render_result = manager.wait_preview_process(&session, process);
+            let (session, render_result) =
+                manager.wait_preview_process_with_sdr_fallback(session, process);
 
             let latest_seq = manager
                 .sessions
@@ -317,6 +372,8 @@ impl PreviewManager {
                             preview_speed: Some(speed),
                             estimated_transcode_speed: Some(speed),
                             degraded_from_two_pass: session.degraded_from_two_pass,
+                            degraded_from_dolby_vision: session.degraded_from_dolby_vision,
+                            degraded_from_sdr_tonemap: session.degraded_from_sdr_tonemap,
                             error: None,
                         },
                     );
@@ -330,6 +387,8 @@ impl PreviewManager {
                             preview_speed: None,
                             estimated_transcode_speed: None,
                             degraded_from_two_pass: session.degraded_from_two_pass,
+                            degraded_from_dolby_vision: session.degraded_from_dolby_vision,
+                            degraded_from_sdr_tonemap: session.degraded_from_sdr_tonemap,
                             error: Some(PreviewErrorEvent {
                                 code: error.code.clone(),
                                 message: error.message.clone(),
@@ -341,6 +400,44 @@ impl PreviewManager {
         });
 
         Ok(())
+    }
+
+    /** 启动预览编码进程；如果 SDR 映射在源帧阶段失败，则立即降级后重试一次。 */
+    fn spawn_preview_process_with_sdr_fallback(
+        &self,
+        session: PreviewSession,
+    ) -> Result<(PreviewSession, RunningPreviewProcess), CommandError> {
+        match self.spawn_preview_process(&session) {
+            Ok(process) => Ok((session, process)),
+            Err(error) if should_retry_without_sdr_tonemap(&session, &error) => {
+                let fallback_session = self.apply_sdr_tonemap_runtime_fallback(&session);
+                self.spawn_preview_process(&fallback_session)
+                    .map(|process| (fallback_session, process))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /** 等待预览编码完成；如果 SDR 映射在编码阶段失败，则降级后重试一次。 */
+    fn wait_preview_process_with_sdr_fallback(
+        &self,
+        session: PreviewSession,
+        process: RunningPreviewProcess,
+    ) -> (PreviewSession, Result<PreviewFrameEvent, CommandError>) {
+        match self.wait_preview_process(&session, process) {
+            Ok(frame) => (session, Ok(frame)),
+            Err(error) if should_retry_without_sdr_tonemap(&session, &error) => {
+                let fallback_session = self.apply_sdr_tonemap_runtime_fallback(&session);
+                match self.spawn_preview_process(&fallback_session) {
+                    Ok(fallback_process) => {
+                        let result = self.wait_preview_process(&fallback_session, fallback_process);
+                        (fallback_session, result)
+                    }
+                    Err(fallback_error) => (fallback_session, Err(fallback_error)),
+                }
+            }
+            Err(error) => (session, Err(error)),
+        }
     }
 
     fn schedule_deferred_render<R: Runtime>(
@@ -373,7 +470,11 @@ impl PreviewManager {
             };
 
             manager.cancel_process(&latest_session.id);
-            let _ = manager.schedule_render(app, latest_session, PreviewState::Updating);
+            if let Err(error) =
+                manager.schedule_render(app.clone(), latest_session.clone(), PreviewState::Updating)
+            {
+                let _ = emit_preview_error(&app, latest_session, error);
+            }
         });
     }
 
@@ -426,6 +527,8 @@ impl PreviewManager {
             PreviewCommandOptions {
                 time_sec: time_ms as f64 / 1000.0,
                 render_scale: session.config.render_scale,
+                sdr_tonemap_mode: session.sdr_tonemap_mode,
+                source_color: Some(source_color_from_preview_config(&session.config)),
             },
         )
         .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
@@ -441,6 +544,8 @@ impl PreviewManager {
             PreviewCommandOptions {
                 time_sec: time_ms as f64 / 1000.0,
                 render_scale: session.config.render_scale,
+                sdr_tonemap_mode: session.sdr_tonemap_mode,
+                source_color: Some(source_color_from_preview_config(&session.config)),
             },
         )
         .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
@@ -448,7 +553,7 @@ impl PreviewManager {
         // 先编码单帧再解码为 PNG，避免 WebView 播放目标编码格式，同时保留编码质量差异。
         args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
 
-        let child = Command::new("ffmpeg")
+        let child = ffmpeg_command()
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -616,10 +721,29 @@ impl PreviewManager {
             let _ = fs::remove_dir_all(session_dir);
         }
     }
+
+    /** 将当前 session 标记为 SDR 映射运行时降级，并同步写回内存态供后续事件复用。 */
+    fn apply_sdr_tonemap_runtime_fallback(&self, session: &PreviewSession) -> PreviewSession {
+        let mut fallback_session = session.clone();
+        fallback_session.sdr_tonemap_mode = PreviewSdrTonemapMode::Disabled;
+        fallback_session.degraded_from_sdr_tonemap = true;
+
+        if let Ok(mut sessions) = self.sessions.lock() {
+            if let Some(current) = sessions.get_mut(&session.id) {
+                if current.seq == session.seq {
+                    // 同一 seq 的渲染失败才写回；旧渲染失败不能覆盖用户后续更新。
+                    current.sdr_tonemap_mode = PreviewSdrTonemapMode::Disabled;
+                    current.degraded_from_sdr_tonemap = true;
+                }
+            }
+        }
+
+        fallback_session
+    }
 }
 
 fn run_blocking_ffmpeg_args(args: Vec<String>, output_path: &Path) -> Result<(), CommandError> {
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -656,8 +780,204 @@ fn validate_preview_input(payload: &PreviewConfig) -> CommandResult<()> {
 
 fn sanitize_preview_config(mut payload: PreviewConfig) -> CommandResult<PreviewConfig> {
     payload.task_config_snapshot.video.enable_two_pass = false;
+    payload
+        .task_config_snapshot
+        .video
+        .preserve_dolby_vision_metadata = Some(false);
     payload.task_config_snapshot.validate()?;
     Ok(payload)
+}
+
+fn should_degrade_dolby_vision_preview(payload: &PreviewConfig) -> bool {
+    payload
+        .task_config_snapshot
+        .video
+        .preserve_dolby_vision_metadata
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+fn should_tone_map_preview_to_sdr(payload: &PreviewConfig) -> bool {
+    if let Some(hdr_type) = normalized_preview_hdr_type(payload) {
+        return matches!(hdr_type.as_str(), "hdr10" | "hlg" | "dolbyvision");
+    }
+
+    false
+}
+
+fn normalized_preview_hdr_type(payload: &PreviewConfig) -> Option<String> {
+    payload
+        .source_hdr_type
+        .as_deref()
+        .map(normalize_preview_token)
+}
+
+fn normalize_preview_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+fn preview_source_supports_sdr_tonemap(payload: &PreviewConfig) -> bool {
+    // zscale + tonemap 只作为 HDR10/HLG 的普通 HDR fallback；DV 必须交给 libplacebo 读取 RPU。
+    matches!(
+        normalized_preview_hdr_type(payload).as_deref(),
+        Some("hdr10" | "hlg")
+    )
+}
+
+fn source_color_from_preview_config(payload: &PreviewConfig) -> PreviewSourceColor {
+    PreviewSourceColor {
+        hdr_type: payload.source_hdr_type.clone(),
+        primaries: payload.source_color_primaries.clone(),
+        transfer: payload.source_color_transfer.clone(),
+        matrix: payload.source_color_space.clone(),
+        range: payload.source_color_range.clone(),
+    }
+}
+
+fn emit_preview_error<R: Runtime>(
+    app: &AppHandle<R>,
+    session: PreviewSession,
+    error: CommandError,
+) -> tauri::Result<()> {
+    app.emit(
+        "preview:state",
+        PreviewStateEvent {
+            preview_session_id: session.id,
+            state: PreviewState::Error,
+            preview_speed: None,
+            estimated_transcode_speed: None,
+            degraded_from_two_pass: session.degraded_from_two_pass,
+            degraded_from_dolby_vision: session.degraded_from_dolby_vision,
+            degraded_from_sdr_tonemap: session.degraded_from_sdr_tonemap,
+            error: Some(PreviewErrorEvent {
+                code: error.code,
+                message: error.message,
+            }),
+        },
+    )
+}
+
+fn ffmpeg_filter_name_from_line(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.split_whitespace().next()?;
+    // ffmpeg -filters 的有效行以能力标记开头，例如 `.. zscale V->V ...`。
+    if marker.len() == 2 || marker.len() == 3 {
+        return trimmed.split_whitespace().nth(1);
+    }
+
+    None
+}
+
+fn resolve_preview_sdr_tonemap(payload: &PreviewConfig) -> PreviewSdrToneMapDecision {
+    resolve_preview_sdr_tonemap_with_support(payload, ffmpeg_preview_sdr_tonemap_support())
+}
+
+fn resolve_preview_sdr_tonemap_with_support(
+    payload: &PreviewConfig,
+    support: PreviewSdrTonemapSupport,
+) -> PreviewSdrToneMapDecision {
+    let Some(hdr_type) = normalized_preview_hdr_type(payload) else {
+        return PreviewSdrToneMapDecision {
+            sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
+            degraded_from_sdr_tonemap: false,
+        };
+    };
+
+    match hdr_type.as_str() {
+        "dolbyvision" => resolve_dolby_vision_preview_sdr_tonemap(support),
+        "hdr10" | "hlg" => resolve_hdr_preview_sdr_tonemap(support),
+        _ => PreviewSdrToneMapDecision {
+            sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
+            degraded_from_sdr_tonemap: false,
+        },
+    }
+}
+
+fn resolve_dolby_vision_preview_sdr_tonemap(
+    support: PreviewSdrTonemapSupport,
+) -> PreviewSdrToneMapDecision {
+    let sdr_tonemap_mode = if support.libplacebo {
+        PreviewSdrTonemapMode::Libplacebo
+    } else {
+        PreviewSdrTonemapMode::Disabled
+    };
+
+    PreviewSdrToneMapDecision {
+        sdr_tonemap_mode,
+        degraded_from_sdr_tonemap: !sdr_tonemap_mode.is_enabled(),
+    }
+}
+
+fn resolve_hdr_preview_sdr_tonemap(support: PreviewSdrTonemapSupport) -> PreviewSdrToneMapDecision {
+    let sdr_tonemap_mode = if support.libplacebo {
+        PreviewSdrTonemapMode::Libplacebo
+    } else if support.zscale {
+        PreviewSdrTonemapMode::Zscale
+    } else {
+        PreviewSdrTonemapMode::Disabled
+    };
+
+    PreviewSdrToneMapDecision {
+        sdr_tonemap_mode,
+        degraded_from_sdr_tonemap: !sdr_tonemap_mode.is_enabled(),
+    }
+}
+
+fn ffmpeg_preview_sdr_tonemap_support() -> PreviewSdrTonemapSupport {
+    *PREVIEW_SDR_TONEMAP_SUPPORT.get_or_init(|| {
+        query_ffmpeg_filters()
+            .map(|filters| ffmpeg_filters_support_preview_sdr_tonemap(&filters))
+            .unwrap_or_default()
+    })
+}
+
+fn query_ffmpeg_filters() -> Option<String> {
+    let output = ffmpeg_command()
+        .arg("-hide_banner")
+        .arg("-filters")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn ffmpeg_filters_support_preview_sdr_tonemap(filters: &str) -> PreviewSdrTonemapSupport {
+    PreviewSdrTonemapSupport {
+        zscale: ffmpeg_filter_list_has_filter(filters, "zscale")
+            && ffmpeg_filter_list_has_filter(filters, "tonemap"),
+        libplacebo: ffmpeg_filter_list_has_filter(filters, "libplacebo"),
+    }
+}
+
+fn ffmpeg_filter_list_has_filter(filters: &str, name: &str) -> bool {
+    filters
+        .lines()
+        .filter_map(ffmpeg_filter_name_from_line)
+        .any(|filter_name| filter_name == name)
+}
+
+fn should_retry_without_sdr_tonemap(session: &PreviewSession, error: &CommandError) -> bool {
+    session.sdr_tonemap_mode.is_enabled()
+        && error.code == "preview_render_failed"
+        && preview_error_is_sdr_tonemap_runtime_failure(&error.message)
+}
+
+fn preview_error_is_sdr_tonemap_runtime_failure(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("parsed_zscale")
+        || normalized.contains("parsed_tonemap")
+        || normalized.contains("parsed_libplacebo")
+        || normalized.contains("no path between colorspaces")
+        || normalized.contains("error while filtering")
 }
 
 fn merge_patch(session: &mut PreviewSession, patch: PreviewUpdatePatch) -> CommandResult<()> {
@@ -677,12 +997,21 @@ fn merge_patch(session: &mut PreviewSession, patch: PreviewUpdatePatch) -> Comma
         session.config.time_ms = Some(time_ms);
     }
     if let Some(snapshot) = patch.task_config_snapshot {
-        session.degraded_from_two_pass = snapshot.video.enable_two_pass;
-        session.config.task_config_snapshot = sanitize_preview_config(PreviewConfig {
+        let next_config = PreviewConfig {
             task_config_snapshot: snapshot,
             ..session.config.clone()
-        })?
-        .task_config_snapshot;
+        };
+        let sdr_tonemap = resolve_preview_sdr_tonemap(&next_config);
+
+        session.degraded_from_two_pass = next_config.task_config_snapshot.video.enable_two_pass;
+        session.degraded_from_dolby_vision = next_config
+            .task_config_snapshot
+            .video
+            .preserve_dolby_vision_metadata
+            .unwrap_or(false);
+        session.degraded_from_sdr_tonemap = sdr_tonemap.degraded_from_sdr_tonemap;
+        session.sdr_tonemap_mode = sdr_tonemap.sdr_tonemap_mode;
+        session.config = sanitize_preview_config(next_config)?;
     }
     Ok(())
 }
@@ -785,18 +1114,29 @@ mod tests {
         AudioConfig, AudioMode, ContainerConfig, ContainerFormat, OutputConfig, VideoBitrateMode,
         VideoCodecFormat, VideoConfig, VideoEncoder,
     };
+    use crate::transcode::command_builder::PreviewSdrTonemapMode;
 
     use std::time::{Duration, Instant};
 
     use super::{
-        build_preview_filter, build_render_request, is_current_deferred_render,
-        sanitize_preview_config, CompareOrientation, PreviewConfig, RenderDecision,
+        build_preview_filter, build_render_request, ffmpeg_filters_support_preview_sdr_tonemap,
+        is_current_deferred_render, preview_error_is_sdr_tonemap_runtime_failure,
+        preview_source_supports_sdr_tonemap, resolve_preview_sdr_tonemap_with_support,
+        sanitize_preview_config, should_degrade_dolby_vision_preview,
+        should_retry_without_sdr_tonemap, should_tone_map_preview_to_sdr, CompareOrientation,
+        PreviewConfig, PreviewSdrTonemapSupport, RenderDecision,
     };
+    use crate::commands::error::CommandError;
 
     fn payload() -> PreviewConfig {
         PreviewConfig {
             input_file: "/tmp/demo.mp4".to_string(),
             input_location: None,
+            source_hdr_type: None,
+            source_color_primaries: None,
+            source_color_transfer: None,
+            source_color_space: None,
+            source_color_range: None,
             clip_range: None,
             render_scale: 0.5,
             compare_orientation: CompareOrientation::Vertical,
@@ -849,6 +1189,189 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_preview_should_disable_dolby_vision_metadata() {
+        let mut value = payload();
+        value
+            .task_config_snapshot
+            .video
+            .preserve_dolby_vision_metadata = Some(true);
+
+        let result = sanitize_preview_config(value).expect("preview config");
+
+        assert_eq!(
+            result
+                .task_config_snapshot
+                .video
+                .preserve_dolby_vision_metadata,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn preview_dolby_vision_degradation_should_follow_original_request() {
+        let mut value = payload();
+        value
+            .task_config_snapshot
+            .video
+            .preserve_dolby_vision_metadata = Some(true);
+
+        assert!(should_degrade_dolby_vision_preview(&value));
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_should_enable_for_hdr_sources() {
+        let mut value = payload();
+
+        value.source_hdr_type = Some("DolbyVision".to_string());
+        assert!(should_tone_map_preview_to_sdr(&value));
+
+        value.source_hdr_type = Some("Hdr10".to_string());
+        assert!(should_tone_map_preview_to_sdr(&value));
+
+        value.source_hdr_type = Some("Sdr".to_string());
+        assert!(!should_tone_map_preview_to_sdr(&value));
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_should_not_follow_dolby_vision_flag_for_sdr_source() {
+        let mut value = payload();
+        value.source_hdr_type = Some("Sdr".to_string());
+        value
+            .task_config_snapshot
+            .video
+            .preserve_dolby_vision_metadata = Some(true);
+
+        assert!(!should_tone_map_preview_to_sdr(&value));
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_should_not_fallback_to_dolby_vision_flag_without_hdr_type() {
+        let mut value = payload();
+        value
+            .task_config_snapshot
+            .video
+            .preserve_dolby_vision_metadata = Some(true);
+
+        assert!(!should_tone_map_preview_to_sdr(&value));
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_should_degrade_dolby_vision_without_libplacebo() {
+        let mut value = payload();
+        value.source_hdr_type = Some("DolbyVision".to_string());
+        value.source_color_primaries = Some("bt2020".to_string());
+        value.source_color_transfer = Some("smpte2084".to_string());
+        value.source_color_space = Some("bt2020nc".to_string());
+
+        let decision = resolve_preview_sdr_tonemap_with_support(
+            &value,
+            PreviewSdrTonemapSupport {
+                zscale: true,
+                libplacebo: false,
+            },
+        );
+
+        assert!(!preview_source_supports_sdr_tonemap(&value));
+        assert_eq!(decision.sdr_tonemap_mode, PreviewSdrTonemapMode::Disabled);
+        assert!(decision.degraded_from_sdr_tonemap);
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_should_use_libplacebo_for_dolby_vision() {
+        let mut value = payload();
+        value.source_hdr_type = Some("DolbyVision".to_string());
+
+        let decision = resolve_preview_sdr_tonemap_with_support(
+            &value,
+            PreviewSdrTonemapSupport {
+                zscale: true,
+                libplacebo: true,
+            },
+        );
+
+        assert_eq!(decision.sdr_tonemap_mode, PreviewSdrTonemapMode::Libplacebo);
+        assert!(!decision.degraded_from_sdr_tonemap);
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_should_use_zscale_for_hdr_when_libplacebo_missing() {
+        let mut value = payload();
+        value.source_hdr_type = Some("Hdr10".to_string());
+
+        let decision = resolve_preview_sdr_tonemap_with_support(
+            &value,
+            PreviewSdrTonemapSupport {
+                zscale: true,
+                libplacebo: false,
+            },
+        );
+
+        assert!(preview_source_supports_sdr_tonemap(&value));
+        assert_eq!(decision.sdr_tonemap_mode, PreviewSdrTonemapMode::Zscale);
+        assert!(!decision.degraded_from_sdr_tonemap);
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_filter_detection_should_require_zscale_and_tonemap() {
+        let supported = "\
+ .. zscale           V->V       Apply resizing, colorspace and bit depth conversion.
+ .S tonemap          V->V       Conversion to/from different dynamic ranges.
+";
+        let support = ffmpeg_filters_support_preview_sdr_tonemap(supported);
+        assert!(support.zscale);
+        assert!(!support.libplacebo);
+
+        let missing_zscale = "\
+ .S tonemap          V->V       Conversion to/from different dynamic ranges.
+ .. scale            V->V       Scale the input video size.
+        ";
+        assert!(!ffmpeg_filters_support_preview_sdr_tonemap(missing_zscale).zscale);
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_filter_detection_should_detect_libplacebo() {
+        let supported = "\
+ .. libplacebo       V->V       Apply GPU-accelerated image processing.
+";
+
+        let support = ffmpeg_filters_support_preview_sdr_tonemap(supported);
+
+        assert!(support.libplacebo);
+        assert!(!support.zscale);
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_runtime_error_should_trigger_fallback() {
+        let error = "[Parsed_zscale_0 @ 0x123] code 3074: no path between colorspaces";
+
+        assert!(preview_error_is_sdr_tonemap_runtime_failure(error));
+    }
+
+    #[test]
+    fn preview_sdr_tonemap_fallback_should_only_apply_to_active_tonemap_session() {
+        let mut session = super::PreviewSession {
+            id: "preview-a".to_string(),
+            config: payload(),
+            degraded_from_two_pass: false,
+            degraded_from_dolby_vision: false,
+            degraded_from_sdr_tonemap: false,
+            sdr_tonemap_mode: PreviewSdrTonemapMode::Zscale,
+            seq: 1,
+            last_render_started_at: None,
+            deferred_seq: None,
+        };
+        let error = CommandError::new(
+            "preview_render_failed",
+            "[Parsed_zscale_0] no path between colorspaces",
+        );
+
+        assert!(should_retry_without_sdr_tonemap(&session, &error));
+
+        session.sdr_tonemap_mode = PreviewSdrTonemapMode::Disabled;
+        assert!(!should_retry_without_sdr_tonemap(&session, &error));
+    }
+
+    #[test]
     fn build_preview_filter_should_include_scale_and_format() {
         let filter = build_preview_filter(&payload()).expect("filter");
         assert!(filter.contains("scale=1920:1080"));
@@ -862,6 +1385,9 @@ mod tests {
             id: "preview-a".to_string(),
             config: payload(),
             degraded_from_two_pass: false,
+            degraded_from_dolby_vision: false,
+            degraded_from_sdr_tonemap: false,
+            sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
             seq: 1,
             last_render_started_at: Some(Instant::now()),
             deferred_seq: None,
@@ -881,6 +1407,9 @@ mod tests {
             id: "preview-b".to_string(),
             config: payload(),
             degraded_from_two_pass: false,
+            degraded_from_dolby_vision: false,
+            degraded_from_sdr_tonemap: false,
+            sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
             seq: 1,
             last_render_started_at: Some(Instant::now() - Duration::from_millis(600)),
             deferred_seq: Some(1),
@@ -898,6 +1427,9 @@ mod tests {
             id: "preview-c".to_string(),
             config: payload(),
             degraded_from_two_pass: false,
+            degraded_from_dolby_vision: false,
+            degraded_from_sdr_tonemap: false,
+            sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
             seq: 1,
             last_render_started_at: Some(Instant::now()),
             deferred_seq: None,

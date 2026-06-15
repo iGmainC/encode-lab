@@ -13,7 +13,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             concurrency_n: 2,
-            ffmpeg_strategy: "system".to_string(),
+            ffmpeg_strategy: "bundled".to_string(),
             default_output_dir: String::new(),
             thumbnail_mode: "imagePath".to_string(),
         }

@@ -21,10 +21,10 @@ impl Validate for AppSettings {
             ));
         }
 
-        // V1 仅支持系统 ffmpeg 路径策略。
-        if self.ffmpeg_strategy != "system" {
+        // 默认执行链路优先使用随包 runtime；这里保留 system 字段值以兼容旧配置。
+        if !matches!(self.ffmpeg_strategy.as_str(), "bundled" | "system") {
             return Err(StorageError::InvalidPayload(
-                "ffmpegStrategy must be 'system' in v1".to_string(),
+                "ffmpegStrategy must be 'bundled' or 'system'".to_string(),
             ));
         }
 

@@ -6,6 +6,9 @@ import { Button } from "../ui/button";
 import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
 import { useI18n } from "../../i18n/I18nProvider";
+import { isTauriRuntime } from "../../lib/tauriRuntime";
+import previewOutputFrame from "../../assets/preview-output-frame.png";
+import previewSourceFrame from "../../assets/preview-source-frame.png";
 import type {
   CompareImageOrder,
   ComparePreviewFrameSnapshot,
@@ -17,11 +20,17 @@ import type {
   StartPreviewResponse,
   TaskDraftSnapshot,
   UpdatePreviewResponse,
+  VideoStreamMetadata,
 } from "../../types/workbench";
 
 type Props = {
   sourceFile: string;
   sourceDurationSec?: number;
+  sourceHdrType?: VideoStreamMetadata["hdrType"];
+  sourceColorPrimaries?: VideoStreamMetadata["colorPrimaries"];
+  sourceColorTransfer?: VideoStreamMetadata["colorTransfer"];
+  sourceColorSpace?: VideoStreamMetadata["colorSpace"];
+  sourceColorRange?: VideoStreamMetadata["colorRange"];
   taskDraftSnapshot: TaskDraftSnapshot;
   splitMode: "vertical" | "horizontal";
   splitterPosition: number;
@@ -36,6 +45,20 @@ type Props = {
   deferSessionUntilInteraction?: boolean;
   onFullscreenButtonClick?: (value: ComparePreviewRuntime) => void;
   fullscreenButtonIcon?: "fullscreen" | "close";
+};
+
+/** 预览 SDR 映射需要传给后端的源色彩上下文。 */
+type PreviewSourceColorContext = Pick<
+  PreviewConfig,
+  "sourceHdrType" | "sourceColorPrimaries" | "sourceColorTransfer" | "sourceColorSpace" | "sourceColorRange"
+>;
+
+/** Tauri 命令错误负载。 */
+type PreviewInvokeError = {
+  /** 后端错误码 */
+  code?: string;
+  /** 后端错误说明 */
+  message?: string;
 };
 
 /** 控制区在全屏模式下自动隐藏的延迟，单位毫秒。 */
@@ -135,6 +158,7 @@ function clampTimeSec(value: number, durationSec: number) {
  * @param timeMs 当前时间点，单位毫秒
  * @param taskDraftSnapshotKey 参数快照序列化结果
  * @param renderScale 预览渲染缩放
+ * @param sourceColorContext 源视频 HDR 和色彩元数据
  * @returns 当前预览请求的唯一 key
  */
 function buildPreviewRenderKey(
@@ -142,8 +166,19 @@ function buildPreviewRenderKey(
   timeMs: number,
   taskDraftSnapshotKey: string,
   renderScale: PreviewConfig["renderScale"],
+  sourceColorContext: PreviewSourceColorContext,
 ) {
-  return JSON.stringify([inputFile, timeMs, taskDraftSnapshotKey, renderScale]);
+  return JSON.stringify([
+    inputFile,
+    timeMs,
+    taskDraftSnapshotKey,
+    renderScale,
+    sourceColorContext.sourceHdrType ?? null,
+    sourceColorContext.sourceColorPrimaries ?? null,
+    sourceColorContext.sourceColorTransfer ?? null,
+    sourceColorContext.sourceColorSpace ?? null,
+    sourceColorContext.sourceColorRange ?? null,
+  ]);
 }
 
 /**
@@ -157,6 +192,26 @@ function getReusableInitialFrame(
   desiredRenderKey: string,
 ) {
   return frame?.renderKey === desiredRenderKey ? frame : undefined;
+}
+
+/**
+ * 格式化预览 invoke 错误，避免 Tauri 序列化错误对象显示为 [object Object]。
+ * @param error invoke 捕获到的未知错误
+ * @returns 可直接展示给用户的错误文案
+ */
+function formatPreviewInvokeError(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "object" && error !== null) {
+    const payload = error as PreviewInvokeError;
+    if (typeof payload.message === "string") {
+      return payload.code ? `${payload.code}: ${payload.message}` : payload.message;
+    }
+  }
+
+  return String(error);
 }
 
 /**
@@ -295,6 +350,7 @@ function usePreviewTimeline({
  */
 function usePreviewFrameSession({
   sourceFile,
+  sourceColorContext,
   taskDraftSnapshot,
   taskDraftSnapshotKey,
   splitMode,
@@ -307,6 +363,7 @@ function usePreviewFrameSession({
   imageLoadFailedText,
 }: {
   sourceFile: string;
+  sourceColorContext: PreviewSourceColorContext;
   taskDraftSnapshot: TaskDraftSnapshot;
   taskDraftSnapshotKey: string;
   splitMode: "vertical" | "horizontal";
@@ -331,18 +388,30 @@ function usePreviewFrameSession({
   const [estimatedTranscodeSpeed, setEstimatedTranscodeSpeed] = useState<number | undefined>(undefined);
   const [previewError, setPreviewError] = useState<string | undefined>(undefined);
   const [degradedFromTwoPass, setDegradedFromTwoPass] = useState(false);
+  const [degradedFromDolbyVision, setDegradedFromDolbyVision] = useState(false);
+  const [degradedFromSdrTonemap, setDegradedFromSdrTonemap] = useState(false);
   const [currentFrame, setCurrentFrame] = useState<ComparePreviewFrameSnapshot | undefined>(() =>
     getReusableInitialFrame(initialFrame, desiredRenderKey),
   );
 
   const visibleFrame = currentFrame?.renderKey === desiredRenderKey ? currentFrame : undefined;
   const sourceImageSrc = useMemo(
-    () => (visibleFrame ? convertFileSrc(visibleFrame.sourceImagePath) : null),
-    [visibleFrame],
+    () =>
+      !isTauriRuntime() && sourceFile
+        ? previewSourceFrame
+        : visibleFrame
+          ? convertFileSrc(visibleFrame.sourceImagePath)
+          : null,
+    [sourceFile, visibleFrame],
   );
   const previewImageSrc = useMemo(
-    () => (visibleFrame ? convertFileSrc(visibleFrame.previewImagePath) : null),
-    [visibleFrame],
+    () =>
+      !isTauriRuntime() && sourceFile
+        ? previewOutputFrame
+        : visibleFrame
+          ? convertFileSrc(visibleFrame.previewImagePath)
+          : null,
+    [sourceFile, visibleFrame],
   );
 
   useEffect(() => {
@@ -382,9 +451,13 @@ function usePreviewFrameSession({
       if (!listenersReady || !sourceFile) {
         return null;
       }
+      if (!isTauriRuntime()) {
+        return null;
+      }
 
       const payload: PreviewConfig = {
         inputFile: sourceFile,
+        ...sourceColorContext,
         renderScale: PREVIEW_RENDER_SCALE,
         compareOrientation: splitMode,
         splitterPosition,
@@ -399,15 +472,17 @@ function usePreviewFrameSession({
         setPreviewState("warming");
         setPreviewError(undefined);
         setDegradedFromTwoPass(Boolean(result.degradedFromTwoPass));
+        setDegradedFromDolbyVision(Boolean(result.degradedFromDolbyVision));
+        setDegradedFromSdrTonemap(Boolean(result.degradedFromSdrTonemap));
         lastFrameSeqRef.current = 0;
         return result.previewSessionId;
       } catch (err) {
         setPreviewState("error");
-        setPreviewError(err instanceof Error ? err.message : String(err));
+        setPreviewError(formatPreviewInvokeError(err));
         return null;
       }
     },
-    [listenersReady, sourceFile, splitMode, splitterPosition, taskDraftSnapshot],
+    [listenersReady, sourceFile, sourceColorContext, splitMode, splitterPosition, taskDraftSnapshot],
   );
 
   /**
@@ -418,6 +493,19 @@ function usePreviewFrameSession({
   const requestFrame = useCallback(
     async (timeMs: number, renderKey: string) => {
       if (!sourceFile) {
+        return;
+      }
+
+      if (!isTauriRuntime()) {
+        lastSubmittedRenderKeyRef.current = renderKey;
+        fallbackRenderKeyRef.current = null;
+        setPreviewState("running");
+        setPreviewSpeed(1.6);
+        setEstimatedTranscodeSpeed(0.72);
+        setDegradedFromTwoPass(true);
+        setDegradedFromDolbyVision(Boolean(taskDraftSnapshot.video.preserveDolbyVisionMetadata));
+        setDegradedFromSdrTonemap(false);
+        setPreviewError(undefined);
         return;
       }
 
@@ -436,10 +524,16 @@ function usePreviewFrameSession({
           taskConfigSnapshot: taskDraftSnapshot,
           timeMs,
         },
-      }).catch((err) => {
-        setPreviewState("error");
-        setPreviewError(err instanceof Error ? err.message : String(err));
-      });
+      })
+        .then((result) => {
+          setDegradedFromTwoPass(Boolean(result.degradedFromTwoPass));
+          setDegradedFromDolbyVision(Boolean(result.degradedFromDolbyVision));
+          setDegradedFromSdrTonemap(Boolean(result.degradedFromSdrTonemap));
+        })
+        .catch((err) => {
+          setPreviewState("error");
+          setPreviewError(formatPreviewInvokeError(err));
+        });
     },
     [ensureSession, sourceFile, taskDraftSnapshot],
   );
@@ -461,6 +555,11 @@ function usePreviewFrameSession({
   }, [clearFrameSnapshot, desiredRenderKey, desiredTimeMs, imageLoadFailedText, requestFrame]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      setListenersReady(true);
+      return;
+    }
+
     let unlistenFrame: (() => void) | undefined;
     let unlistenState: (() => void) | undefined;
 
@@ -503,7 +602,11 @@ function usePreviewFrameSession({
         setPreviewSpeed(payload.previewSpeed);
         setEstimatedTranscodeSpeed(payload.estimatedTranscodeSpeed);
         setDegradedFromTwoPass(Boolean(payload.degradedFromTwoPass));
-        setPreviewError(payload.error ? `${payload.error.code}: ${payload.error.message}` : undefined);
+        setDegradedFromDolbyVision(Boolean(payload.degradedFromDolbyVision));
+        setDegradedFromSdrTonemap(Boolean(payload.degradedFromSdrTonemap));
+        setPreviewError(
+          payload.error ? formatPreviewInvokeError(payload.error) : undefined,
+        );
       });
 
       setListenersReady(true);
@@ -541,9 +644,23 @@ function usePreviewFrameSession({
       clearFrameSnapshot();
       setPreviewState("idle");
       setPreviewError(undefined);
+      setDegradedFromTwoPass(false);
+      setDegradedFromDolbyVision(false);
+      setDegradedFromSdrTonemap(false);
       return;
     }
     if (!listenersReady) {
+      return;
+    }
+
+    if (!isTauriRuntime()) {
+      setPreviewState("running");
+      setPreviewSpeed(1.6);
+      setEstimatedTranscodeSpeed(0.72);
+      setDegradedFromTwoPass(true);
+      setDegradedFromDolbyVision(Boolean(taskDraftSnapshot.video.preserveDolbyVisionMetadata));
+      setDegradedFromSdrTonemap(false);
+      setPreviewError(undefined);
       return;
     }
 
@@ -560,7 +677,7 @@ function usePreviewFrameSession({
     return () => {
       stopSession();
     };
-  }, [listenersReady, sourceFile]);
+  }, [listenersReady, sourceFile, sourceColorContext]);
 
   useEffect(() => {
     if (!sourceFile || !sessionId || isScrubbingTimeline) {
@@ -581,11 +698,16 @@ function usePreviewFrameSession({
     currentFrame: visibleFrame,
     sourceImageSrc,
     previewImageSrc,
-    previewState,
-    previewSpeed,
-    estimatedTranscodeSpeed,
-    previewError,
-    degradedFromTwoPass,
+    previewState: !isTauriRuntime() && sourceFile ? "running" : previewState,
+    previewSpeed: !isTauriRuntime() && sourceFile ? 1.6 : previewSpeed,
+    estimatedTranscodeSpeed: !isTauriRuntime() && sourceFile ? 0.72 : estimatedTranscodeSpeed,
+    previewError: !isTauriRuntime() && sourceFile ? undefined : previewError,
+    degradedFromTwoPass: !isTauriRuntime() && sourceFile ? true : degradedFromTwoPass,
+    degradedFromDolbyVision:
+      !isTauriRuntime() && sourceFile
+        ? Boolean(taskDraftSnapshot.video.preserveDolbyVisionMetadata)
+        : degradedFromDolbyVision,
+    degradedFromSdrTonemap: !isTauriRuntime() && sourceFile ? false : degradedFromSdrTonemap,
     requestFrame,
     retryCurrentFrame,
   };
@@ -722,6 +844,11 @@ function useCompareSplitterDrag({
 export function ComparePreviewPlayer({
   sourceFile,
   sourceDurationSec,
+  sourceHdrType,
+  sourceColorPrimaries,
+  sourceColorTransfer,
+  sourceColorSpace,
+  sourceColorRange,
   taskDraftSnapshot,
   splitMode,
   splitterPosition,
@@ -752,6 +879,16 @@ export function ComparePreviewPlayer({
     () => JSON.stringify(taskDraftSnapshot),
     [taskDraftSnapshot],
   );
+  const sourceColorContext = useMemo<PreviewSourceColorContext>(
+    () => ({
+      sourceHdrType,
+      sourceColorPrimaries,
+      sourceColorTransfer,
+      sourceColorSpace,
+      sourceColorRange,
+    }),
+    [sourceColorPrimaries, sourceColorRange, sourceColorSpace, sourceColorTransfer, sourceHdrType],
+  );
 
   const timeline = usePreviewTimeline({
     durationSec,
@@ -763,6 +900,7 @@ export function ComparePreviewPlayer({
         timeMs,
         taskDraftSnapshotKey,
         PREVIEW_RENDER_SCALE,
+        sourceColorContext,
       );
       requestFrameRef.current?.(timeMs, renderKey);
     },
@@ -775,12 +913,14 @@ export function ComparePreviewPlayer({
         timeline.currentTimeMs,
         taskDraftSnapshotKey,
         PREVIEW_RENDER_SCALE,
+        sourceColorContext,
       ),
-    [sourceFile, taskDraftSnapshotKey, timeline.currentTimeMs],
+    [sourceColorContext, sourceFile, taskDraftSnapshotKey, timeline.currentTimeMs],
   );
 
   const previewSession = usePreviewFrameSession({
     sourceFile,
+    sourceColorContext,
     taskDraftSnapshot,
     taskDraftSnapshotKey,
     splitMode,
@@ -820,6 +960,25 @@ export function ComparePreviewPlayer({
   const firstPaneClass = "left-4 top-20";
   const secondPaneClass =
     splitMode === "vertical" ? "right-4 top-20" : "left-4 bottom-28";
+  const previewModeLabel = previewSession.degradedFromDolbyVision
+    ? previewSession.degradedFromSdrTonemap
+      ? t("preview.sdrTonemapUnavailable")
+      : previewSession.degradedFromTwoPass
+      ? t("preview.degradedWithDolbyVision")
+      : t("preview.dolbyVisionDegraded")
+    : previewSession.degradedFromSdrTonemap
+      ? t("preview.sdrTonemapUnavailable")
+      : previewSession.degradedFromTwoPass
+      ? t("preview.degraded")
+      : t("preview.singleFrame");
+  const emptyFrameContent = previewSession.previewError ? (
+    <div className="mx-auto max-w-md rounded-lg border border-red-300/25 bg-red-950/35 p-4 text-center text-red-100">
+      <div className="text-sm font-medium">{t("preview.frameFailed")}</div>
+      <div className="mt-2 text-xs leading-5 text-red-100/80">{previewSession.previewError}</div>
+    </div>
+  ) : (
+    <span>{t("preview.frameLoading")}</span>
+  );
 
   const runtime = useMemo<ComparePreviewRuntime>(
     () => ({
@@ -828,6 +987,8 @@ export function ComparePreviewPlayer({
       estimatedTranscodeSpeed: previewSession.estimatedTranscodeSpeed,
       previewError: previewSession.previewError,
       degradedFromTwoPass: previewSession.degradedFromTwoPass,
+      degradedFromDolbyVision: previewSession.degradedFromDolbyVision,
+      degradedFromSdrTonemap: previewSession.degradedFromSdrTonemap,
       currentTimeSec: timeline.currentTimeSec,
       durationSec,
       isFullscreen: previewFullscreenActive,
@@ -837,6 +998,8 @@ export function ComparePreviewPlayer({
       durationSec,
       previewFullscreenActive,
       previewSession.currentFrame,
+      previewSession.degradedFromDolbyVision,
+      previewSession.degradedFromSdrTonemap,
       previewSession.degradedFromTwoPass,
       previewSession.estimatedTranscodeSpeed,
       previewSession.previewError,
@@ -954,7 +1117,7 @@ export function ComparePreviewPlayer({
         className={`relative touch-none overflow-hidden bg-black ${
           previewFullscreenActive
             ? `${fillViewport ? "h-full w-full" : "fixed inset-0 z-50 h-screen w-screen"} rounded-none border-0`
-            : "rounded-3xl border"
+            : "rounded-lg border"
         }`}
         onDoubleClick={handleFullscreenButtonClick}
       >
@@ -979,9 +1142,7 @@ export function ComparePreviewPlayer({
                 />
               </>
             ) : (
-              <div className="grid h-full place-items-center text-sm text-white/70">
-                {previewSession.previewState === "error" ? t("preview.frameFailed") : t("preview.frameLoading")}
-              </div>
+              <div className="grid h-full place-items-center px-6 text-sm text-white/70">{emptyFrameContent}</div>
             )}
           </div>
         ) : (
@@ -994,19 +1155,21 @@ export function ComparePreviewPlayer({
           </div>
         )}
 
-        <div
-          className={`absolute ${
-            splitMode === "vertical"
-              ? "inset-y-0 w-1 -translate-x-1/2 cursor-col-resize"
-              : "inset-x-0 h-1 -translate-y-1/2 cursor-row-resize"
-          } bg-primary shadow-[0_0_0_1px_rgba(255,255,255,0.4)]`}
-          style={
-            splitMode === "vertical"
-              ? { left: `${splitterPosition * 100}%` }
-              : { top: `${splitterPosition * 100}%` }
-          }
-          onPointerDown={splitterDrag.beginSplitterDrag}
-        />
+        {hasFrame ? (
+          <div
+            className={`absolute ${
+              splitMode === "vertical"
+                ? "inset-y-0 w-1 -translate-x-1/2 cursor-col-resize"
+                : "inset-x-0 h-1 -translate-y-1/2 cursor-row-resize"
+            } bg-primary shadow-[0_0_0_1px_rgba(255,255,255,0.4)]`}
+            style={
+              splitMode === "vertical"
+                ? { left: `${splitterPosition * 100}%` }
+                : { top: `${splitterPosition * 100}%` }
+            }
+            onPointerDown={splitterDrag.beginSplitterDrag}
+          />
+        ) : null}
 
         {hasFrame ? (
           <>
@@ -1031,7 +1194,7 @@ export function ComparePreviewPlayer({
           <div className="text-sm text-white/90">
             <div className="font-medium">{t("preview.player.title")}</div>
             <div className="text-xs text-white/70">
-              {previewSession.previewState} · {previewSession.degradedFromTwoPass ? t("preview.degraded") : t("preview.singleFrame")}
+              {previewSession.previewState} · {previewModeLabel}
             </div>
           </div>
           <Button
@@ -1107,12 +1270,12 @@ export function ComparePreviewPlayer({
             </label>
           </div>
           <div className="mt-3 flex flex-wrap gap-3 text-xs text-white/75">
-            <span>previewSpeed: {previewSession.previewSpeed ? `${previewSession.previewSpeed.toFixed(2)}x` : "-"}</span>
+            <span>预览速度：{previewSession.previewSpeed ? `${previewSession.previewSpeed.toFixed(2)}x` : "-"}</span>
             <span>
-              estimatedTranscodeSpeed: {previewSession.estimatedTranscodeSpeed ? `${previewSession.estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
+              预计转码速度：{previewSession.estimatedTranscodeSpeed ? `${previewSession.estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
             </span>
             {timeline.isScrubbingTimeline ? <span>{t("preview.scrubbing")}</span> : null}
-            {previewSession.previewError ? <span className="text-red-200">error: {previewSession.previewError}</span> : null}
+            {previewSession.previewError ? <span className="text-red-200">错误：{previewSession.previewError}</span> : null}
           </div>
         </div>
       </div>

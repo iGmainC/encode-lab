@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ use crate::{
     evaluation::{
         build_vmaf_command_args, create_evaluation_id, parse_vmaf_log, VmafCommandOptions,
     },
+    ffmpeg_runtime::ffmpeg_command,
     models::JobHistory,
     AppState,
 };
@@ -110,7 +111,7 @@ fn run_vmaf_evaluation(
         thread_count: vmaf.thread_count,
     })?;
 
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

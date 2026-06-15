@@ -53,11 +53,8 @@ jobs:
       matrix:
         platform:
           - name: macOS
-            runner: macos-latest
+            runner: macos-15
             args: ""
-          - name: Windows
-            runner: windows-latest
-            args: "--bundles nsis"
           - name: Linux
             runner: ubuntu-latest
             args: ""

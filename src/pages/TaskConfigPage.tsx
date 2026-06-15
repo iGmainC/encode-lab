@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import {
@@ -11,17 +12,22 @@ import {
 } from "../components/ui/select";
 import { Slider } from "../components/ui/slider";
 import { Switch } from "../components/ui/switch";
-import { SourceVideoCard } from "../components/workbench/SourceVideoCard";
 import { StepFlowHeader } from "../components/workbench/StepFlowHeader";
 import { TaskSummaryCard } from "../components/workbench/TaskSummaryCard";
 import { useTaskDraft } from "../context/TaskDraftContext";
 import { useI18n } from "../i18n/I18nProvider";
-import type { EncoderCapability, FfmpegProbeResult, SaveTemplateResponse } from "../types/workbench";
+import type {
+  EncoderCapability,
+  FfmpegProbeResult,
+  SaveTemplateResponse,
+  VideoMetadataResult,
+} from "../types/workbench";
 
 type Props = {
   filteredEncoders: EncoderCapability[];
   selectedEncoderCapability?: EncoderCapability;
   ffmpegProbe: FfmpegProbeResult | null;
+  onBackSource: () => void;
   onGoPreview: () => void;
   onTemplatesChanged: () => void;
 };
@@ -35,12 +41,14 @@ function buildDolbyVisionPreserveCopy({
   isDolbyVisionSource,
   formCodec,
   formEncoder,
+  sourceVideo,
   ffmpegProbe,
   t,
 }: {
   isDolbyVisionSource: boolean;
   formCodec: string;
   formEncoder: string;
+  sourceVideo?: VideoMetadataResult["video"] | null;
   ffmpegProbe: FfmpegProbeResult | null;
   t: ReturnType<typeof useI18n>["t"];
 }) {
@@ -86,23 +94,49 @@ function buildDolbyVisionPreserveCopy({
     };
   }
 
+  if (!isDolbyVisionPreserveSourceSupported(sourceVideo)) {
+    return {
+      hint: t("config.dv.sourceUnsupported.hint", {
+        profile: sourceVideo?.dolbyVisionProfile ?? "-",
+        compatibility: sourceVideo?.dolbyVisionCompatibilityId ?? "-",
+      }),
+      disabledReason: t("config.dv.sourceUnsupported.disabled", {
+        profile: sourceVideo?.dolbyVisionProfile ?? "-",
+        compatibility: sourceVideo?.dolbyVisionCompatibilityId ?? "-",
+      }),
+    };
+  }
+
   return {
     hint: t("config.dv.ready.hint"),
     disabledReason: "",
   };
 }
 
+/**
+ * 判断当前源片是否适合走 libx265 的 Dolby Vision 元数据保留实验链路。
+ * @param sourceVideo ffprobe 返回的源视频元数据
+ * @returns true 表示 profile 与 compatibility id 足够明确且不是无兼容基础层源片
+ */
+function isDolbyVisionPreserveSourceSupported(sourceVideo?: VideoMetadataResult["video"] | null) {
+  const profile = sourceVideo?.dolbyVisionProfile;
+  const compatibilityId = sourceVideo?.dolbyVisionCompatibilityId;
+
+  // 当前 libx265 实验链路不能重编码 Profile 5 / compatibility 0 这种无兼容基础层源片。
+  return profile != null && compatibilityId != null && profile !== 5 && compatibilityId !== 0;
+}
+
 export function TaskConfigPage({
   filteredEncoders,
   selectedEncoderCapability,
   ffmpegProbe,
+  onBackSource,
   onGoPreview,
   onTemplatesChanged,
 }: Props) {
   const { t } = useI18n();
   const [savingTemplate, setSavingTemplate] = useState(false);
   const {
-    step,
     setStep,
     formCodec,
     setFormCodec,
@@ -163,21 +197,17 @@ export function TaskConfigPage({
     clipEndSec,
     setClipEndSec,
     sourceFilePath,
-    setSourceFilePath,
     videoMetadata,
-    videoMetadataLoading,
-    videoMetadataError,
-    isDragOverWindow,
-    pickSourceFile,
-    retryVideoMetadata,
     taskDraftSnapshot,
   } = useTaskDraft();
 
   const isDolbyVisionSource = videoMetadata?.video?.hdrType === "DolbyVision";
+  const hasSource = sourceFilePath.trim().length > 0;
   const dolbyVisionCopy = buildDolbyVisionPreserveCopy({
     isDolbyVisionSource,
     formCodec,
     formEncoder,
+    sourceVideo: videoMetadata?.video,
     ffmpegProbe,
     t,
   });
@@ -185,7 +215,8 @@ export function TaskConfigPage({
     isDolbyVisionSource &&
     formCodec === "h265" &&
     formEncoder === "libx265" &&
-    Boolean(ffmpegProbe?.dolbyVision.supportsPreservePipeline);
+    Boolean(ffmpegProbe?.dolbyVision.supportsPreservePipeline) &&
+    isDolbyVisionPreserveSourceSupported(videoMetadata?.video);
 
   useEffect(() => {
     if (!canPreserveDolbyVision && preserveDolbyVisionMetadata) {
@@ -203,6 +234,22 @@ export function TaskConfigPage({
           : t("config.preset.qualityHint");
 
   const isAv1SoftwareEncoder = formEncoder === "libaom-av1" || formEncoder === "svtav1";
+
+  /**
+   * 返回源文件选择页，保留当前参数草稿，方便用户只替换输入素材。
+   */
+  function backToSource() {
+    setStep("source");
+    onBackSource();
+  }
+
+  /**
+   * 进入预览校验页，当前参数草稿保持不变。
+   */
+  function openPreview() {
+    setStep("preview");
+    onGoPreview();
+  }
 
   /**
    * 将当前参数面板保存为参数方案。
@@ -232,21 +279,11 @@ export function TaskConfigPage({
   }
 
   return (
-    <div className="flex flex-col gap-5">
-      <StepFlowHeader currentStep={step} />
+    <div className="flex flex-col gap-4">
+      <StepFlowHeader currentStep={hasSource ? "config" : "source"} compact />
 
-      <div className="grid gap-5 xl:grid-cols-[380px_minmax(0,1fr)]">
-        <div className="flex flex-col gap-5">
-          <SourceVideoCard
-            sourceFilePath={sourceFilePath}
-            setSourceFilePath={setSourceFilePath}
-            videoMetadata={videoMetadata}
-            videoMetadataLoading={videoMetadataLoading}
-            videoMetadataError={videoMetadataError}
-            onRetry={() => void retryVideoMetadata()}
-            onPickSourceFile={() => void pickSourceFile()}
-            isDragOverWindow={isDragOverWindow}
-          />
+      <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+        <div className="flex flex-col gap-4 xl:sticky xl:top-4 xl:self-start">
           <TaskSummaryCard
             videoMetadata={videoMetadata}
             codec={formCodec}
@@ -254,6 +291,7 @@ export function TaskConfigPage({
             mode={formMode}
             twoPass={formTwoPass}
             preserveDolbyVisionMetadata={preserveDolbyVisionMetadata}
+            compact
           />
           <TrimRangeControl
             durationSec={videoMetadata?.durationSec ?? 0}
@@ -273,16 +311,17 @@ export function TaskConfigPage({
               full: t("trim.full"),
               unavailable: t("trim.unavailable"),
             }}
+            compact
           />
         </div>
 
         <Card className="shadow-sm">
-          <CardHeader className="border-b p-4 md:p-5">
-            <CardTitle>{t("config.panel.title")}</CardTitle>
-            <CardDescription>{t("config.panel.description")}</CardDescription>
+          <CardHeader className="border-b p-4">
+            <CardTitle className="text-base">{t("config.panel.title")}</CardTitle>
+            <CardDescription className="text-xs leading-5">{t("config.panel.description")}</CardDescription>
           </CardHeader>
-          <CardContent className="flex flex-col gap-5 p-4 md:p-5">
-            <div className="grid gap-4 md:grid-cols-2">
+          <CardContent className="flex flex-col gap-4 p-4">
+            <div className="grid gap-3 md:grid-cols-2">
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Codec</span>
                 <Select value={formCodec} onValueChange={setFormCodec}>
@@ -315,7 +354,7 @@ export function TaskConfigPage({
               </label>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-3 md:grid-cols-2">
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Bitrate Mode</span>
                 <Select
@@ -356,7 +395,7 @@ export function TaskConfigPage({
 
             {formMode === "CRF" ? (
               <Card className="border-dashed bg-muted/20 shadow-none">
-                <CardContent className="flex flex-col gap-3 p-4">
+                <CardContent className="flex flex-col gap-3 p-3">
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground">{t("config.crf")}</span>
                     <span className="font-medium">{formCrf}</span>
@@ -373,7 +412,7 @@ export function TaskConfigPage({
                 </CardContent>
               </Card>
             ) : (
-              <div className="grid gap-4 rounded-lg border bg-muted/20 p-4 md:grid-cols-3">
+              <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-3">
                 <label className="space-y-1 text-sm">
                   <span className="text-muted-foreground">{t("config.targetBitrate")}</span>
                   <input
@@ -414,7 +453,7 @@ export function TaskConfigPage({
             )}
 
             {formCodec === "av1" ? (
-              <div className="flex flex-col gap-4 rounded-lg border bg-muted/20 p-4">
+              <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-3">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">{t("config.av1.title")}</div>
@@ -428,7 +467,7 @@ export function TaskConfigPage({
                 </div>
 
                 {formEncoder === "libaom-av1" ? (
-                  <div className="grid gap-4 md:grid-cols-4">
+                  <div className="grid gap-3 md:grid-cols-4">
                     <label className="space-y-1 text-sm">
                       <span className="text-muted-foreground">cpu-used</span>
                       <Select value={av1CpuUsed} onValueChange={setAv1CpuUsed}>
@@ -485,7 +524,7 @@ export function TaskConfigPage({
                 ) : null}
 
                 {formEncoder === "svtav1" ? (
-                  <div className="grid gap-4 md:grid-cols-2">
+                  <div className="grid gap-3 md:grid-cols-2">
                     <label className="space-y-1 text-sm">
                       <span className="text-muted-foreground">SVT Tune</span>
                       <Select value={av1SvtTune} onValueChange={setAv1SvtTune}>
@@ -525,7 +564,7 @@ export function TaskConfigPage({
               </div>
             ) : null}
 
-            <div className="grid gap-4 md:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-4">
               <label className="space-y-1 text-sm md:col-span-2">
                 <span className="text-muted-foreground">Preset</span>
                 <Select value={formPreset || "none"} onValueChange={(value) => setFormPreset(value === "none" ? "" : value)}>
@@ -587,7 +626,7 @@ export function TaskConfigPage({
             </div>
 
             {isDolbyVisionSource ? (
-              <div className="rounded-lg border bg-muted/30 p-4">
+              <div className="rounded-lg border bg-muted/30 p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <div className="text-sm font-medium">{t("config.dv.title")}</div>
@@ -615,7 +654,7 @@ export function TaskConfigPage({
               </div>
             ) : null}
 
-            <div className="grid gap-4 md:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-4">
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">{t("config.outputContainer")}</span>
                 <Select value={containerFormat} onValueChange={(value) => setContainerFormat(value as "mp4" | "mkv" | "mov")}>
@@ -722,28 +761,30 @@ export function TaskConfigPage({
               </label>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-accent/35 p-4">
+            <div className="flex flex-col gap-3 rounded-lg border bg-accent/35 p-3">
               <div className="space-y-1">
                 <div className="font-medium">{t("config.next.title")}</div>
-                <p className="text-sm text-muted-foreground">{t("config.next.description")}</p>
+                <p className="text-xs text-muted-foreground">{t("config.next.description")}</p>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline">{t("config.saveDraft")}</Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    setStep("preview");
-                    onGoPreview();
-                  }}
-                >
-                  {t("config.goPreview")}
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <Button variant="outline" className="justify-start" onClick={backToSource}>
+                  <ArrowLeft data-icon="inline-start" aria-hidden="true" />
+                  {t("config.backSource")}
                 </Button>
-                <Button
-                  disabled={savingTemplate}
-                  onClick={() => void saveCurrentTemplate()}
-                >
-                  {savingTemplate ? t("config.saving") : t("config.savePreset")}
-                </Button>
+                <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                  <Button variant="ghost">{t("config.saveDraft")}</Button>
+                  <Button
+                    variant="secondary"
+                    disabled={savingTemplate}
+                    onClick={() => void saveCurrentTemplate()}
+                  >
+                    {savingTemplate ? t("config.saving") : t("config.savePreset")}
+                  </Button>
+                  <Button onClick={openPreview}>
+                    <ArrowRight data-icon="inline-start" aria-hidden="true" />
+                    {t("config.goPreview")}
+                  </Button>
+                </div>
               </div>
             </div>
           </CardContent>
@@ -760,6 +801,7 @@ function TrimRangeControl({
   endSec,
   onChange,
   labels,
+  compact = false,
 }: {
   durationSec: number;
   fps?: number;
@@ -775,6 +817,7 @@ function TrimRangeControl({
     full: string;
     unavailable: string;
   };
+  compact?: boolean;
 }) {
   const frameStepSec = fps && fps > 0 ? 1 / fps : 1 / 30;
   const hasDuration = durationSec > 0;
@@ -823,11 +866,11 @@ function TrimRangeControl({
 
   return (
     <Card className="shadow-sm">
-      <CardHeader className="gap-1 p-4">
-        <CardTitle>{labels.title}</CardTitle>
-        <CardDescription>{labels.description}</CardDescription>
+      <CardHeader className={compact ? "gap-0.5 p-3" : "gap-1 p-4"}>
+        <CardTitle className={compact ? "text-base" : undefined}>{labels.title}</CardTitle>
+        <CardDescription className={compact ? "text-xs leading-5" : undefined}>{labels.description}</CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-4 p-4 pt-0">
+      <CardContent className={compact ? "grid gap-3 p-3 pt-0" : "grid gap-4 p-4 pt-0"}>
         {hasDuration ? (
           <>
             <Slider
@@ -837,11 +880,11 @@ function TrimRangeControl({
               value={[safeStartSec, safeEndSec]}
               onValueChange={updateRange}
             />
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="grid gap-1 text-sm">
+            <div className="grid min-w-0 gap-3">
+              <label className="grid min-w-0 gap-1 text-sm">
                 <span className="text-muted-foreground">{labels.start}</span>
                 <input
-                  className="h-10 rounded-lg border bg-background px-3 text-sm font-mono tabular-nums outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  className="h-10 w-full min-w-0 rounded-lg border bg-background px-3 text-sm font-mono tabular-nums outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                   name="trim-start-timecode"
                   inputMode="decimal"
                   autoComplete="off"
@@ -855,10 +898,10 @@ function TrimRangeControl({
                   }}
                 />
               </label>
-              <label className="grid gap-1 text-sm">
+              <label className="grid min-w-0 gap-1 text-sm">
                 <span className="text-muted-foreground">{labels.end}</span>
                 <input
-                  className="h-10 rounded-lg border bg-background px-3 text-sm font-mono tabular-nums outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  className="h-10 w-full min-w-0 rounded-lg border bg-background px-3 text-sm font-mono tabular-nums outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                   name="trim-end-timecode"
                   inputMode="decimal"
                   autoComplete="off"
@@ -873,13 +916,13 @@ function TrimRangeControl({
                 />
               </label>
             </div>
-            <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
+            <div className={compact ? "rounded-lg border bg-muted/20 p-2.5 text-sm text-muted-foreground" : "rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground"}>
               {labels.duration}: {formatTimecode(Math.max(0, safeEndSec - safeStartSec))}
               {isFullRange ? ` · ${labels.full}` : ""}
             </div>
           </>
         ) : (
-          <div className="rounded-lg border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground">
+          <div className={compact ? "rounded-lg border border-dashed bg-muted/20 p-3 text-sm text-muted-foreground" : "rounded-lg border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground"}>
             {labels.unavailable}
           </div>
         )}

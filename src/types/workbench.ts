@@ -187,8 +187,13 @@ export type VideoStreamMetadata = {
   colorPrimaries?: string;
   colorTransfer?: string;
   colorSpace?: string;
+  colorRange?: string;
   bitDepth?: number;
   hdrType?: "Sdr" | "Hdr10" | "Hlg" | "DolbyVision" | "Unknown";
+  /** Dolby Vision profile；缺失时不能判断当前保留链路是否支持。 */
+  dolbyVisionProfile?: number | null;
+  /** Dolby Vision base-layer compatibility id；0 通常表示没有 HDR10/SDR 兼容层。 */
+  dolbyVisionCompatibilityId?: number | null;
   /** HDR10 MaxCLL，单位 nit */
   maxContentLightLevel?: number | null;
   /** HDR10 MaxFALL，单位 nit */
@@ -305,7 +310,7 @@ export type JobMetricsEvent = {
   updatedAt: string;
 };
 
-export type TaskDraftStep = "source" | "config" | "preview" | "enqueue";
+export type TaskDraftStep = "source" | "config" | "preview" | "confirm";
 
 export type TaskDraftSnapshot = {
   name: string;
@@ -372,6 +377,16 @@ export type PreviewConfig = {
   inputFile: string;
   /** 可选输入节点位置；当前预览执行仍使用 inputFile 保持本机兼容。 */
   inputLocation?: FileLocation | null;
+  /** 源视频 HDR 类型；后端预览用它决定是否执行 SDR 映射。 */
+  sourceHdrType?: VideoStreamMetadata["hdrType"];
+  /** 源视频色彩原色；用于普通 HDR fallback 预览映射时固定 zscale 输入端。 */
+  sourceColorPrimaries?: VideoStreamMetadata["colorPrimaries"];
+  /** 源视频传递函数；用于普通 HDR fallback 预览映射时固定 zscale 输入端。 */
+  sourceColorTransfer?: VideoStreamMetadata["colorTransfer"];
+  /** 源视频色彩矩阵；用于普通 HDR fallback 预览映射时固定 zscale 输入端。 */
+  sourceColorSpace?: VideoStreamMetadata["colorSpace"];
+  /** 源视频色彩范围；用于普通 HDR fallback 预览映射时固定 zscale 输入端。 */
+  sourceColorRange?: VideoStreamMetadata["colorRange"];
   clipRange?: { startMs: number; endMs: number };
   renderScale: 0.25 | 0.5 | 0.75 | 1;
   compareOrientation: "vertical" | "horizontal";
@@ -396,6 +411,8 @@ export type PreviewStateEvent = {
   previewSpeed?: number;
   estimatedTranscodeSpeed?: number;
   degradedFromTwoPass?: boolean;
+  degradedFromDolbyVision?: boolean;
+  degradedFromSdrTonemap?: boolean;
   error?: {
     code: string;
     message: string;
@@ -405,11 +422,15 @@ export type PreviewStateEvent = {
 export type StartPreviewResponse = {
   previewSessionId: string;
   degradedFromTwoPass?: boolean;
+  degradedFromDolbyVision?: boolean;
+  degradedFromSdrTonemap?: boolean;
 };
 
 export type UpdatePreviewResponse = {
   ok: boolean;
   degradedFromTwoPass?: boolean;
+  degradedFromDolbyVision?: boolean;
+  degradedFromSdrTonemap?: boolean;
 };
 
 export type ComparePreviewRuntime = {
@@ -418,6 +439,8 @@ export type ComparePreviewRuntime = {
   estimatedTranscodeSpeed?: number;
   previewError?: string;
   degradedFromTwoPass: boolean;
+  degradedFromDolbyVision: boolean;
+  degradedFromSdrTonemap: boolean;
   currentTimeSec: number;
   durationSec: number;
   isFullscreen: boolean;

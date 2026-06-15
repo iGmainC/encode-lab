@@ -7,20 +7,22 @@ const orderedSteps: { key: TaskDraftStep; labelKey: Parameters<ReturnType<typeof
   { key: "source", labelKey: "step.source" },
   { key: "config", labelKey: "step.config" },
   { key: "preview", labelKey: "step.preview" },
-  { key: "enqueue", labelKey: "step.enqueue" },
+  { key: "confirm", labelKey: "step.confirm" },
 ];
 
 export function StepFlowHeader({
   currentStep,
+  compact = false,
 }: {
   currentStep: TaskDraftStep;
+  compact?: boolean;
 }) {
   const { t } = useI18n();
   const currentIndex = orderedSteps.findIndex((item) => item.key === currentStep);
 
   return (
-    <div className="rounded-lg border bg-card p-4 shadow-sm">
-      <div className="mb-4 flex items-center justify-between gap-3">
+    <div className={cn("rounded-lg border bg-card shadow-sm", compact ? "p-3" : "p-4")}>
+      <div className={cn("flex items-center justify-between gap-3", compact ? "mb-3" : "mb-4")}>
         <div>
           <div className="text-sm font-medium">{t("step.title")}</div>
           <p className="text-sm text-muted-foreground">{t("step.description")}</p>
@@ -35,7 +37,8 @@ export function StepFlowHeader({
             <div
               key={item.key}
               className={cn(
-                "rounded-lg border px-4 py-3 text-sm",
+                "rounded-lg border text-sm",
+                compact ? "px-3 py-2" : "px-4 py-3",
                 active
                   ? "border-primary bg-primary/5"
                   : completed

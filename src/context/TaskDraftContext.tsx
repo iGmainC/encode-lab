@@ -10,6 +10,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isTauriRuntime } from "../lib/tauriRuntime";
 import type {
   TaskDraftSnapshot,
   VideoMetadataResult,
@@ -91,10 +92,40 @@ type TaskDraftContextValue = {
 
 const TaskDraftContext = createContext<TaskDraftContextValue | null>(null);
 
+/**
+ * 普通浏览器预览用的只读示例素材，避免设计 QA 被 Tauri 宿主缺失阻断。
+ * @returns 示例视频元数据
+ */
+function buildBrowserPreviewMetadata(): VideoMetadataResult {
+  return {
+    inputFile: "/Users/encode-lab/Travel_2024_Film.mov",
+    containerFormat: "QuickTime (MOV)",
+    durationSec: 10097,
+    sizeBytes: 12.62 * 1024 * 1024 * 1024,
+    bitRateKbps: 10680,
+    video: {
+      codecName: "Apple ProRes 422 HQ",
+      width: 3840,
+      height: 2160,
+      pixFmt: "yuv422p10le",
+      fps: 23.976,
+      bitDepth: 10,
+      hdrType: "Hdr10",
+    },
+    audio: {
+      codecName: "AAC",
+      channelLayout: "Stereo",
+      sampleRate: 48000,
+      bitRateKbps: 320,
+    },
+    tags: ["4K", "HDR10", "ProRes", "10-bit"],
+  };
+}
+
 export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [step, setStep] = useState<TaskDraftStep>("source");
-  const [formCodec, setFormCodec] = useState("h264");
-  const [formEncoder, setFormEncoder] = useState("libx264");
+  const [formCodec, setFormCodec] = useState("h265");
+  const [formEncoder, setFormEncoder] = useState("libx265");
   const [formMode, setFormMode] = useState<"CRF" | "CBR" | "ABR">("CRF");
   const [formTwoPass, setFormTwoPass] = useState(false);
   const [formCrf, setFormCrf] = useState(23);
@@ -122,8 +153,12 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [containerFaststart, setContainerFaststart] = useState(true);
   const [clipStartSec, setClipStartSec] = useState(0);
   const [clipEndSec, setClipEndSec] = useState(0);
-  const [sourceFilePath, setSourceFilePath] = useState("");
-  const [videoMetadata, setVideoMetadata] = useState<VideoMetadataResult | null>(null);
+  const [sourceFilePath, setSourceFilePath] = useState(() =>
+    isTauriRuntime() ? "" : "/Users/encode-lab/Travel_2024_Film.mov",
+  );
+  const [videoMetadata, setVideoMetadata] = useState<VideoMetadataResult | null>(() =>
+    isTauriRuntime() ? null : buildBrowserPreviewMetadata(),
+  );
   const [videoMetadataLoading, setVideoMetadataLoading] = useState(false);
   const [videoMetadataError, setVideoMetadataError] = useState<string | null>(null);
   const [isDragOverWindow, setIsDragOverWindow] = useState(false);
@@ -134,6 +169,12 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setVideoMetadata(null);
       setVideoMetadataError(null);
       setVideoMetadataLoading(false);
+      return;
+    }
+
+    if (!isTauriRuntime()) {
+      setVideoMetadata(buildBrowserPreviewMetadata());
+      setStep((current) => (current === "source" ? "config" : current));
       return;
     }
 
@@ -171,6 +212,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   }, [sourceFilePath, fetchVideoMetadata]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
     let unlisten: (() => void) | null = null;
     void getCurrentWindow()
       .onDragDropEvent((event) => {

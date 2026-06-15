@@ -6,9 +6,13 @@ use std::{
 
 use crate::{
     models::{
-        task::{AudioMode, ContainerFormat, VideoBitrateMode, VideoCodecFormat, VideoEncoder},
+        task::{
+            AudioMode, ContainerFormat, Resolution, VideoBitrateMode, VideoCodecFormat,
+            VideoEncoder,
+        },
         TaskConfigPayload,
     },
+    probe::video_metadata::{read_video_metadata, HdrType, VideoStreamMetadata},
     storage::errors::{StorageError, StorageResult},
 };
 
@@ -22,12 +26,50 @@ pub struct CommandBuildOutput {
 /// 编码预览使用的小片段帧数，避免部分编码器单帧输出灰帧或延迟帧。
 const PREVIEW_ENCODE_FRAME_COUNT: u8 = 8;
 
+/// 预览 SDR 映射策略。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PreviewSdrTonemapMode {
+    /// 不执行 SDR 映射，直接按普通预览链路抽帧。
+    #[default]
+    Disabled,
+    /// 使用 zscale + tonemap 处理 HDR10/HLG。
+    Zscale,
+    /// 使用 libplacebo 处理 Dolby Vision RPU 与 HDR 到 SDR 映射。
+    Libplacebo,
+}
+
+impl PreviewSdrTonemapMode {
+    /// 判断当前策略是否会在 FFmpeg 预览命令中加入 SDR 映射 filter。
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
 /// 预览单帧命令的时间点。
 pub struct PreviewCommandOptions {
     /// 抽帧时间点，单位秒。
     pub time_sec: f64,
     /// 渲染缩放比例，取值通常为 0.25-1.0。
     pub render_scale: f64,
+    /// 预览链路使用的 SDR 映射策略。
+    pub sdr_tonemap_mode: PreviewSdrTonemapMode,
+    /// 源视频 HDR 与色彩元数据；普通 HDR fallback 映射时用于固定 zscale 输入端。
+    pub source_color: Option<PreviewSourceColor>,
+}
+
+/// 预览 SDR 映射使用的源色彩上下文。
+#[derive(Debug, Clone, Default)]
+pub struct PreviewSourceColor {
+    /// 源视频 HDR 类型，例如 Hdr10、Hlg、DolbyVision。
+    pub hdr_type: Option<String>,
+    /// 源视频色彩原色，例如 bt2020。
+    pub primaries: Option<String>,
+    /// 源视频传递函数，例如 smpte2084、arib-std-b67。
+    pub transfer: Option<String>,
+    /// 源视频色彩矩阵，例如 bt2020nc。
+    pub matrix: Option<String>,
+    /// 源视频色彩范围，例如 tv、pc。
+    pub range: Option<String>,
 }
 
 pub fn build_ffmpeg_commands(
@@ -62,6 +104,7 @@ pub fn build_ffmpeg_command_args(
     }
 
     guard_advanced_args(payload.advanced_args.as_deref())?;
+    ensure_dolby_vision_preserve_source_supported(payload, input_file)?;
 
     let mut warnings = codec_strategy_warnings(payload);
     let sanitized_advanced =
@@ -108,6 +151,62 @@ pub fn build_ffmpeg_command_args(
     }
 }
 
+fn ensure_dolby_vision_preserve_source_supported(
+    payload: &TaskConfigPayload,
+    input_file: &str,
+) -> StorageResult<()> {
+    if !payload
+        .video
+        .preserve_dolby_vision_metadata
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let metadata = read_video_metadata(input_file).map_err(|err| {
+        StorageError::InvalidPayload(format!(
+            "cannot verify Dolby Vision source metadata: {}",
+            err.message
+        ))
+    })?;
+
+    validate_dolby_vision_preserve_source(metadata.video.as_ref())
+}
+
+/// 校验源片是否适配当前 libx265 Dolby Vision 元数据保留链路。
+fn validate_dolby_vision_preserve_source(video: Option<&VideoStreamMetadata>) -> StorageResult<()> {
+    let Some(video) = video else {
+        return Err(StorageError::InvalidPayload(
+            "Dolby Vision metadata preservation requires a readable video stream".to_string(),
+        ));
+    };
+
+    if video.hdr_type.as_ref() != Some(&HdrType::DolbyVision) {
+        return Err(StorageError::InvalidPayload(
+            "Dolby Vision metadata preservation requires a Dolby Vision source".to_string(),
+        ));
+    }
+
+    let profile = video.dolby_vision_profile;
+    let compatibility_id = video.dolby_vision_compatibility_id;
+    if profile.is_none() || compatibility_id.is_none() {
+        return Err(StorageError::InvalidPayload(
+            "Dolby Vision metadata preservation requires source profile and compatibility id"
+                .to_string(),
+        ));
+    }
+
+    if profile == Some(5) || compatibility_id == Some(0) {
+        return Err(StorageError::InvalidPayload(format!(
+            "Dolby Vision metadata preservation does not support source profile {} compatibility {}; disable preservation and transcode as ordinary H.265",
+            profile.unwrap_or_default(),
+            compatibility_id.unwrap_or_default()
+        )));
+    }
+
+    Ok(())
+}
+
 pub fn build_preview_encoded_frame_command_args(
     payload: &TaskConfigPayload,
     input_file: &str,
@@ -124,16 +223,20 @@ pub fn build_preview_encoded_frame_command_args(
 
     let mut warnings = Vec::new();
     let sanitized_advanced =
-        sanitize_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
+        sanitize_preview_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
     let mut preview_payload = payload.clone();
 
-    // 单帧编码预览不执行 2-pass，但保留 codec/crf/preset/advancedArgs 等质量参数。
+    // 单帧编码预览不执行 2-pass，也不携带 DV 元数据保留；DV 需要完整 profile 上下文。
     preview_payload.video.enable_two_pass = false;
+    preview_payload.video.preserve_dolby_vision_metadata = Some(false);
+    let keeps_source_resolution = preview_payload.video.resolution.is_none();
 
     if let Some(resolution) = &mut preview_payload.video.resolution {
         resolution.width = scale_even_dimension(resolution.width, options.render_scale);
         resolution.height = scale_even_dimension(resolution.height, options.render_scale);
     }
+    let preview_resolution = preview_payload.video.resolution.clone();
+    preview_payload.video.resolution = None;
 
     let mut args = vec![
         "-y".to_string(),
@@ -144,6 +247,17 @@ pub fn build_preview_encoded_frame_command_args(
     ];
 
     append_video_args(&preview_payload, &mut args)?;
+    append_preview_video_filter(
+        &mut args,
+        preview_resolution.as_ref(),
+        keeps_source_resolution.then_some(options.render_scale),
+        options.sdr_tonemap_mode,
+        options.source_color.as_ref(),
+        PreviewFilterOutput::Encoder,
+    );
+    if options.sdr_tonemap_mode.is_enabled() {
+        append_preview_sdr_color_tags(&mut args);
+    }
     append_advanced_args(sanitized_advanced.as_deref(), &mut args);
     args.push("-frames:v".to_string());
     args.push(PREVIEW_ENCODE_FRAME_COUNT.to_string());
@@ -194,19 +308,236 @@ pub fn build_source_frame_command_args(
         input_file.to_string(),
     ];
 
-    if (options.render_scale - 1.0).abs() > f64::EPSILON {
-        // 源片 proxy 只做展示缩放，不应用目标转码参数。
-        args.push("-vf".to_string());
-        args.push(format!(
-            "scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2",
-            scale = options.render_scale
-        ));
-    }
+    append_preview_video_filter(
+        &mut args,
+        None,
+        Some(options.render_scale),
+        options.sdr_tonemap_mode,
+        options.source_color.as_ref(),
+        PreviewFilterOutput::Image,
+    );
 
     append_frame_output_args(&mut args);
     args.push(output_file.to_string());
 
     Ok(args)
+}
+
+fn preview_render_scale_filter(render_scale: f64) -> String {
+    format!(
+        "scale=trunc(iw*{scale}/2)*2:trunc(ih*{scale}/2)*2",
+        scale = render_scale
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PreviewFilterOutput {
+    Encoder,
+    Image,
+}
+
+fn append_preview_video_filter(
+    args: &mut Vec<String>,
+    resolution: Option<&Resolution>,
+    render_scale: Option<f64>,
+    sdr_tonemap_mode: PreviewSdrTonemapMode,
+    source_color: Option<&PreviewSourceColor>,
+    output: PreviewFilterOutput,
+) {
+    let mut filters = Vec::new();
+
+    if sdr_tonemap_mode.is_enabled() {
+        filters.extend(preview_sdr_tonemap_filters(
+            output,
+            source_color,
+            sdr_tonemap_mode,
+        ));
+    }
+
+    if let Some(resolution) = resolution {
+        filters.push(format!("scale={}:{}", resolution.width, resolution.height));
+    } else if let Some(render_scale) = render_scale {
+        if (render_scale - 1.0).abs() > f64::EPSILON {
+            // 保持源分辨率时，转码预览也必须和源 proxy 使用同一缩放，避免预览层因像素更多显得更锐。
+            filters.push(preview_render_scale_filter(render_scale));
+        }
+    }
+
+    if filters.is_empty() {
+        return;
+    }
+
+    args.push("-vf".to_string());
+    args.push(filters.join(","));
+}
+
+fn preview_sdr_tonemap_filters(
+    output: PreviewFilterOutput,
+    source_color: Option<&PreviewSourceColor>,
+    mode: PreviewSdrTonemapMode,
+) -> Vec<String> {
+    match mode {
+        PreviewSdrTonemapMode::Disabled => Vec::new(),
+        PreviewSdrTonemapMode::Zscale => preview_zscale_sdr_tonemap_filters(output, source_color),
+        PreviewSdrTonemapMode::Libplacebo => preview_libplacebo_sdr_tonemap_filters(output),
+    }
+}
+
+fn preview_zscale_sdr_tonemap_filters(
+    output: PreviewFilterOutput,
+    source_color: Option<&PreviewSourceColor>,
+) -> Vec<String> {
+    let final_format = match output {
+        PreviewFilterOutput::Encoder => "format=yuv420p",
+        PreviewFilterOutput::Image => "format=rgb24",
+    };
+    let input_color = resolve_preview_sdr_input_color(source_color);
+
+    vec![
+        format!(
+            "zscale=primariesin={}:transferin={}:matrixin={}:rangein={}:primaries={}:transfer=linear:npl=100",
+            input_color.primaries,
+            input_color.transfer,
+            input_color.matrix,
+            input_color.range,
+            input_color.primaries
+        ),
+        "format=gbrpf32le".to_string(),
+        // mobius 比 hable 更保守，先压动态范围，再把源 primaries 转到 BT.709，减少动画素材高光发白。
+        "tonemap=tonemap=mobius:param=0.3:desat=1".to_string(),
+        "zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=tv".to_string(),
+        final_format.to_string(),
+    ]
+}
+
+fn preview_libplacebo_sdr_tonemap_filters(output: PreviewFilterOutput) -> Vec<String> {
+    let final_format = match output {
+        PreviewFilterOutput::Encoder => "format=yuv420p",
+        PreviewFilterOutput::Image => "format=rgb24",
+    };
+
+    vec![
+        // libplacebo 会读取 DV RPU，再统一输出 BT.709 SDR；这是 Dolby Vision 预览的优先路径。
+        "libplacebo=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:apply_dolbyvision=true".to_string(),
+        final_format.to_string(),
+    ]
+}
+
+fn append_preview_sdr_color_tags(args: &mut Vec<String>) {
+    // 预览编码中间文件需要显式 BT.709 标签，避免解 PNG 时再被 FFmpeg 按未知色彩属性推导。
+    args.extend([
+        "-color_primaries".to_string(),
+        "bt709".to_string(),
+        "-color_trc".to_string(),
+        "bt709".to_string(),
+        "-colorspace".to_string(),
+        "bt709".to_string(),
+        "-color_range".to_string(),
+        "tv".to_string(),
+    ]);
+}
+
+struct PreviewSdrInputColor {
+    primaries: &'static str,
+    transfer: &'static str,
+    matrix: &'static str,
+    range: &'static str,
+}
+
+fn resolve_preview_sdr_input_color(
+    source_color: Option<&PreviewSourceColor>,
+) -> PreviewSdrInputColor {
+    let hdr_type = source_color
+        .and_then(|value| value.hdr_type.as_deref())
+        .map(normalize_color_token);
+
+    PreviewSdrInputColor {
+        primaries: source_color
+            .and_then(|value| value.primaries.as_deref())
+            .and_then(map_zscale_primaries)
+            .unwrap_or_else(|| fallback_primaries_for_hdr(hdr_type.as_deref())),
+        transfer: source_color
+            .and_then(|value| value.transfer.as_deref())
+            .and_then(map_zscale_transfer)
+            .unwrap_or_else(|| fallback_transfer_for_hdr(hdr_type.as_deref())),
+        matrix: source_color
+            .and_then(|value| value.matrix.as_deref())
+            .and_then(map_zscale_matrix)
+            .unwrap_or_else(|| fallback_matrix_for_hdr(hdr_type.as_deref())),
+        range: source_color
+            .and_then(|value| value.range.as_deref())
+            .and_then(map_zscale_range)
+            .unwrap_or("tv"),
+    }
+}
+
+fn normalize_color_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn map_zscale_primaries(value: &str) -> Option<&'static str> {
+    match normalize_color_token(value).as_str() {
+        "bt2020" | "bt2020nc" => Some("bt2020"),
+        "bt709" => Some("bt709"),
+        "smpte170m" => Some("smpte170m"),
+        "smpte240m" => Some("smpte240m"),
+        _ => None,
+    }
+}
+
+fn map_zscale_transfer(value: &str) -> Option<&'static str> {
+    match normalize_color_token(value).as_str() {
+        "smpte2084" | "pq" => Some("smpte2084"),
+        "aribstdb67" | "hlg" => Some("arib-std-b67"),
+        "bt709" => Some("bt709"),
+        "bt202010" => Some("bt2020-10"),
+        "bt202012" => Some("bt2020-12"),
+        _ => None,
+    }
+}
+
+fn map_zscale_matrix(value: &str) -> Option<&'static str> {
+    match normalize_color_token(value).as_str() {
+        "bt2020nc" | "bt2020ncl" | "2020ncl" => Some("bt2020nc"),
+        "bt2020c" | "2020cl" => Some("bt2020c"),
+        "bt709" => Some("bt709"),
+        "smpte170m" => Some("smpte170m"),
+        _ => None,
+    }
+}
+
+fn map_zscale_range(value: &str) -> Option<&'static str> {
+    match normalize_color_token(value).as_str() {
+        "tv" | "limited" | "mpeg" => Some("tv"),
+        "pc" | "full" | "jpeg" => Some("pc"),
+        _ => None,
+    }
+}
+
+fn fallback_primaries_for_hdr(hdr_type: Option<&str>) -> &'static str {
+    match hdr_type {
+        Some("hdr10" | "hlg") => "bt2020",
+        _ => "bt709",
+    }
+}
+
+fn fallback_transfer_for_hdr(hdr_type: Option<&str>) -> &'static str {
+    match hdr_type {
+        Some("hlg") => "arib-std-b67",
+        Some("hdr10") => "smpte2084",
+        _ => "bt709",
+    }
+}
+
+fn fallback_matrix_for_hdr(hdr_type: Option<&str>) -> &'static str {
+    match hdr_type {
+        Some("hdr10" | "hlg") => "bt2020nc",
+        _ => "bt709",
+    }
 }
 
 fn append_frame_output_args(args: &mut Vec<String>) {
@@ -446,6 +777,23 @@ fn contains_positional_output_token(tokens: &[String]) -> bool {
 }
 
 fn sanitize_advanced_args(raw: Option<&str>, warnings: &mut Vec<String>) -> Option<String> {
+    sanitize_advanced_args_with(raw, warnings, is_structured_conflict_flag)
+}
+
+fn sanitize_preview_advanced_args(raw: Option<&str>, warnings: &mut Vec<String>) -> Option<String> {
+    sanitize_advanced_args_with(raw, warnings, |flag| {
+        is_structured_conflict_flag(flag) || is_preview_conflict_flag(flag)
+    })
+}
+
+fn sanitize_advanced_args_with<F>(
+    raw: Option<&str>,
+    warnings: &mut Vec<String>,
+    is_conflict_flag: F,
+) -> Option<String>
+where
+    F: Fn(&str) -> bool,
+{
     let Some(raw) = raw else {
         return None;
     };
@@ -461,7 +809,7 @@ fn sanitize_advanced_args(raw: Option<&str>, warnings: &mut Vec<String>) -> Opti
     while i < tokens.len() {
         let token = &tokens[i];
 
-        if is_structured_conflict_flag(token) {
+        if is_conflict_flag(token) {
             warnings.push(format!(
                 "advancedArgs 中的 {token} 被忽略（结构化参数优先）"
             ));
@@ -536,6 +884,14 @@ fn is_structured_conflict_flag(flag: &str) -> bool {
             | "-movflags"
             | "-pass"
             | "-passlogfile"
+    )
+}
+
+fn is_preview_conflict_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        // DV 元数据保留需要完整 profile 上下文，单帧预览路径必须强制移除。
+        "-dolbyvision"
     )
 }
 
@@ -636,10 +992,12 @@ mod tests {
         AudioConfig, AudioMode, ClipRange, ContainerConfig, ContainerFormat, OutputConfig,
         TaskConfigPayload, VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
     };
+    use crate::probe::video_metadata::{HdrType, VideoStreamMetadata};
 
     use super::{
-        build_ffmpeg_commands, build_preview_encoded_frame_command_args,
-        build_source_frame_command_args, PreviewCommandOptions,
+        build_ffmpeg_command_args, build_ffmpeg_commands, build_preview_encoded_frame_command_args,
+        build_source_frame_command_args, validate_dolby_vision_preserve_source,
+        PreviewCommandOptions, PreviewSdrTonemapMode, PreviewSourceColor,
     };
 
     fn payload() -> TaskConfigPayload {
@@ -677,6 +1035,38 @@ mod tests {
                 location: None,
             },
         }
+    }
+
+    #[test]
+    fn dolby_vision_preserve_source_validation_should_reject_profile_5_compat_0() {
+        let video = VideoStreamMetadata {
+            codec_name: Some("hevc".to_string()),
+            codec_long_name: None,
+            profile: Some("Main 10".to_string()),
+            width: Some(3840),
+            height: Some(1616),
+            pix_fmt: Some("yuv420p10le".to_string()),
+            fps: Some(24.0),
+            bit_rate_kbps: None,
+            size_bytes: None,
+            color_primaries: None,
+            color_transfer: None,
+            color_space: None,
+            color_range: Some("pc".to_string()),
+            bit_depth: Some(10),
+            hdr_type: Some(HdrType::DolbyVision),
+            dolby_vision_profile: Some(5),
+            dolby_vision_compatibility_id: Some(0),
+            max_content_light_level: None,
+            max_frame_average_light_level: None,
+            mastering_display_max_luminance: None,
+            mastering_display_min_luminance: None,
+        };
+
+        let err = validate_dolby_vision_preserve_source(Some(&video))
+            .expect_err("profile 5 compatibility 0 should be rejected");
+
+        assert!(err.to_string().contains("source profile 5 compatibility 0"));
     }
 
     #[test]
@@ -762,6 +1152,21 @@ mod tests {
     }
 
     #[test]
+    fn formal_command_should_keep_manual_dolby_vision_advanced_arg() {
+        let mut value = payload();
+        value.video.codec_format = VideoCodecFormat::H265;
+        value.video.encoder = VideoEncoder::Libx265;
+        value.advanced_args = Some("-dolbyvision 1".to_string());
+
+        let commands = build_ffmpeg_command_args(&value, "input.mov", "output.mkv").expect("build");
+        let args = &commands[0];
+
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-dolbyvision" && item[1] == "1"));
+    }
+
+    #[test]
     fn av1_vp9_strategy_warnings_exist_for_cbr_abr() {
         let mut value = payload();
         value.video.codec_format = VideoCodecFormat::Av1;
@@ -813,6 +1218,8 @@ mod tests {
             PreviewCommandOptions {
                 time_sec: 1.0,
                 render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
+                source_color: None,
             },
         )
         .expect("preview args");
@@ -841,6 +1248,152 @@ mod tests {
     }
 
     #[test]
+    fn build_preview_encoded_frame_command_should_scale_when_keeping_source_resolution() {
+        let args = build_preview_encoded_frame_command_args(
+            &payload(),
+            "input.mkv",
+            "preview.mkv",
+            PreviewCommandOptions {
+                time_sec: 1.0,
+                render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
+                source_color: None,
+            },
+        )
+        .expect("preview args");
+
+        assert!(args.windows(2).any(|item| {
+            item[0] == "-vf" && item[1] == "scale=trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2"
+        }));
+    }
+
+    #[test]
+    fn build_preview_encoded_frame_command_should_tonemap_hdr_to_sdr() {
+        let args = build_preview_encoded_frame_command_args(
+            &payload(),
+            "input.mkv",
+            "preview.mkv",
+            PreviewCommandOptions {
+                time_sec: 1.0,
+                render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Zscale,
+                source_color: Some(PreviewSourceColor {
+                    hdr_type: Some("Hdr10".to_string()),
+                    primaries: Some("bt2020".to_string()),
+                    transfer: Some("smpte2084".to_string()),
+                    matrix: Some("bt2020nc".to_string()),
+                    range: Some("tv".to_string()),
+                }),
+            },
+        )
+        .expect("preview args");
+
+        let filter = args
+            .windows(2)
+            .find_map(|item| (item[0] == "-vf").then_some(item[1].as_str()))
+            .expect("preview filter");
+
+        assert!(filter.contains("tonemap=tonemap=mobius:param=0.3:desat=1"));
+        assert!(filter.contains(
+            "zscale=primariesin=bt2020:transferin=smpte2084:matrixin=bt2020nc:rangein=tv:primaries=bt2020:transfer=linear"
+        ));
+        assert!(filter.contains("format=gbrpf32le,tonemap=tonemap=mobius"));
+        assert!(filter.contains("zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=tv"));
+        assert!(filter.contains("format=yuv420p"));
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-color_primaries" && item[1] == "bt709"));
+    }
+
+    #[test]
+    fn build_preview_encoded_frame_command_should_fallback_hlg_input_color() {
+        let args = build_preview_encoded_frame_command_args(
+            &payload(),
+            "input.mkv",
+            "preview.mkv",
+            PreviewCommandOptions {
+                time_sec: 1.0,
+                render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Zscale,
+                source_color: Some(PreviewSourceColor {
+                    hdr_type: Some("Hlg".to_string()),
+                    primaries: None,
+                    transfer: None,
+                    matrix: None,
+                    range: None,
+                }),
+            },
+        )
+        .expect("preview args");
+
+        let filter = args
+            .windows(2)
+            .find_map(|item| (item[0] == "-vf").then_some(item[1].as_str()))
+            .expect("preview filter");
+
+        assert!(filter.contains(
+            "zscale=primariesin=bt2020:transferin=arib-std-b67:matrixin=bt2020nc:rangein=tv:primaries=bt2020:transfer=linear"
+        ));
+    }
+
+    #[test]
+    fn build_preview_encoded_frame_command_should_use_libplacebo_for_dolby_vision_sdr() {
+        let args = build_preview_encoded_frame_command_args(
+            &payload(),
+            "input.mkv",
+            "preview.mkv",
+            PreviewCommandOptions {
+                time_sec: 1.0,
+                render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Libplacebo,
+                source_color: Some(PreviewSourceColor {
+                    hdr_type: Some("DolbyVision".to_string()),
+                    primaries: Some("bt2020".to_string()),
+                    transfer: Some("smpte2084".to_string()),
+                    matrix: Some("bt2020nc".to_string()),
+                    range: Some("tv".to_string()),
+                }),
+            },
+        )
+        .expect("preview args");
+
+        let filter = args
+            .windows(2)
+            .find_map(|item| (item[0] == "-vf").then_some(item[1].as_str()))
+            .expect("preview filter");
+
+        assert!(filter.contains("libplacebo=colorspace=bt709"));
+        assert!(filter.contains("apply_dolbyvision=true"));
+        assert!(filter.contains("format=yuv420p"));
+        assert!(!filter.contains("zscale="));
+        assert!(!filter.contains("tonemap=tonemap"));
+    }
+
+    #[test]
+    fn build_preview_encoded_frame_command_should_disable_dolby_vision_metadata() {
+        let mut value = payload();
+        value.video.codec_format = VideoCodecFormat::H265;
+        value.video.encoder = VideoEncoder::Libx265;
+        value.video.preserve_dolby_vision_metadata = Some(true);
+        value.advanced_args = Some("-dolbyvision 1".to_string());
+
+        let args = build_preview_encoded_frame_command_args(
+            &value,
+            "input.mov",
+            "preview.mkv",
+            PreviewCommandOptions {
+                time_sec: 1.0,
+                render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
+                source_color: None,
+            },
+        )
+        .expect("preview args");
+
+        assert!(!args.iter().any(|item| item == "-dolbyvision"));
+    }
+
+    #[test]
     fn build_source_frame_command_should_output_single_png_frame() {
         let args = build_source_frame_command_args(
             "input.mov",
@@ -848,6 +1401,8 @@ mod tests {
             PreviewCommandOptions {
                 time_sec: 0.0,
                 render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
+                source_color: None,
             },
         )
         .expect("source frame args");
@@ -855,7 +1410,44 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|item| item[0] == "-frames:v" && item[1] == "1"));
+        assert!(args.windows(2).any(|item| {
+            item[0] == "-vf" && item[1] == "scale=trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2"
+        }));
         assert!(!args.iter().any(|item| item == "-c:v"));
         assert_eq!(args.last().map(String::as_str), Some("source.png"));
+    }
+
+    #[test]
+    fn build_source_frame_command_should_tonemap_hdr_to_sdr_image() {
+        let args = build_source_frame_command_args(
+            "input.mov",
+            "source.png",
+            PreviewCommandOptions {
+                time_sec: 0.0,
+                render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Zscale,
+                source_color: Some(PreviewSourceColor {
+                    hdr_type: Some("Hdr10".to_string()),
+                    primaries: Some("bt2020".to_string()),
+                    transfer: Some("smpte2084".to_string()),
+                    matrix: Some("bt2020nc".to_string()),
+                    range: Some("tv".to_string()),
+                }),
+            },
+        )
+        .expect("source frame args");
+
+        let filter = args
+            .windows(2)
+            .find_map(|item| (item[0] == "-vf").then_some(item[1].as_str()))
+            .expect("source filter");
+
+        assert!(filter.contains("tonemap=tonemap=mobius:param=0.3:desat=1"));
+        assert!(filter.contains(
+            "zscale=primariesin=bt2020:transferin=smpte2084:matrixin=bt2020nc:rangein=tv:primaries=bt2020:transfer=linear"
+        ));
+        assert!(filter.contains("format=gbrpf32le,tonemap=tonemap=mobius"));
+        assert!(filter.contains("zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=tv"));
+        assert!(filter.contains("format=rgb24"));
     }
 }

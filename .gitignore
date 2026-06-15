@@ -29,6 +29,8 @@ coverage
 # Tauri / Rust
 src-tauri/target
 src-tauri/.cargo
+src-tauri/ffmpeg-runtime/*
+!src-tauri/ffmpeg-runtime/.gitkeep
 
 # Editor directories and files
 .vscode/*

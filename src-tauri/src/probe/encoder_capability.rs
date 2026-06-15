@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::process::Command;
+
+use crate::ffmpeg_runtime::ffmpeg_command;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,7 +135,7 @@ fn presets_for(encoder: &str) -> Vec<String> {
 }
 
 fn query_encoders() -> Result<String, std::io::Error> {
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(["-hide_banner", "-encoders"])
         .output()?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())

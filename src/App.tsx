@@ -9,9 +9,11 @@ import { JobsPage } from "./pages/JobsPage";
 import { DetachedPreviewPage } from "./pages/DetachedPreviewPage";
 import { PreviewPage } from "./pages/PreviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { SourceSelectPage } from "./pages/SourceSelectPage";
 import { TaskConfigPage } from "./pages/TaskConfigPage";
 import { TemplatesPage } from "./pages/TemplatesPage";
 import { useI18n } from "./i18n/I18nProvider";
+import { isTauriRuntime } from "./lib/tauriRuntime";
 import type {
   AppSettings,
   CreateTaskResponse,
@@ -22,15 +24,21 @@ import type {
   JobMetricsEvent,
   SaveTemplateResponse,
   TaskConfig,
+  TaskDraftSnapshot,
   Template,
 } from "./types/workbench";
 
-function buildSeedPayload(suffix: string) {
+/**
+ * 构造最小可用的任务参数快照，供样例数据和浏览器预览态复用。
+ * @param suffix 样例任务名称后缀
+ * @returns 任务草稿快照
+ */
+function buildSeedPayload(suffix: string): TaskDraftSnapshot {
   return {
     name: `demo-task-${suffix}`,
     video: {
-      codecFormat: "h264",
-      encoder: "libx264",
+      codecFormat: "h265",
+      encoder: "libx265",
       bitrateMode: "CRF",
       crf: 23,
       preset: "medium",
@@ -43,6 +51,106 @@ function buildSeedPayload(suffix: string) {
       dir: "",
       fileNamePattern: "{inputName}_{taskName}",
       overwrite: "autoRename",
+    },
+  };
+}
+
+/**
+ * 普通浏览器预览态的数据，专用于设计 QA 和前端首屏验证。
+ * @returns 不依赖 Tauri 命令的前端示例数据
+ */
+function buildBrowserPreviewState(): {
+  settings: AppSettings;
+  jobs: JobHistory[];
+  templates: Template[];
+  ffmpegProbe: FfmpegProbeResult;
+  encoderCapabilities: EncoderCapabilityResult;
+} {
+  return {
+    settings: {
+      concurrencyN: 2,
+      ffmpegStrategy: "bundled",
+      defaultOutputDir: "/Users/encode-lab/Encode Lab/Outputs",
+      thumbnailMode: "local",
+    },
+    jobs: [
+      {
+        id: "demo-completed-1",
+        taskId: "demo-task-1",
+        name: "Interview_final.mp4",
+        inputFile: "/Users/encode-lab/Interview.mov",
+        outputFile: "/Users/encode-lab/Encode Lab/Outputs/Interview_final.mp4",
+        status: "completed",
+        sizeChangePercent: -87,
+        createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
+        endedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      },
+      {
+        id: "demo-completed-2",
+        taskId: "demo-task-2",
+        name: "Broll_sequence.mp4",
+        inputFile: "/Users/encode-lab/Broll.mov",
+        outputFile: "/Users/encode-lab/Encode Lab/Outputs/Broll_sequence.mp4",
+        status: "completed",
+        sizeChangePercent: -82,
+        createdAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
+        endedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      },
+    ],
+    templates: [
+      {
+        id: "browser-publish-plan",
+        name: "线上发布副本",
+        tags: ["web", "balanced"],
+        version: 1,
+        taskConfigSnapshot: buildSeedPayload("publish"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastUsedAt: new Date().toISOString(),
+      },
+    ],
+    ffmpegProbe: {
+      ffmpegFound: true,
+      ffprobeFound: true,
+      ffmpegPath: "/usr/local/bin/ffmpeg",
+      ffprobePath: "/usr/local/bin/ffprobe",
+      version: "ffmpeg 7.x browser preview",
+      dolbyVision: {
+        supportsDoviRpu: true,
+        supportsDolbyVisionEncode: false,
+        supportsPreservePipeline: false,
+        supportedEncoders: ["libx265"],
+        recommendedEncoder: "libx265",
+      },
+    },
+    encoderCapabilities: {
+      source: "runtime_probe",
+      items: [
+        {
+          codecFormat: "h264",
+          encoder: "libx264",
+          available: true,
+          supportsTwoPass: true,
+          supportsCrf: true,
+          displayName: "H.264 / libx264",
+          description: "Reliable compatibility for online publishing.",
+          speedLevel: "balanced",
+          qualityLevel: "high",
+          presets: ["fast", "medium", "slow"],
+        },
+        {
+          codecFormat: "h265",
+          encoder: "libx265",
+          available: true,
+          supportsTwoPass: true,
+          supportsCrf: true,
+          displayName: "H.265 / libx265",
+          description: "Smaller files with high visual quality.",
+          speedLevel: "balanced",
+          qualityLevel: "high",
+          presets: ["fast", "medium", "slow"],
+        },
+      ],
     },
   };
 }
@@ -101,7 +209,7 @@ function AppRoutes({
 
   const navItems = useMemo(
     () => [
-      { label: t("nav.workbench"), to: "/task-config" },
+      { label: t("nav.workbench"), to: "/source" },
       { label: t("nav.presets"), to: "/templates" },
       { label: t("nav.jobs"), to: "/jobs" },
       { label: t("nav.settings"), to: "/settings" },
@@ -111,6 +219,16 @@ function AppRoutes({
 
   const pageMeta = useMemo(() => {
     switch (location.pathname) {
+      case "/source":
+        return {
+          title: t("app.workbench.title"),
+          description: t("app.workbench.sourceDescription"),
+        };
+      case "/task-config":
+        return {
+          title: t("app.workbench.title"),
+          description: t("app.workbench.configDescription"),
+        };
       case "/preview":
         return {
           title: t("app.workbench.title"),
@@ -134,10 +252,12 @@ function AppRoutes({
       default:
         return {
           title: t("app.workbench.title"),
-          description: t("app.workbench.description"),
+          description: t("app.workbench.sourceDescription"),
         };
     }
   }, [location.pathname, t]);
+
+  const hasSourceFile = sourceFilePath.trim().length > 0;
 
   const filteredEncoders = useMemo(
     () => (encoderCapabilities?.items ?? []).filter((item) => item.codecFormat === formCodec),
@@ -156,6 +276,10 @@ function AppRoutes({
   }, [filteredEncoders, formEncoder, setFormEncoder]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
     let disposeNavigate: (() => void) | undefined;
     void listen<string>("app:navigate", (event) => {
       // 后端只下发内部路由目标，具体跳转保持在 React Router 边界内完成。
@@ -172,6 +296,11 @@ function AppRoutes({
   }, [navigate]);
 
   useEffect(() => {
+    if (!selectedEncoderCapability) {
+      // 能力探测尚未返回时不改写草稿，避免默认 CRF/medium 被空状态覆盖。
+      return;
+    }
+
     if (!selectedEncoderCapability?.supportsTwoPass && formTwoPass) {
       setFormTwoPass(false);
     }
@@ -182,7 +311,12 @@ function AppRoutes({
       selectedEncoderCapability?.presets?.length &&
       !selectedEncoderCapability.presets.includes(formPreset)
     ) {
-      setFormPreset(selectedEncoderCapability.presets[0]);
+      // preset 不兼容当前编码器时优先回到中等档，避免默认落到 ultrafast。
+      setFormPreset(
+        selectedEncoderCapability.presets.includes("medium")
+          ? "medium"
+          : selectedEncoderCapability.presets[0],
+      );
     }
     if (!selectedEncoderCapability?.presets?.length) {
       setFormPreset("");
@@ -203,6 +337,11 @@ function AppRoutes({
   const enqueueCurrentDraft = useCallback(async () => {
     if (!sourceFilePath) {
       return;
+    }
+
+    if (!isTauriRuntime()) {
+      // 浏览器预览态没有后端队列，直接给调用方一个可展示的明确错误。
+      throw new Error("浏览器预览模式不会发送真实转码任务，请在桌面应用中执行。");
     }
 
     await invoke<EnqueueTranscodeJobResponse>("enqueue_transcode_job", {
@@ -226,6 +365,7 @@ function AppRoutes({
       onSeed={onSeed}
       loading={loading}
       seeding={seeding}
+      compactHeader={location.pathname === "/source" || location.pathname === "/task-config" || location.pathname === "/preview"}
     >
       <div className="space-y-4">
         {error ? (
@@ -244,21 +384,29 @@ function AppRoutes({
 
         <Routes>
           <Route
+            path="/source"
+            element={<SourceSelectPage onContinue={() => navigate("/task-config")} />}
+          />
+          <Route
             path="/task-config"
-            element={
+            element={hasSourceFile ? (
               <TaskConfigPage
                 filteredEncoders={filteredEncoders}
                 selectedEncoderCapability={selectedEncoderCapability}
                 ffmpegProbe={ffmpegProbe}
+                onBackSource={() => navigate("/source")}
                 onGoPreview={() => navigate("/preview")}
                 onTemplatesChanged={onRefresh}
               />
-            }
+            ) : (
+              <Navigate to="/source" replace />
+            )}
           />
           <Route
             path="/preview"
-            element={
+            element={hasSourceFile ? (
               <PreviewPage
+                jobs={jobs}
                 splitMode={splitMode}
                 setSplitMode={setSplitMode}
                 splitterPosition={splitterPosition}
@@ -266,9 +414,14 @@ function AppRoutes({
                 compareOrder={compareOrder}
                 setCompareOrder={setCompareOrder}
                 onBackConfig={() => navigate("/task-config")}
+                onBackSource={() => navigate("/source")}
+                onOpenTemplates={() => navigate("/templates")}
+                onOpenJobs={() => navigate("/jobs")}
                 onEnqueue={enqueueCurrentDraft}
               />
-            }
+            ) : (
+              <Navigate to="/source" replace />
+            )}
           />
           <Route
             path="/jobs"
@@ -284,13 +437,13 @@ function AppRoutes({
                 onTemplatesChanged={onRefresh}
                 onApplyTemplate={(template) => {
                   applyTemplateSnapshot(template.taskConfigSnapshot);
-                  navigate("/task-config");
+                  navigate(hasSourceFile ? "/task-config" : "/source");
                 }}
               />
             }
           />
           <Route path="/settings" element={<SettingsPage settings={settings} ffmpegProbe={ffmpegProbe} />} />
-          <Route path="*" element={<Navigate to="/task-config" replace />} />
+          <Route path="*" element={<Navigate to="/source" replace />} />
         </Routes>
       </div>
     </WorkbenchLayout>
@@ -315,6 +468,17 @@ function WorkbenchApp() {
     setLoading(true);
     setError(null);
     try {
+      if (!isTauriRuntime()) {
+        const browserPreviewState = buildBrowserPreviewState();
+        setSettings(browserPreviewState.settings);
+        setTasks([]);
+        setJobs(browserPreviewState.jobs);
+        setTemplates(browserPreviewState.templates);
+        setFfmpegProbe(browserPreviewState.ffmpegProbe);
+        setEncoderCapabilities(browserPreviewState.encoderCapabilities);
+        return;
+      }
+
       const [settingsResult, tasksResult, jobsResult, templatesResult, ffmpegProbeResult, encoderCapabilitiesResult] =
         await Promise.all([
           invoke<AppSettings>("get_settings"),
@@ -343,6 +507,11 @@ function WorkbenchApp() {
     setError(null);
     setSeedMessage(null);
     try {
+      if (!isTauriRuntime()) {
+        setSeedMessage("浏览器预览模式使用内置样例数据，不会写入桌面任务或方案。");
+        return;
+      }
+
       const suffix = Date.now().toString();
       const payload = buildSeedPayload(suffix);
       const createResult = await invoke<CreateTaskResponse>("create_task", { payload });
@@ -367,6 +536,10 @@ function WorkbenchApp() {
   }, [fetchAll]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
     let disposeUpdated: (() => void) | undefined;
     let disposeMetrics: (() => void) | undefined;
     void listen<JobHistory>("job:updated", () => {

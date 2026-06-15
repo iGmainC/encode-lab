@@ -3,10 +3,10 @@ use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap},
     path::Path,
-    process::Command,
 };
 
 use crate::commands::error::CommandError;
+use crate::ffmpeg_runtime::{ffprobe_command, resolve_ffprobe_path};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,8 +37,11 @@ pub struct VideoStreamMetadata {
     pub color_primaries: Option<String>,
     pub color_transfer: Option<String>,
     pub color_space: Option<String>,
+    pub color_range: Option<String>,
     pub bit_depth: Option<u8>,
     pub hdr_type: Option<HdrType>,
+    pub dolby_vision_profile: Option<u8>,
+    pub dolby_vision_compatibility_id: Option<u8>,
     pub max_content_light_level: Option<u32>,
     pub max_frame_average_light_level: Option<u32>,
     pub mastering_display_max_luminance: Option<f64>,
@@ -95,6 +98,7 @@ struct FfprobeStream {
     color_primaries: Option<String>,
     color_transfer: Option<String>,
     color_space: Option<String>,
+    color_range: Option<String>,
     channels: Option<u32>,
     sample_rate: Option<String>,
     channel_layout: Option<String>,
@@ -148,7 +152,7 @@ pub fn read_video_track_size_bytes(input_file: &str) -> Result<u64, CommandError
         ));
     }
 
-    let output = Command::new("ffprobe")
+    let output = ffprobe_command()
         .args([
             "-v",
             "error",
@@ -172,15 +176,11 @@ pub fn read_video_track_size_bytes(input_file: &str) -> Result<u64, CommandError
 }
 
 fn ffprobe_exists() -> bool {
-    Command::new("which")
-        .arg("ffprobe")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    resolve_ffprobe_path().is_some()
 }
 
 fn run_ffprobe(input_file: &str) -> Result<String, CommandError> {
-    let output = Command::new("ffprobe")
+    let output = ffprobe_command()
         .args([
             "-v",
             "error",
@@ -271,6 +271,7 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         });
 
     let hdr_type = detect_hdr_type(stream);
+    let (dolby_vision_profile, dolby_vision_compatibility_id) = extract_dolby_vision_config(stream);
     let (max_content_light_level, max_frame_average_light_level) =
         extract_content_light_level(stream);
     let (mastering_display_max_luminance, mastering_display_min_luminance) =
@@ -293,8 +294,11 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         color_primaries: stream.color_primaries.clone(),
         color_transfer: stream.color_transfer.clone(),
         color_space: stream.color_space.clone(),
+        color_range: stream.color_range.clone(),
         bit_depth,
         hdr_type: Some(hdr_type),
+        dolby_vision_profile,
+        dolby_vision_compatibility_id,
         max_content_light_level,
         max_frame_average_light_level,
         mastering_display_max_luminance,
@@ -454,6 +458,33 @@ fn contains_dolby_vision_hint(stream: &FfprobeStream) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
+/// 从 ffprobe side data 中读取 Dolby Vision profile 与兼容层标识。
+fn extract_dolby_vision_config(stream: &FfprobeStream) -> (Option<u8>, Option<u8>) {
+    let Some(side_data_list) = &stream.side_data_list else {
+        return (None, None);
+    };
+
+    for side_data in side_data_list {
+        let side_data_type = side_data
+            .get("side_data_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_lowercase();
+
+        if !side_data_type.contains("dovi") && !side_data_type.contains("dolby vision") {
+            continue;
+        }
+
+        // ffprobe 的 DOVI 字段用于判断当前 libx265 保留链路是否适配源片。
+        return (
+            read_u8_side_data(side_data, "dv_profile"),
+            read_u8_side_data(side_data, "dv_bl_signal_compatibility_id"),
+        );
+    }
+
+    (None, None)
+}
+
 fn extract_content_light_level(stream: &FfprobeStream) -> (Option<u32>, Option<u32>) {
     let Some(side_data_list) = &stream.side_data_list else {
         return (None, None);
@@ -516,6 +547,10 @@ fn read_u32_side_data(side_data: &Value, key: &str) -> Option<u32> {
         .as_u64()
         .and_then(|number| u32::try_from(number).ok())
         .or_else(|| value.as_str().and_then(parse_u32_string))
+}
+
+fn read_u8_side_data(side_data: &Value, key: &str) -> Option<u8> {
+    read_u32_side_data(side_data, key).and_then(|value| u8::try_from(value).ok())
 }
 
 fn read_f64_side_data(side_data: &Value, key: &str) -> Option<f64> {
@@ -675,6 +710,7 @@ mod tests {
             color_primaries: Some("bt2020".to_string()),
             color_transfer: Some("smpte2084".to_string()),
             color_space: None,
+            color_range: None,
             channels: None,
             sample_rate: None,
             channel_layout: None,
@@ -709,6 +745,7 @@ mod tests {
             color_primaries: None,
             color_transfer: None,
             color_space: None,
+            color_range: None,
             channels: None,
             sample_rate: None,
             channel_layout: None,
@@ -737,6 +774,7 @@ mod tests {
             color_primaries: None,
             color_transfer: None,
             color_space: None,
+            color_range: None,
             channels: None,
             sample_rate: None,
             channel_layout: None,
@@ -762,8 +800,11 @@ mod tests {
             color_primaries: Some("bt2020".to_string()),
             color_transfer: Some("smpte2084".to_string()),
             color_space: None,
+            color_range: Some("tv".to_string()),
             bit_depth: Some(10),
             hdr_type: Some(HdrType::Hdr10),
+            dolby_vision_profile: None,
+            dolby_vision_compatibility_id: None,
             max_content_light_level: Some(1000),
             max_frame_average_light_level: Some(400),
             mastering_display_max_luminance: Some(1000.0),
@@ -776,6 +817,42 @@ mod tests {
         assert!(tags.contains(&"10-bit".to_string()));
         assert!(tags.contains(&"4K".to_string()));
         assert!(tags.contains(&"MP4/MOV".to_string()));
+    }
+
+    #[test]
+    fn dolby_vision_config_should_extract_profile_and_compatibility() {
+        let stream = FfprobeStream {
+            codec_type: Some("video".to_string()),
+            codec_name: Some("hevc".to_string()),
+            codec_long_name: None,
+            codec_tag_string: None,
+            profile: None,
+            width: None,
+            height: None,
+            pix_fmt: Some("yuv420p10le".to_string()),
+            avg_frame_rate: None,
+            r_frame_rate: None,
+            bit_rate: None,
+            bits_per_raw_sample: None,
+            color_primaries: None,
+            color_transfer: None,
+            color_space: None,
+            color_range: None,
+            channels: None,
+            sample_rate: None,
+            channel_layout: None,
+            side_data_list: Some(vec![serde_json::json!({
+                "side_data_type": "DOVI configuration record",
+                "dv_profile": 5,
+                "dv_bl_signal_compatibility_id": 0
+            })]),
+            tags: None,
+        };
+
+        let video = map_video_stream(&stream);
+
+        assert_eq!(video.dolby_vision_profile, Some(5));
+        assert_eq!(video.dolby_vision_compatibility_id, Some(0));
     }
 
     #[test]
@@ -796,6 +873,7 @@ mod tests {
             color_primaries: Some("bt2020".to_string()),
             color_transfer: Some("smpte2084".to_string()),
             color_space: Some("bt2020nc".to_string()),
+            color_range: Some("tv".to_string()),
             channels: None,
             sample_rate: None,
             channel_layout: None,

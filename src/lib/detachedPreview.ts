@@ -2,6 +2,7 @@ import type {
   CompareImageOrder,
   ComparePreviewFrameSnapshot,
   TaskDraftSnapshot,
+  VideoStreamMetadata,
 } from "../types/workbench";
 
 /** 独立预览窗口读取的本地快照 key。 */
@@ -16,6 +17,16 @@ export type DetachedPreviewPayload = {
   sourceFile: string;
   /** 源视频时长，单位秒 */
   sourceDurationSec?: number;
+  /** 源视频 HDR 类型；独立窗口重建预览 session 时继续保持 SDR 映射策略。 */
+  sourceHdrType?: VideoStreamMetadata["hdrType"];
+  /** 源视频色彩原色；独立窗口重建普通 HDR fallback 映射时继续固定 zscale 输入端。 */
+  sourceColorPrimaries?: VideoStreamMetadata["colorPrimaries"];
+  /** 源视频传递函数；独立窗口重建普通 HDR fallback 映射时继续固定 zscale 输入端。 */
+  sourceColorTransfer?: VideoStreamMetadata["colorTransfer"];
+  /** 源视频色彩矩阵；独立窗口重建普通 HDR fallback 映射时继续固定 zscale 输入端。 */
+  sourceColorSpace?: VideoStreamMetadata["colorSpace"];
+  /** 源视频色彩范围；独立窗口重建普通 HDR fallback 映射时继续固定 zscale 输入端。 */
+  sourceColorRange?: VideoStreamMetadata["colorRange"];
   /** 当前任务参数快照 */
   taskDraftSnapshot: TaskDraftSnapshot;
   /** 分割线方向 */

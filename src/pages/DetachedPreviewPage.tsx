@@ -16,6 +16,8 @@ const emptyRuntime: ComparePreviewRuntime = {
   estimatedTranscodeSpeed: undefined,
   previewError: undefined,
   degradedFromTwoPass: false,
+  degradedFromDolbyVision: false,
+  degradedFromSdrTonemap: false,
   currentTimeSec: 0,
   durationSec: 0,
   isFullscreen: true,
@@ -126,6 +128,11 @@ export function DetachedPreviewPage() {
     <ComparePreviewPlayer
       sourceFile={payload.sourceFile}
       sourceDurationSec={payload.sourceDurationSec}
+      sourceHdrType={payload.sourceHdrType}
+      sourceColorPrimaries={payload.sourceColorPrimaries}
+      sourceColorTransfer={payload.sourceColorTransfer}
+      sourceColorSpace={payload.sourceColorSpace}
+      sourceColorRange={payload.sourceColorRange}
       taskDraftSnapshot={payload.taskDraftSnapshot}
       splitMode={splitMode}
       splitterPosition={splitterPosition}

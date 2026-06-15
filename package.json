@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "prepare:ffmpeg": "bun scripts/prepare-ffmpeg-runtime.ts",
     "release:version": "bun scripts/resolve-release-version.ts"
   },
   "dependencies": {

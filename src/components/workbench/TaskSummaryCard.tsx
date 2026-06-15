@@ -10,6 +10,7 @@ type Props = {
   mode: string;
   twoPass: boolean;
   preserveDolbyVisionMetadata?: boolean;
+  compact?: boolean;
 };
 
 export function TaskSummaryCard({
@@ -19,17 +20,24 @@ export function TaskSummaryCard({
   mode,
   twoPass,
   preserveDolbyVisionMetadata,
+  compact = false,
 }: Props) {
   const { t } = useI18n();
+  const metricClassName = compact
+    ? "rounded-lg border bg-background p-2.5"
+    : "rounded-lg border bg-background p-3";
+  const metricValueClassName = compact ? "mt-0.5 truncate text-sm font-medium" : "mt-1 font-medium";
 
   return (
     <Card className="shadow-sm">
-      <CardHeader className="gap-1 p-4">
-        <CardTitle>{t("summary.title")}</CardTitle>
-        <CardDescription>{t("summary.description")}</CardDescription>
+      <CardHeader className={compact ? "gap-0.5 p-3" : "gap-1 p-4"}>
+        <CardTitle className={compact ? "text-base" : undefined}>{t("summary.title")}</CardTitle>
+        <CardDescription className={compact ? "text-xs leading-5" : undefined}>
+          {t("summary.description")}
+        </CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-col gap-4 p-4 pt-0">
-        <div className="flex flex-wrap gap-2">
+      <CardContent className={compact ? "flex flex-col gap-3 p-3 pt-0" : "flex flex-col gap-4 p-4 pt-0"}>
+        <div className={compact ? "flex flex-wrap gap-1.5" : "flex flex-wrap gap-2"}>
           <Badge variant="outline">{codec.toUpperCase()}</Badge>
           <Badge variant="outline">{encoder}</Badge>
           <Badge variant="outline">{mode}</Badge>
@@ -37,24 +45,24 @@ export function TaskSummaryCard({
           {preserveDolbyVisionMetadata ? <Badge variant="secondary">DV Preserve</Badge> : null}
         </div>
 
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <div className="rounded-lg border bg-background p-3">
+        <div className={compact ? "grid grid-cols-2 gap-2 text-xs" : "grid grid-cols-2 gap-3 text-sm"}>
+          <div className={metricClassName}>
             <div className="text-muted-foreground">{t("summary.source")}</div>
-            <div className="mt-1 font-medium">
+            <div className={metricValueClassName}>
               {videoMetadata?.video?.width ?? "-"} x {videoMetadata?.video?.height ?? "-"}
             </div>
           </div>
-          <div className="rounded-lg border bg-background p-3">
+          <div className={metricClassName}>
             <div className="text-muted-foreground">{t("summary.codec")}</div>
-            <div className="mt-1 font-medium">{videoMetadata?.video?.codecName ?? "-"}</div>
+            <div className={metricValueClassName}>{videoMetadata?.video?.codecName ?? "-"}</div>
           </div>
-          <div className="rounded-lg border bg-background p-3">
+          <div className={metricClassName}>
             <div className="text-muted-foreground">{t("summary.fps")}</div>
-            <div className="mt-1 font-medium">{videoMetadata?.video?.fps?.toFixed(2) ?? "-"}</div>
+            <div className={metricValueClassName}>{videoMetadata?.video?.fps?.toFixed(2) ?? "-"}</div>
           </div>
-          <div className="rounded-lg border bg-background p-3">
+          <div className={metricClassName}>
             <div className="text-muted-foreground">{t("summary.container")}</div>
-            <div className="mt-1 font-medium">{videoMetadata?.containerFormat ?? "-"}</div>
+            <div className={metricValueClassName}>{videoMetadata?.containerFormat ?? "-"}</div>
           </div>
         </div>
       </CardContent>

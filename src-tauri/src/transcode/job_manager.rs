@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -13,9 +13,9 @@ use chrono::Utc;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{
-    mark_open_jobs_on_notification_activate_if_hidden, models::JobHistory,
-    probe::video_metadata::read_video_track_size_bytes, refresh_tray_menu, storage::AppStorage,
-    transcode::command_builder::build_passlog_path,
+    ffmpeg_runtime::ffmpeg_command, mark_open_jobs_on_notification_activate_if_hidden,
+    models::JobHistory, probe::video_metadata::read_video_track_size_bytes, refresh_tray_menu,
+    storage::AppStorage, transcode::command_builder::build_passlog_path,
 };
 
 /** FFmpeg 子进程共享槽位，用于退出时从主线程中断后台进程。 */
@@ -515,7 +515,7 @@ fn run_ffmpeg_step<R: Runtime>(
     args: &[String],
     child_slot: &ChildSlot,
 ) -> Result<(), FfmpegStepError> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = ffmpeg_command()
         .args(progress_args(args))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

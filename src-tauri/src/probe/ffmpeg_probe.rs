@@ -1,5 +1,8 @@
 use serde::Serialize;
-use std::process::Command;
+
+use crate::ffmpeg_runtime::{
+    display_path, ffmpeg_command, resolve_ffmpeg_path, resolve_ffprobe_path,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,8 +26,8 @@ pub struct FfmpegProbeResult {
 }
 
 pub fn detect_ffmpeg_runtime() -> FfmpegProbeResult {
-    let ffmpeg_path = which_binary("ffmpeg");
-    let ffprobe_path = which_binary("ffprobe");
+    let ffmpeg_path = resolve_ffmpeg_path().map(|path| display_path(&path));
+    let ffprobe_path = resolve_ffprobe_path().map(|path| display_path(&path));
 
     let version = ffmpeg_path
         .as_ref()
@@ -57,34 +60,18 @@ impl DolbyVisionProbeResult {
     }
 }
 
-fn which_binary(name: &str) -> Option<String> {
-    let output = Command::new("which").arg(name).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
 fn query_ffmpeg_version() -> Result<String, std::io::Error> {
-    let output = Command::new("ffmpeg").arg("-version").output()?;
+    let output = ffmpeg_command().arg("-version").output()?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn query_ffmpeg_bsfs() -> Result<String, std::io::Error> {
-    let output = Command::new("ffmpeg")
-        .args(["-hide_banner", "-bsfs"])
-        .output()?;
+    let output = ffmpeg_command().args(["-hide_banner", "-bsfs"]).output()?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn query_encoder_help(encoder: &str) -> Result<String, std::io::Error> {
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(["-hide_banner", "-h", &format!("encoder={encoder}")])
         .output()?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())

@@ -17,6 +17,7 @@ type Props = {
   onSeed: () => void;
   loading: boolean;
   seeding: boolean;
+  compactHeader?: boolean;
   children: ReactNode;
 };
 
@@ -30,11 +31,12 @@ export function WorkbenchLayout({
   onSeed,
   loading,
   seeding,
+  compactHeader = false,
   children,
 }: Props) {
   return (
     <div className="h-screen overflow-hidden bg-background text-foreground">
-      <div className="flex h-full min-w-0 flex-col overflow-hidden bg-muted/20">
+      <div className="flex h-full min-w-0 flex-col overflow-hidden bg-muted/20 lg:flex-row">
         <TopStatusBar
           title={title}
           description={description}
@@ -47,7 +49,22 @@ export function WorkbenchLayout({
           seeding={seeding}
         />
         <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-          <div className="mx-auto w-full max-w-[1480px] px-4 py-4 md:px-6 lg:px-8">{children}</div>
+          <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-4 md:px-6 lg:px-8">
+            {!compactHeader ? (
+              <section className="flex min-w-0 flex-col gap-2 border-b pb-4">
+                <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground" translate="no">
+                  Encode Lab
+                </div>
+                <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+                  <div className="min-w-0">
+                    <h1 className="truncate text-2xl font-semibold tracking-tight">{title}</h1>
+                    <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+            {children}
+          </div>
         </main>
       </div>
     </div>
