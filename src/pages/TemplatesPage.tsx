@@ -27,6 +27,9 @@ type Props = {
 /** 当前正在执行的方案写操作。 */
 type PendingAction = "apply" | "duplicate" | "delete" | null;
 
+/** 当前国际化上下文暴露的翻译函数。 */
+type Translate = ReturnType<typeof useI18n>["t"];
+
 /**
  * 提供面向专业用户的参数方案列表和只读检查器。
  * @param props 页面数据、刷新回调和工作台应用回调
@@ -69,7 +72,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
       if (!desktopRuntime) {
         const template = templates.find((item) => item.id === templateId);
         if (!template) {
-          throw new Error("当前方案已不在列表中，请刷新后重试。");
+          throw new Error(t("presets.action.missing"));
         }
         onApplyTemplate(template);
         return;
@@ -79,7 +82,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
       onTemplatesChanged();
       onApplyTemplate(result.template);
     } catch (error) {
-      setActionError(`应用方案失败：${formatActionError(error)}`);
+      setActionError(t("presets.action.applyFailed", { message: formatActionError(error) }));
     } finally {
       setPendingAction(null);
     }
@@ -95,14 +98,14 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
     try {
       // 浏览器预览不模拟持久化写入，避免把演示态误认为真实方案数据。
       if (!desktopRuntime) {
-        setActionError("浏览器预览模式不会写入方案库，请在桌面应用中复制方案。");
+        setActionError(t("presets.action.copyBrowser"));
         return;
       }
 
       await invoke<DuplicateTemplateResponse>("duplicate_template", { templateId });
       onTemplatesChanged();
     } catch (error) {
-      setActionError(`复制方案失败：${formatActionError(error)}`);
+      setActionError(t("presets.action.copyFailed", { message: formatActionError(error) }));
     } finally {
       setPendingAction(null);
     }
@@ -122,7 +125,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
     try {
       // 浏览器预览不改写上层样例数据，删除必须由桌面端存储命令完成。
       if (!desktopRuntime) {
-        setActionError("浏览器预览模式不会写入方案库，请在桌面应用中删除方案。");
+        setActionError(t("presets.action.deleteBrowser"));
         return;
       }
 
@@ -130,7 +133,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
       setSelectedTemplateId((current) => (current === templateId ? null : current));
       onTemplatesChanged();
     } catch (error) {
-      setActionError(`删除方案失败：${formatActionError(error)}`);
+      setActionError(t("presets.action.deleteFailed", { message: formatActionError(error) }));
     } finally {
       setPendingAction(null);
     }
@@ -143,16 +146,16 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <CardTitle className="text-base">参数方案</CardTitle>
+                <CardTitle className="text-base">{t("presets.listTitle")}</CardTitle>
                 <Badge variant="secondary" className="font-mono font-medium">
                   {filteredTemplates.length}/{templates.length}
                 </Badge>
               </div>
-              <CardDescription className="mt-1">按最近使用排序；选择一行检查完整参数快照。</CardDescription>
+              <CardDescription className="mt-1">{t("presets.listDescription")}</CardDescription>
             </div>
 
             <label className="relative block w-full lg:w-[320px]">
-              <span className="sr-only">搜索方案名称或标签</span>
+              <span className="sr-only">{t("presets.searchLabel")}</span>
               <Search
                 className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
                 aria-hidden="true"
@@ -161,7 +164,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                 className="h-9 w-full rounded-lg border bg-background pl-9 pr-9 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
-                placeholder="搜索名称或标签"
+                placeholder={t("presets.searchPlaceholder")}
                 autoComplete="off"
               />
               {keyword ? (
@@ -169,7 +172,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                   type="button"
                   className="absolute right-1.5 top-1/2 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => setKeyword("")}
-                  aria-label="清除搜索"
+                  aria-label={t("presets.clearSearch")}
                 >
                   <X className="size-3.5" aria-hidden="true" />
                 </button>
@@ -181,13 +184,13 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <div className="hidden min-w-[850px] grid-cols-[minmax(210px,1.5fr)_130px_128px_108px_112px_78px_102px] gap-3 border-b bg-muted/30 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground lg:grid">
-              <div>方案 / Tags</div>
+              <div>{t("presets.column.presetTags")}</div>
               <div>Codec / Encoder</div>
               <div>Rate Control</div>
               <div>Preset</div>
               <div>Resolution</div>
               <div>Container</div>
-              <div>最近使用</div>
+              <div>{t("presets.column.recentUse")}</div>
             </div>
 
             <div className="min-w-0 divide-y lg:min-w-[850px]">
@@ -221,7 +224,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                             </Badge>
                           ))
                         ) : (
-                          <span className="text-xs text-muted-foreground">无标签</span>
+                          <span className="text-xs text-muted-foreground">{t("presets.noTags")}</span>
                         )}
                       </div>
                     </div>
@@ -237,12 +240,16 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                       secondary={template.taskConfigSnapshot.video.enableTwoPass ? "2-pass" : "1-pass"}
                       mono
                     />
-                    <TemplateListCell label="Preset" value={formatPreset(template)} mono />
-                    <TemplateListCell label="Resolution" value={formatResolution(template)} mono />
+                    <TemplateListCell label="Preset" value={formatPreset(template, t)} mono />
+                    <TemplateListCell label="Resolution" value={formatResolution(template, t)} mono />
                     <TemplateListCell label="Container" value={formatContainer(template)} mono />
                     <TemplateListCell
-                      label="最近使用"
-                      value={template.lastUsedAt ? formatCompactTimestamp(template.lastUsedAt, "-") : "从未使用"}
+                      label={t("presets.column.recentUse")}
+                      value={
+                        template.lastUsedAt
+                          ? formatCompactTimestamp(template.lastUsedAt, "-")
+                          : t("presets.neverUsed")
+                      }
                     />
                   </button>
                 );
@@ -251,8 +258,8 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
               {filteredTemplates.length === 0 ? (
                 <div className="flex min-h-52 flex-col items-center justify-center px-6 py-10 text-center">
                   <Search className="size-5 text-muted-foreground" aria-hidden="true" />
-                  <div className="mt-3 text-sm font-medium">没有匹配的参数方案</div>
-                  <div className="mt-1 text-xs text-muted-foreground">搜索范围仅包含方案名称和真实标签。</div>
+                  <div className="mt-3 text-sm font-medium">{t("presets.emptyTitle")}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">{t("presets.emptyDescription")}</div>
                 </div>
               ) : null}
             </div>
@@ -262,15 +269,15 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
 
       <Card className="min-w-0 overflow-hidden shadow-sm xl:sticky xl:top-4 xl:flex xl:max-h-[calc(100vh-2rem)] xl:flex-col xl:self-start">
         <CardHeader className="shrink-0 border-b p-4">
-          <CardTitle className="text-base">参数检查器</CardTitle>
-          <CardDescription>只读检查方案快照；应用后可在工作台继续调整。</CardDescription>
+          <CardTitle className="text-base">{t("presetDetail.inspectorTitle")}</CardTitle>
+          <CardDescription>{t("presetDetail.inspectorDescription")}</CardDescription>
         </CardHeader>
 
         <CardContent className="min-h-0 space-y-4 overflow-y-auto p-4">
           {actionError ? (
             <Alert className="border-destructive/40 bg-destructive/5 text-destructive">
               <AlertCircle className="size-4" aria-hidden="true" />
-              <AlertTitle>方案操作未完成</AlertTitle>
+              <AlertTitle>{t("presetDetail.actionErrorTitle")}</AlertTitle>
               <AlertDescription className="text-destructive/90">{actionError}</AlertDescription>
             </Alert>
           ) : null}
@@ -286,7 +293,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                     </div>
                   </div>
                   <Badge variant="secondary" className="shrink-0">
-                    {selectedTemplate.lastUsedAt ? "已使用" : "未使用"}
+                    {selectedTemplate.lastUsedAt ? t("presetDetail.used") : t("presetDetail.unused")}
                   </Badge>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
@@ -297,7 +304,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                       </Badge>
                     ))
                   ) : (
-                    <span className="text-xs text-muted-foreground">无标签</span>
+                    <span className="text-xs text-muted-foreground">{t("presets.noTags")}</span>
                   )}
                 </div>
               </div>
@@ -306,37 +313,37 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                 <CoreParameter label="Codec" value={formatCodec(selectedTemplate)} />
                 <CoreParameter label="Encoder" value={selectedTemplate.taskConfigSnapshot.video.encoder} />
                 <CoreParameter label="Rate Control" value={formatRateControl(selectedTemplate)} />
-                <CoreParameter label="Preset" value={formatPreset(selectedTemplate)} />
-                <CoreParameter label="Resolution" value={formatResolution(selectedTemplate)} />
+                <CoreParameter label="Preset" value={formatPreset(selectedTemplate, t)} />
+                <CoreParameter label="Resolution" value={formatResolution(selectedTemplate, t)} />
                 <CoreParameter label="Container" value={formatContainer(selectedTemplate)} />
               </div>
 
-              <InspectorSection title="视频细节">
-                <InspectorField label="Frame Rate" value={formatFrameRate(selectedTemplate)} mono />
+              <InspectorSection title={t("presetDetail.videoDetails")}>
+                <InspectorField label="Frame Rate" value={formatFrameRate(selectedTemplate, t)} mono />
                 <InspectorField
                   label="Pixel Format"
-                  value={selectedTemplate.taskConfigSnapshot.video.pixelFormat ?? "默认"}
+                  value={selectedTemplate.taskConfigSnapshot.video.pixelFormat ?? t("common.default")}
                   mono
                 />
                 <InspectorField
                   label="2-pass"
-                  value={selectedTemplate.taskConfigSnapshot.video.enableTwoPass ? "开启" : "关闭"}
+                  value={selectedTemplate.taskConfigSnapshot.video.enableTwoPass ? t("common.on") : t("common.off")}
                 />
                 <InspectorField
                   label="Dolby Vision"
                   value={
                     selectedTemplate.taskConfigSnapshot.video.preserveDolbyVisionMetadata
-                      ? "保留元数据"
-                      : "关闭"
+                      ? t("presetDetail.preserveMetadata")
+                      : t("common.off")
                   }
                 />
               </InspectorSection>
 
-              <InspectorSection title="封装与输出">
+              <InspectorSection title={t("presetDetail.packageOutput")}>
                 <InspectorField label="Audio" value={formatAudio(selectedTemplate)} mono />
                 <InspectorField
                   label="Fast Start"
-                  value={selectedTemplate.taskConfigSnapshot.container.faststart ? "开启" : "关闭"}
+                  value={selectedTemplate.taskConfigSnapshot.container.faststart ? t("common.on") : t("common.off")}
                 />
                 <InspectorField
                   label="File Pattern"
@@ -344,14 +351,17 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                   mono
                 />
                 <InspectorField
-                  label="最近使用"
-                  value={formatTimestamp(selectedTemplate.lastUsedAt, "从未使用")}
+                  label={t("presetDetail.recentUse")}
+                  value={formatTimestamp(selectedTemplate.lastUsedAt, t("presets.neverUsed"))}
                 />
-                <InspectorField label="更新于" value={formatTimestamp(selectedTemplate.updatedAt, "-")} />
+                <InspectorField
+                  label={t("presetDetail.updatedAtLabel")}
+                  value={formatTimestamp(selectedTemplate.updatedAt, "-")}
+                />
               </InspectorSection>
 
               {selectedTemplate.taskConfigSnapshot.advancedArgs ? (
-                <InspectorSection title="FFmpeg 参数">
+                <InspectorSection title={t("presetDetail.ffmpegArgs")}>
                   <code className="block break-all rounded-md bg-muted/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground">
                     {selectedTemplate.taskConfigSnapshot.advancedArgs}
                   </code>
@@ -365,7 +375,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                   onClick={() => void applyTemplate(selectedTemplate.id)}
                 >
                   <Send data-icon="inline-start" aria-hidden="true" />
-                  {pendingAction === "apply" ? t("presetDetail.applying") : "应用到工作台"}
+                  {pendingAction === "apply" ? t("presetDetail.applying") : t("presetDetail.applyWorkbench")}
                 </Button>
                 <div className="grid grid-cols-2 gap-2">
                   <Button
@@ -387,15 +397,15 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
                 </div>
                 {!desktopRuntime ? (
                   <p className="text-center text-[11px] leading-4 text-muted-foreground">
-                    浏览器预览仅支持应用方案；复制和删除需要桌面应用。
+                    {t("presetDetail.browserHint")}
                   </p>
                 ) : null}
               </div>
             </>
           ) : (
             <div className="flex min-h-52 flex-col items-center justify-center rounded-lg border border-dashed p-6 text-center">
-              <div className="text-sm font-medium">未选择参数方案</div>
-              <div className="mt-1 text-xs text-muted-foreground">从左侧列表选择一行查看完整快照。</div>
+              <div className="text-sm font-medium">{t("presetDetail.emptyTitle")}</div>
+              <div className="mt-1 text-xs text-muted-foreground">{t("presetDetail.emptyDescription")}</div>
             </div>
           )}
         </CardContent>
@@ -536,21 +546,23 @@ function formatRateControl(template: Template) {
 /**
  * 格式化编码 preset。
  * @param template 参数方案
+ * @param t 当前界面的翻译函数
  * @returns preset 或默认语义
  */
-function formatPreset(template: Template) {
-  return template.taskConfigSnapshot.video.preset || "默认";
+function formatPreset(template: Template, t: Translate) {
+  return template.taskConfigSnapshot.video.preset || t("common.default");
 }
 
 /**
  * 格式化输出分辨率；缺少 scale 配置时沿用跟随源文件语义。
  * @param template 参数方案
+ * @param t 当前界面的翻译函数
  * @returns 分辨率摘要
  */
-function formatResolution(template: Template) {
+function formatResolution(template: Template, t: Translate) {
   const video = template.taskConfigSnapshot.video;
   if (video.keepOriginalResolution || !video.resolution) {
-    return "跟随源文件";
+    return t("presetDetail.followSource");
   }
   return `${video.resolution.width} × ${video.resolution.height}`;
 }
@@ -558,12 +570,13 @@ function formatResolution(template: Template) {
 /**
  * 格式化输出帧率；缺少帧率配置时沿用跟随源文件语义。
  * @param template 参数方案
+ * @param t 当前界面的翻译函数
  * @returns 帧率摘要
  */
-function formatFrameRate(template: Template) {
+function formatFrameRate(template: Template, t: Translate) {
   const video = template.taskConfigSnapshot.video;
   if (video.keepOriginalFps || typeof video.fps !== "number") {
-    return "跟随源文件";
+    return t("presetDetail.followSource");
   }
   return `${video.fps} fps`;
 }

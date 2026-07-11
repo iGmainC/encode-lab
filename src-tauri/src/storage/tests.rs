@@ -111,6 +111,36 @@ fn list_init_and_crud_smoke() {
 }
 
 #[test]
+fn legacy_invalid_template_cannot_be_applied_or_duplicated() {
+    let base_dir = test_base_dir();
+    let paths = StoragePaths::new(base_dir.clone());
+    let store = FileStore::new(Arc::new(LockRegistry::default()), 1);
+    let templates_repo = TemplatesRepo::new(store, paths.templates);
+    let mut snapshot = build_task_payload("legacy-invalid");
+    snapshot.audio.mode = AudioMode::Custom;
+    snapshot.audio.custom_args =
+        Some("-c:a aac -af astats=metadata=1,ametadata=mode=print:file=/tmp/audio.txt".to_string());
+
+    // 直接写仓储模拟升级前已存在、尚未经过当前命令层校验的历史方案。
+    let template_id = templates_repo
+        .save(TemplatePayload {
+            name: "legacy-invalid".to_string(),
+            tags: vec!["legacy".to_string()],
+            task_config_snapshot: snapshot,
+        })
+        .expect("seed legacy template");
+
+    templates_repo
+        .duplicate(&template_id)
+        .expect_err("invalid legacy template must not be duplicated");
+    templates_repo
+        .apply(&template_id)
+        .expect_err("invalid legacy template must not be applied");
+
+    let _ = fs::remove_dir_all(base_dir);
+}
+
+#[test]
 fn concurrent_writes_same_file_are_safe() {
     let base_dir = test_base_dir();
     let paths = StoragePaths::new(base_dir.clone());

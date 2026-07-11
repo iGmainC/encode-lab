@@ -136,6 +136,7 @@ export function DetachedPreviewPage() {
     <ComparePreviewPlayer
       sourceFile={payload.sourceFile}
       sourceDurationSec={payload.sourceDurationSec}
+      sourceFps={payload.sourceFps}
       sourceHdrType={payload.sourceHdrType}
       sourceColorPrimaries={payload.sourceColorPrimaries}
       sourceColorTransfer={payload.sourceColorTransfer}

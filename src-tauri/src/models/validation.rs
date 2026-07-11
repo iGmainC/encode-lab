@@ -1,4 +1,5 @@
 use crate::{
+    ffmpeg_args::{guard_advanced_output_args, guard_audio_output_args},
     models::{
         task::{AudioMode, VideoBitrateMode, VideoCodecFormat, VideoEncoder},
         AppSettings, TaskConfigPayload, TemplatePayload,
@@ -52,6 +53,9 @@ impl Validate for TaskConfigPayload {
                 "output.overwrite must be autoRename".to_string(),
             ));
         }
+
+        // 模型写入边界与命令构建层复用相同的 I/O 防线，非法高级参数不能先落盘再延迟失败。
+        guard_advanced_output_args(self.advanced_args.as_deref())?;
 
         if let Some(clip_range) = &self.clip_range {
             if clip_range.end_ms <= clip_range.start_ms {
@@ -183,16 +187,19 @@ impl Validate for TaskConfigPayload {
                 ));
             }
             AudioMode::Custom => {
-                if self
+                let custom_args = self
                     .audio
                     .custom_args
                     .as_ref()
-                    .is_none_or(|value| value.trim().is_empty())
-                {
-                    return Err(StorageError::InvalidPayload(
-                        "audio.customArgs is required when audio.mode is custom".to_string(),
-                    ));
-                }
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        StorageError::InvalidPayload(
+                            "audio.customArgs is required when audio.mode is custom".to_string(),
+                        )
+                    })?;
+
+                // 模板、任务和预览共享同一条白名单，避免不安全参数先进入持久化层。
+                guard_audio_output_args(custom_args)?;
             }
             _ => {}
         }
@@ -422,5 +429,51 @@ mod tests {
         });
         assert_copy_reencode_field_rejected(|payload| payload.video.gop = Some(48));
         assert_copy_reencode_field_rejected(|payload| payload.video.enable_two_pass = true);
+    }
+
+    #[test]
+    fn custom_audio_accepts_whitelisted_output_options() {
+        let mut payload = copy_payload();
+        payload.audio.mode = AudioMode::Custom;
+        payload.audio.custom_args = Some("-c:a aac -b:a 320k -ar 48000 -ac 2".to_string());
+
+        payload
+            .validate()
+            .expect("whitelisted audio output options should pass");
+    }
+
+    #[test]
+    fn custom_audio_rejects_non_audio_and_managed_io_options() {
+        for custom_args in [
+            "-c:a aac -c:v libx264",
+            "-c:a aac -i injected.wav",
+            "-c:a aac extra.mka",
+            "-c:a aac -f tee",
+            "-c:a aac -af astats=metadata=1,ametadata=mode=print:file=/tmp/audio.txt",
+        ] {
+            let mut payload = copy_payload();
+            payload.audio.mode = AudioMode::Custom;
+            payload.audio.custom_args = Some(custom_args.to_string());
+
+            payload
+                .validate()
+                .expect_err("unsafe custom audio option should fail validation");
+        }
+    }
+
+    #[test]
+    fn advanced_args_rejects_managed_io_overrides_before_persistence() {
+        for advanced_args in [
+            "-i injected.mov",
+            "-map 0:v:0 extra.mp4",
+            "-shortest injected.mkv",
+        ] {
+            let mut payload = copy_payload();
+            payload.advanced_args = Some(advanced_args.to_string());
+
+            payload
+                .validate()
+                .expect_err("managed I/O override should fail model validation");
+        }
     }
 }

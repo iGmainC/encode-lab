@@ -145,8 +145,14 @@ export function TopStatusBar({
                 <RefreshCw className="mt-0.5 size-3.5 shrink-0 animate-spin" aria-hidden="true" />
               )}
               <span>
-                {runtimeState === "ready" ? "系统就绪" : runtimeState === "failed" ? "运行时异常" : "正在探测"}
-                <span className="mt-0.5 block text-[11px] text-muted-foreground">并发 {concurrencyN}</span>
+                {runtimeState === "ready"
+                  ? t("top.runtime.ready")
+                  : runtimeState === "failed"
+                    ? t("top.runtime.error")
+                    : t("top.runtime.probing")}
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  {t("top.concurrency", { value: concurrencyN })}
+                </span>
               </span>
             </div>
           </div>

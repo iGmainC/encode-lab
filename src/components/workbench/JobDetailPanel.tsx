@@ -13,7 +13,11 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { FilePathActions, formatPathName } from "../common/FilePathActions";
 import { useI18n } from "../../i18n/I18nProvider";
+import { formatJobStepLabel } from "../../lib/jobMetrics";
 import type { JobHistory, JobMetricsEvent } from "../../types/workbench";
+
+/** 国际化文案查询函数。 */
+type Translate = ReturnType<typeof useI18n>["t"];
 
 /**
  * 按任务状态组织实时指标、诊断信息、输出结果和记录操作。
@@ -57,7 +61,7 @@ export function JobDetailPanel({
   }
 
   return (
-    <aside className="flex min-h-0 flex-col border-t bg-muted/[0.12] xl:border-l xl:border-t-0" aria-label="任务详情">
+    <aside className="flex min-h-0 flex-col border-t bg-muted/[0.12] xl:border-l xl:border-t-0" aria-label={t("jobDetail.ariaLabel")}>
       {job ? (
         <>
           <header className="border-b bg-background/70 px-5 py-4">
@@ -68,7 +72,7 @@ export function JobDetailPanel({
             <h2 className="mt-3 truncate text-lg font-semibold" title={job.name ?? formatPathName(job.outputFile)}>
               {job.name ?? formatPathName(job.outputFile)}
             </h2>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">{getStatusSummary(job, metrics)}</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{getStatusSummary(job, metrics, t)}</p>
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               {canCancel ? (
@@ -78,7 +82,7 @@ export function JobDetailPanel({
                   onClick={() => onCancelJob(job.id)}
                 >
                   <Square data-icon="inline-start" aria-hidden="true" />
-                  {canceling ? t("jobDetail.canceling") : "取消任务"}
+                  {canceling ? t("jobDetail.canceling") : t("jobDetail.cancelTask")}
                 </Button>
               ) : null}
               {canDelete ? (
@@ -94,9 +98,7 @@ export function JobDetailPanel({
               ) : null}
             </div>
             {canDelete ? (
-              <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-                删除前会再次确认；这里只清理任务记录，不会删除输出文件。
-              </p>
+              <p className="mt-2 text-[11px] leading-4 text-muted-foreground">{t("jobDetail.deleteHint")}</p>
             ) : null}
           </header>
 
@@ -118,11 +120,11 @@ export function JobDetailPanel({
             <section className="border-b px-5 py-5">
               <div className="flex items-center gap-2">
                 <FileOutput className="size-4 text-muted-foreground" aria-hidden="true" />
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">文件</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("jobDetail.files")}</h3>
               </div>
               <div className="mt-3 divide-y border-y">
                 <PathDetailField
-                  label={job.status === "completed" ? t("jobDetail.output") : "目标输出"}
+                  label={job.status === "completed" ? t("jobDetail.output") : t("jobDetail.targetOutput")}
                   path={job.outputFile}
                 />
                 <PathDetailField label={t("jobDetail.input")} path={job.inputFile} />
@@ -130,13 +132,13 @@ export function JobDetailPanel({
             </section>
 
             <section className="border-b px-5 py-5">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">执行记录</h3>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("jobDetail.executionRecord")}</h3>
               <dl className="mt-3 divide-y border-y">
-                <DetailRow label="任务状态" value={getStatusLabel(job.status)} />
-                <DetailRow label="创建时间" value={formatDateTime(job.createdAt)} />
-                <DetailRow label="开始时间" value={formatDateTime(job.startedAt)} />
-                <DetailRow label="结束时间" value={formatDateTime(job.endedAt)} />
-                <DetailRow label="任务 ID" value={job.id} monospace />
+                <DetailRow label={t("jobDetail.statusLabel")} value={getStatusLabel(job.status, t)} />
+                <DetailRow label={t("jobDetail.createdAt")} value={formatDateTime(job.createdAt)} />
+                <DetailRow label={t("jobDetail.startedAt")} value={formatDateTime(job.startedAt)} />
+                <DetailRow label={t("jobDetail.endedAt")} value={formatDateTime(job.endedAt)} />
+                <DetailRow label={t("jobDetail.taskId")} value={job.id} monospace />
               </dl>
             </section>
 
@@ -164,7 +166,7 @@ export function JobDetailPanel({
       ) : (
         <div className="flex min-h-64 flex-1 flex-col items-center justify-center px-8 text-center text-muted-foreground">
           <FileOutput className="size-7 opacity-40" aria-hidden="true" />
-          <div className="mt-3 text-sm font-medium text-foreground">未选择任务</div>
+          <div className="mt-3 text-sm font-medium text-foreground">{t("jobDetail.emptyTitle")}</div>
           <p className="mt-1 text-xs leading-5">{t("jobDetail.empty")}</p>
         </div>
       )}
@@ -176,7 +178,8 @@ export function JobDetailPanel({
  * 给出与任务当前状态匹配的可执行下一步。
  */
 function NextAction({ job }: { job: JobHistory }) {
-  const action = getNextAction(job.status);
+  const { t } = useI18n();
+  const action = getNextAction(job.status, t);
   return (
     <div className={`border-b px-5 py-3 ${action.tone === "danger" ? "bg-destructive/5" : "bg-primary/[0.035]"}`}>
       <div className="flex gap-3">
@@ -187,7 +190,7 @@ function NextAction({ job }: { job: JobHistory }) {
         )}
         <div>
           <div className={`text-xs font-semibold ${action.tone === "danger" ? "text-destructive" : "text-foreground"}`}>
-            下一步
+            {t("jobDetail.nextAction")}
           </div>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">{action.description}</p>
         </div>
@@ -200,28 +203,31 @@ function NextAction({ job }: { job: JobHistory }) {
  * 展示运行中任务最重要的进度、性能和阶段指标。
  */
 function LiveExecution({ job, metrics }: { job: JobHistory; metrics?: JobMetricsEvent }) {
+  const { t } = useI18n();
   const progress = typeof metrics?.progress === "number" ? clampProgress(metrics.progress) : null;
-  const progressLabel = job.status === "queued" ? "等待调度" : formatProgress(progress);
+  const progressLabel = job.status === "queued"
+    ? t("jobs.progress.waiting")
+    : formatProgress(progress, t("jobDetail.collecting"));
   const progressWidth = job.status === "queued" ? 0 : progress ?? 0;
 
   return (
     <section className="border-b px-5 py-5">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">实时执行</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("jobDetail.liveExecution")}</h3>
           <div className="mt-2 font-mono text-3xl font-semibold tabular-nums tracking-tight">{progressLabel}</div>
         </div>
         <div className="max-w-[55%] text-right text-xs leading-5 text-muted-foreground">
           {job.status === "queued"
-            ? "等待可用并发槽位"
-            : metrics?.stepLabel || (metrics?.stepCount && metrics.stepCount > 1 ? `阶段 ${metrics.stepIndex}/${metrics.stepCount}` : "FFmpeg 转码")}
+            ? t("jobDetail.waitingSlot")
+            : formatJobStepLabel(metrics, t)}
         </div>
       </div>
 
       <div
         className="mt-4 h-2 overflow-hidden rounded-full bg-muted"
         role="progressbar"
-        aria-label="任务实时进度"
+        aria-label={t("jobDetail.liveProgressAria")}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={progress ?? undefined}
@@ -230,7 +236,7 @@ function LiveExecution({ job, metrics }: { job: JobHistory; metrics?: JobMetrics
       </div>
 
       <dl className="mt-5 grid grid-cols-2 border-y sm:grid-cols-4">
-        <MetricDatum label="已处理" value={formatTimeMs(metrics?.timeMs)} />
+        <MetricDatum label={t("jobDetail.processed")} value={formatTimeMs(metrics?.timeMs)} />
         <MetricDatum label="FPS" value={formatNumber(metrics?.fps)} />
         <MetricDatum label="Speed" value={formatSpeed(metrics?.speed)} />
         <MetricDatum label="ETA" value={formatEta(metrics?.etaSec)} />
@@ -251,17 +257,18 @@ function FailureSection({
   copied: boolean;
   onCopy?: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <section className="border-b px-5 py-5">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-destructive">
           <AlertTriangle className="size-4" aria-hidden="true" />
-          <h3 className="text-xs font-semibold uppercase tracking-wide">执行错误</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide">{t("jobDetail.failureTitle")}</h3>
         </div>
         {onCopy ? <CopyButton copied={copied} onCopy={onCopy} /> : null}
       </div>
       <div className="mt-3 border-l-2 border-destructive bg-destructive/5 px-3 py-2.5 text-xs leading-5 text-destructive whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-        {error ?? "任务未完成，但没有记录可用的错误摘要。"}
+        {error ?? t("jobDetail.failureEmpty")}
       </div>
     </section>
   );
@@ -271,21 +278,22 @@ function FailureSection({
  * 展示已完成任务的文件与视频轨道体积结果。
  */
 function OutputResultSection({ job }: { job: JobHistory }) {
+  const { t } = useI18n();
   return (
     <section className="border-b px-5 py-5">
       <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
         <CheckCircle2 className="size-4" aria-hidden="true" />
-        <h3 className="text-xs font-semibold uppercase tracking-wide">输出结果</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wide">{t("jobDetail.outputResult")}</h3>
       </div>
       <div className="mt-3 divide-y border-y">
         <SizeDeltaRow
-          label="文件总体积"
+          label={t("jobDetail.fileSize")}
           percent={job.sizeChangePercent}
           inputSize={job.inputSizeBytes}
           outputSize={job.outputSizeBytes}
         />
         <SizeDeltaRow
-          label="视频轨道"
+          label={t("jobDetail.videoTrack")}
           percent={job.videoSizeChangePercent}
           inputSize={job.inputVideoSizeBytes}
           outputSize={job.outputVideoSizeBytes}
@@ -349,6 +357,7 @@ function SizeDeltaRow({
   inputSize?: number | null;
   outputSize?: number | null;
 }) {
+  const { t } = useI18n();
   const deltaText = formatSizeChangePercent(percent);
   const detailText = formatSizePair(inputSize, outputSize);
   // 正数代表输出更大，按风险提示使用红色；负数代表体积减小，使用绿色。
@@ -365,7 +374,7 @@ function SizeDeltaRow({
     <div className="flex items-center justify-between gap-4 py-3">
       <div>
         <div className="text-xs font-medium">{label}</div>
-        <div className="mt-1 text-[11px] text-muted-foreground">{detailText || "未记录输入/输出体积"}</div>
+        <div className="mt-1 text-[11px] text-muted-foreground">{detailText || t("jobDetail.sizeMissing")}</div>
       </div>
       <div className={`font-mono text-base font-semibold tabular-nums ${toneClass}`}>{deltaText}</div>
     </div>
@@ -376,6 +385,7 @@ function SizeDeltaRow({
  * 展示任务状态徽标。
  */
 function JobStatusBadge({ status }: { status: JobHistory["status"] }) {
+  const { t } = useI18n();
   const className =
     status === "completed"
       ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
@@ -384,7 +394,7 @@ function JobStatusBadge({ status }: { status: JobHistory["status"] }) {
         : status === "running"
           ? "bg-primary text-primary-foreground"
           : "bg-muted text-muted-foreground";
-  return <Badge className={className}>{getStatusLabel(status)}</Badge>;
+  return <Badge className={className}>{getStatusLabel(status, t)}</Badge>;
 }
 
 /**
@@ -415,51 +425,55 @@ function CopyButton({ copied, onCopy }: { copied: boolean; onCopy: () => void })
 /**
  * 将任务状态映射为用户可读名称。
  */
-function getStatusLabel(status: JobHistory["status"]) {
-  const labels: Record<JobHistory["status"], string> = {
-    queued: "排队中",
-    running: "运行中",
-    paused: "已暂停",
-    completed: "已完成",
-    failed: "失败",
-    canceled: "已取消",
-    interrupted: "意外中断",
-  };
-  return labels[status];
+function getStatusLabel(status: JobHistory["status"], t: Translate) {
+  const labelKeys = {
+    queued: "jobs.status.queued",
+    running: "jobs.status.running",
+    paused: "jobs.status.paused",
+    completed: "jobs.status.completed",
+    failed: "jobs.status.failed",
+    canceled: "jobs.status.canceled",
+    interrupted: "jobs.status.interrupted",
+  } as const;
+  return t(labelKeys[status]);
 }
 
 /**
  * 用一句话说明当前执行结果或运行阶段。
  */
-function getStatusSummary(job: JobHistory, metrics?: JobMetricsEvent) {
+function getStatusSummary(job: JobHistory, metrics: JobMetricsEvent | undefined, t: Translate) {
   if (job.status === "running") {
-    return metrics?.stepLabel || "FFmpeg 正在执行，实时指标会持续更新。";
+    return metrics ? formatJobStepLabel(metrics, t) : t("jobDetail.summary.running");
   }
-  const summaries: Record<Exclude<JobHistory["status"], "running">, string> = {
-    queued: "任务已进入本机 FIFO 队列，正在等待可用并发槽位。",
-    paused: "这是一条旧版暂停状态记录，当前版本不提供继续控制。",
-    completed: "转码完成，输出文件已发布到目标路径。",
-    failed: "任务没有生成可交付结果，错误和命令行已保留用于排查。",
-    canceled: "任务已取消，可回到工作台调整参数后重新入队。",
-    interrupted: "任务被异常中断，请结合错误和实际命令定位原因。",
-  };
-  return summaries[job.status];
+  const summaryKeys = {
+    queued: "jobDetail.summary.queued",
+    paused: "jobDetail.summary.paused",
+    completed: "jobDetail.summary.completed",
+    failed: "jobDetail.summary.failed",
+    canceled: "jobDetail.summary.canceled",
+    interrupted: "jobDetail.summary.interrupted",
+  } as const;
+  return t(summaryKeys[job.status]);
 }
 
 /**
  * 根据任务状态给出明确的下一步操作。
  */
-function getNextAction(status: JobHistory["status"]): { description: string; tone: "default" | "danger" } {
-  const actions: Record<JobHistory["status"], { description: string; tone: "default" | "danger" }> = {
-    queued: { description: "等待调度；如果目标或参数有误，可立即取消并回到工作台重建任务。", tone: "default" },
-    running: { description: "重点观察进度、Speed 与 ETA；性能异常时取消任务，再展开实际命令排查。", tone: "default" },
-    paused: { description: "当前版本不能继续旧版暂停任务；核对配置后重新入队，或删除这条历史记录。", tone: "danger" },
-    completed: { description: "使用下方文件操作定位输出并复核交付文件；确认无误后可清理任务记录。", tone: "default" },
-    failed: { description: "先复制错误摘要，再展开实际命令复现；修正参数后从工作台重新入队。", tone: "danger" },
-    canceled: { description: "回到工作台检查参数和输出目标，确认后重新加入队列。", tone: "default" },
-    interrupted: { description: "复制错误与实际命令，检查运行环境或输入文件后重新执行。", tone: "danger" },
+function getNextAction(status: JobHistory["status"], t: Translate): { description: string; tone: "default" | "danger" } {
+  const descriptionKeys = {
+    queued: "jobDetail.next.queued",
+    running: "jobDetail.next.running",
+    paused: "jobDetail.next.paused",
+    completed: "jobDetail.next.completed",
+    failed: "jobDetail.next.failed",
+    canceled: "jobDetail.next.canceled",
+    interrupted: "jobDetail.next.interrupted",
+  } as const;
+  const dangerStatuses: ReadonlySet<JobHistory["status"]> = new Set(["paused", "failed", "interrupted"]);
+  return {
+    description: t(descriptionKeys[status]),
+    tone: dangerStatuses.has(status) ? "danger" : "default",
   };
-  return actions[status];
 }
 
 /**
@@ -472,8 +486,8 @@ function clampProgress(value: number) {
 /**
  * 格式化进度百分比。
  */
-function formatProgress(value?: number | null) {
-  return typeof value === "number" ? `${value.toFixed(1)}%` : "采集中";
+function formatProgress(value: number | null | undefined, fallback: string) {
+  return typeof value === "number" ? `${value.toFixed(1)}%` : fallback;
 }
 
 /**

@@ -62,6 +62,9 @@ type PreviewInvokeError = {
   message?: string;
 };
 
+/** 国际化文案查询函数。 */
+type Translate = ReturnType<typeof useI18n>["t"];
+
 /** 控制区在全屏模式下自动隐藏的延迟，单位毫秒。 */
 const CONTROL_AUTO_HIDE_MS = 2500;
 /** 参数变化后自动刷新当前帧的防抖时间，单位毫秒。 */
@@ -240,14 +243,14 @@ function formatPreviewInvokeError(error: unknown) {
  * @param error 已格式化的预览错误
  * @returns 面向当前操作的简短说明
  */
-function getPreviewErrorSummary(error: string) {
+function getPreviewErrorSummary(error: string, t: Translate) {
   if (error.includes("End of file") || error.includes("EOF")) {
-    return "当前时间点已经没有可解码帧。请向前移动时间轴，或直接重试当前帧。";
+    return t("preview.error.eofSummary");
   }
   if (error.includes("Error opening input")) {
-    return "预览临时文件无法读取。请重试当前帧；若持续失败，再展开技术详情排查运行时。";
+    return t("preview.error.inputSummary");
   }
-  return "当前帧未能生成。请重试或移动时间轴；持续失败时可展开技术详情。";
+  return t("preview.error.genericSummary");
 }
 
 /**
@@ -428,6 +431,7 @@ function usePreviewFrameSession({
   const [previewSpeed, setPreviewSpeed] = useState<number | undefined>(undefined);
   const [estimatedTranscodeSpeed, setEstimatedTranscodeSpeed] = useState<number | undefined>(undefined);
   const [previewError, setPreviewError] = useState<string | undefined>(undefined);
+  const [listenerSetupFailed, setListenerSetupFailed] = useState(false);
   const [degradedFromTwoPass, setDegradedFromTwoPass] = useState(false);
   const [degradedFromDolbyVision, setDegradedFromDolbyVision] = useState(false);
   const [degradedFromSdrTonemap, setDegradedFromSdrTonemap] = useState(false);
@@ -613,6 +617,7 @@ function usePreviewFrameSession({
 
   useEffect(() => {
     if (!isTauriRuntime()) {
+      setListenerSetupFailed(false);
       setListenersReady(true);
       return;
     }
@@ -694,6 +699,7 @@ function usePreviewFrameSession({
           return;
         }
         unlistenState = nextUnlistenState;
+        setListenerSetupFailed(false);
         setListenersReady(true);
       } catch (err) {
         disposeListeners();
@@ -703,7 +709,8 @@ function usePreviewFrameSession({
 
         setListenersReady(false);
         setPreviewState("error");
-        setPreviewError(`预览事件监听启动失败：${formatPreviewInvokeError(err)}`);
+        setListenerSetupFailed(true);
+        setPreviewError(formatPreviewInvokeError(err));
       }
     };
 
@@ -792,6 +799,7 @@ function usePreviewFrameSession({
     previewSpeed: !isTauriRuntime() && sourceFile ? undefined : previewSpeed,
     estimatedTranscodeSpeed: !isTauriRuntime() && sourceFile ? undefined : estimatedTranscodeSpeed,
     previewError: !isTauriRuntime() && sourceFile ? undefined : previewError,
+    listenerSetupFailed,
     degradedFromTwoPass:
       !isTauriRuntime() && sourceFile
         ? taskDraftSnapshot.video.enableTwoPass
@@ -1039,6 +1047,9 @@ export function ComparePreviewPlayer({
   });
 
   const hasFrame = Boolean(previewSession.sourceImageSrc && previewSession.previewImageSrc);
+  const previewErrorDisplay = previewSession.listenerSetupFailed && previewSession.previewError
+    ? `${t("preview.error.listenerPrefix")}${previewSession.previewError}`
+    : previewSession.previewError;
   const splitterPercent = Math.round(splitterPosition * 100);
   const sourceIsFirst = compareOrder === "source-first";
   const clipPath =
@@ -1059,15 +1070,15 @@ export function ComparePreviewPlayer({
   const emptyFrameContent = previewSession.previewError ? (
     <div className="mx-auto max-w-md rounded-lg border border-red-300/25 bg-red-950/35 p-4 text-center text-red-100">
       <div className="text-sm font-medium">{t("preview.frameFailed")}</div>
-      <div className="mt-2 text-xs leading-5 text-red-100/80">{getPreviewErrorSummary(previewSession.previewError)}</div>
+      <div className="mt-2 text-xs leading-5 text-red-100/80">{getPreviewErrorSummary(previewSession.previewError, t)}</div>
       <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
-        <Button size="sm" variant="secondary" onClick={previewSession.retryCurrentFrame}>重试当前帧</Button>
+        <Button size="sm" variant="secondary" onClick={previewSession.retryCurrentFrame}>{t("preview.retryCurrentFrame")}</Button>
         <details className="text-left text-xs text-red-100/75">
           <summary className="cursor-pointer rounded px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
-            技术详情
+            {t("preview.technicalDetails")}
           </summary>
           <pre className="mt-2 max-h-28 max-w-sm overflow-auto whitespace-pre-wrap break-all rounded bg-black/35 p-2 font-mono text-[10px] leading-4">
-            {previewSession.previewError}
+            {previewErrorDisplay}
           </pre>
         </details>
       </div>
@@ -1081,7 +1092,7 @@ export function ComparePreviewPlayer({
       previewState: previewSession.previewState,
       previewSpeed: previewSession.previewSpeed,
       estimatedTranscodeSpeed: previewSession.estimatedTranscodeSpeed,
-      previewError: previewSession.previewError,
+      previewError: previewErrorDisplay,
       degradedFromTwoPass: previewSession.degradedFromTwoPass,
       degradedFromDolbyVision: previewSession.degradedFromDolbyVision,
       degradedFromSdrTonemap: previewSession.degradedFromSdrTonemap,
@@ -1098,12 +1109,17 @@ export function ComparePreviewPlayer({
       previewSession.degradedFromSdrTonemap,
       previewSession.degradedFromTwoPass,
       previewSession.estimatedTranscodeSpeed,
-      previewSession.previewError,
+      previewErrorDisplay,
       previewSession.previewSpeed,
       previewSession.previewState,
       timeline.currentTimeSec,
     ],
   );
+  const fullscreenButtonLabel = fullscreenButtonIcon === "close"
+    ? t("preview.detached.close")
+    : previewFullscreenActive
+      ? t("preview.fullscreen.exit")
+      : t("preview.fullscreen.enter");
 
   useEffect(() => {
     onRuntimeChange(runtime);
@@ -1223,14 +1239,14 @@ export function ComparePreviewPlayer({
               <>
                 <img
                   src={previewSession.sourceImageSrc ?? ""}
-                  alt="source frame"
+                  alt={t("preview.frame.source")}
                   draggable={false}
                   className="absolute inset-0 h-full w-full object-contain"
                   onError={previewSession.recoverImageLoadFailure}
                 />
                 <img
                   src={previewSession.previewImageSrc ?? ""}
-                  alt="preview frame"
+                  alt={t("preview.frame.preview")}
                   draggable={false}
                   className="absolute inset-0 h-full w-full object-contain"
                   style={{ clipPath }}
@@ -1255,7 +1271,7 @@ export function ComparePreviewPlayer({
           <div
             role="separator"
             tabIndex={0}
-            aria-label="调整原始图像与输出预览的分割位置"
+            aria-label={t("preview.separatorLabel")}
             aria-orientation={splitMode === "vertical" ? "vertical" : "horizontal"}
             aria-valuemin={0}
             aria-valuemax={100}
@@ -1307,8 +1323,8 @@ export function ComparePreviewPlayer({
           <Button
             size="sm"
             variant="secondary"
-            aria-label={fullscreenButtonIcon === "close" ? "关闭独立预览" : previewFullscreenActive ? "退出全屏预览" : "进入全屏预览"}
-            title={fullscreenButtonIcon === "close" ? "关闭独立预览" : previewFullscreenActive ? "退出全屏预览" : "进入全屏预览"}
+            aria-label={fullscreenButtonLabel}
+            title={fullscreenButtonLabel}
             onClick={(event) => {
               event.stopPropagation();
               handleFullscreenButtonClick();
@@ -1347,7 +1363,7 @@ export function ComparePreviewPlayer({
               onKeyUp={() => timeline.commitDraftTime()}
               onValueChange={timeline.updateDraftTime}
               onValueCommit={timeline.commitDraftTime}
-              aria-label="选择预览帧时间点"
+              aria-label={t("preview.timelineLabel")}
             />
             <div className="text-xs text-white/75">
               {timeline.currentTimeSec.toFixed(2)} / {durationSec.toFixed(2)}s
@@ -1382,9 +1398,9 @@ export function ComparePreviewPlayer({
             </label>
           </div>
           <div className="mt-2 flex flex-wrap gap-3 text-xs text-white/75">
-            {previewSession.previewSpeed ? <span>当前预览帧生成速度：{previewSession.previewSpeed.toFixed(2)}x</span> : null}
+            {previewSession.previewSpeed ? <span>{t("preview.currentSpeed", { value: previewSession.previewSpeed.toFixed(2) })}</span> : null}
             {timeline.isScrubbingTimeline ? <span>{t("preview.scrubbing")}</span> : null}
-            {previewSession.previewError ? <span className="text-red-200">预览失败，可在画面区域重试并查看技术详情。</span> : null}
+            {previewSession.previewError ? <span className="text-red-200">{t("preview.error.hint")}</span> : null}
           </div>
         </div>
       </div>

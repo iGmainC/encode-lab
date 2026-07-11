@@ -67,6 +67,8 @@ pub struct JobMetricsEvent {
     pub step_count: usize,
     /** 当前阶段的用户可读名称。 */
     pub step_label: String,
+    /** 前端本地化使用的稳定阶段代码。 */
+    pub step_code: String,
     /** 当前已处理媒体时间，单位毫秒。 */
     pub time_ms: Option<u64>,
     /** 当前帧号。 */
@@ -505,6 +507,7 @@ fn run_transcode_job<R: Runtime>(
                 &job.id,
                 step_index,
                 step_count,
+                step.code(),
                 step.label(),
                 duration_sec,
                 process,
@@ -531,7 +534,14 @@ fn run_transcode_job<R: Runtime>(
                     cleanup_plan_artifacts(&plan.cleanup_paths);
                     break;
                 }
-                emit_stage_completed(&app, &job.id, step_index, step_count, step.label());
+                emit_stage_completed(
+                    &app,
+                    &job.id,
+                    step_index,
+                    step_count,
+                    step.code(),
+                    step.label(),
+                );
             }
             Err(StepError::Interrupted) => {
                 claim_terminal_outcome(&child, &mut job, |job| {
@@ -931,6 +941,7 @@ fn run_process_step<R: Runtime>(
     job_id: &str,
     step_index: usize,
     step_count: usize,
+    step_code: &str,
     step_label: &str,
     duration_sec: Option<f64>,
     step: &ProcessStep,
@@ -964,6 +975,7 @@ fn run_process_step<R: Runtime>(
         if step.program == RuntimeProgram::Ffmpeg && step.reports_media_progress {
             let app = app.clone();
             let job_id = job_id.to_string();
+            let step_code = step_code.to_string();
             let step_label = step_label.to_string();
             thread::spawn(move || {
                 read_progress_output(
@@ -971,6 +983,7 @@ fn run_process_step<R: Runtime>(
                     job_id,
                     step_index,
                     step_count,
+                    step_code,
                     step_label,
                     duration_sec,
                     stdout,
@@ -1075,6 +1088,7 @@ fn read_progress_output<R: Runtime>(
     job_id: String,
     step_index: usize,
     step_count: usize,
+    step_code: String,
     step_label: String,
     duration_sec: Option<f64>,
     stdout: impl Read,
@@ -1095,6 +1109,7 @@ fn read_progress_output<R: Runtime>(
                 &job_id,
                 step_index,
                 step_count,
+                &step_code,
                 &step_label,
                 duration_sec,
                 &snapshot,
@@ -1155,6 +1170,7 @@ fn emit_metrics<R: Runtime>(
     job_id: &str,
     step_index: usize,
     step_count: usize,
+    step_code: &str,
     step_label: &str,
     duration_sec: Option<f64>,
     snapshot: &FfmpegProgressSnapshot,
@@ -1167,6 +1183,7 @@ fn emit_metrics<R: Runtime>(
             job_id: job_id.to_string(),
             step_index,
             step_count,
+            step_code: step_code.to_string(),
             step_label: step_label.to_string(),
             time_ms: snapshot.out_time_ms,
             frame: snapshot.frame,
@@ -1185,6 +1202,7 @@ fn emit_stage_completed<R: Runtime>(
     job_id: &str,
     step_index: usize,
     step_count: usize,
+    step_code: &str,
     step_label: &str,
 ) {
     let _ = app.emit(
@@ -1193,6 +1211,7 @@ fn emit_stage_completed<R: Runtime>(
             job_id: job_id.to_string(),
             step_index,
             step_count,
+            step_code: step_code.to_string(),
             step_label: step_label.to_string(),
             time_ms: None,
             frame: None,

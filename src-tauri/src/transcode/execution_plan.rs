@@ -35,6 +35,8 @@ impl RuntimeProgram {
 /// 单个外部工具阶段。
 #[derive(Debug, Clone)]
 pub struct ProcessStep {
+    /// 前端本地化使用的稳定阶段代码。
+    pub code: &'static str,
     /// 面向用户的阶段名称。
     pub label: String,
     /// 需要启动的 bundled runtime 程序。
@@ -99,6 +101,15 @@ impl TranscodeStep {
             Self::FinalizeOutput { .. } => "完成输出文件",
         }
     }
+
+    /// 返回跨语言、跨进程稳定的阶段代码。
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Process(step) => step.code,
+            Self::VerifyDolbyVision(_) => "dv_verify_output",
+            Self::FinalizeOutput { .. } => "finalize_output",
+        }
+    }
 }
 
 /// 可执行转码计划；普通任务与 Dolby Vision 任务共享同一调度入口。
@@ -146,6 +157,7 @@ pub fn build_transcode_plan(
         .enumerate()
         .map(|(index, args)| {
             TranscodeStep::Process(ProcessStep {
+                code: "ffmpeg_transcode",
                 label: format!("FFmpeg 转码阶段 {}", index + 1),
                 program: RuntimeProgram::Ffmpeg,
                 args,
@@ -223,12 +235,14 @@ fn build_dolby_vision_plan(
     let partial_output = partial_output_path(output_file, job_id)?;
 
     let extract_source = ProcessStep {
+        code: "dv_extract_source_video",
         label: "提取源 Dolby Vision 视频流".to_string(),
         program: RuntimeProgram::Ffmpeg,
         args: extract_hevc_args(input_file, &source_hevc),
         reports_media_progress: false,
     };
     let extract_source_rpu = ProcessStep {
+        code: "dv_extract_source_rpu",
         label: "提取源 RPU 动态元数据".to_string(),
         program: RuntimeProgram::DoviTool,
         args: vec![
@@ -241,18 +255,21 @@ fn build_dolby_vision_plan(
         reports_media_progress: false,
     };
     let encode = ProcessStep {
+        code: "dv_encode_base_layer",
         label: format!("重编码 Dolby Vision {} 基础画面", route.output_label),
         program: RuntimeProgram::Ffmpeg,
         args: dolby_vision_encode_args(payload, input_file, &partial_output, video, route)?,
         reports_media_progress: true,
     };
     let extract_output = ProcessStep {
+        code: "dv_extract_output_video",
         label: "提取输出 Dolby Vision 视频流".to_string(),
         program: RuntimeProgram::Ffmpeg,
         args: extract_hevc_args(&partial_output.to_string_lossy(), &output_hevc),
         reports_media_progress: false,
     };
     let extract_output_rpu = ProcessStep {
+        code: "dv_extract_output_rpu",
         label: "提取输出 RPU 用于校验".to_string(),
         program: RuntimeProgram::DoviTool,
         args: vec![
@@ -264,10 +281,18 @@ fn build_dolby_vision_plan(
         ],
         reports_media_progress: false,
     };
-    let export_source_rpu =
-        export_rpu_json_step("导出源 RPU 语义数据", &source_rpu, &source_rpu_json);
-    let export_output_rpu =
-        export_rpu_json_step("导出输出 RPU 语义数据", &output_rpu, &output_rpu_json);
+    let export_source_rpu = export_rpu_json_step(
+        "dv_export_source_rpu",
+        "导出源 RPU 语义数据",
+        &source_rpu,
+        &source_rpu_json,
+    );
+    let export_output_rpu = export_rpu_json_step(
+        "dv_export_output_rpu",
+        "导出输出 RPU 语义数据",
+        &output_rpu,
+        &output_rpu_json,
+    );
 
     Ok(TranscodePlan {
         steps: vec![
@@ -308,8 +333,14 @@ fn build_dolby_vision_plan(
 }
 
 /** 使用 dovi_tool 将逐帧 RPU 导出为可做语义比较的 JSON。 */
-fn export_rpu_json_step(label: &str, rpu_file: &Path, output_file: &Path) -> ProcessStep {
+fn export_rpu_json_step(
+    code: &'static str,
+    label: &str,
+    rpu_file: &Path,
+    output_file: &Path,
+) -> ProcessStep {
     ProcessStep {
+        code,
         label: label.to_string(),
         program: RuntimeProgram::DoviTool,
         args: vec![

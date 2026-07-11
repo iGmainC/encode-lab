@@ -26,12 +26,12 @@ type Props = {
 type JobStatusFilter = "all" | "active" | "failed" | "completed";
 
 /** 固定筛选项，保持专业工作台中的任务视图顺序稳定。 */
-const STATUS_FILTER_OPTIONS: Array<{ value: JobStatusFilter; label: string }> = [
-  { value: "all", label: "全部" },
-  { value: "active", label: "执行中" },
-  { value: "failed", label: "异常" },
-  { value: "completed", label: "已完成" },
-];
+const STATUS_FILTER_OPTIONS = [
+  { value: "all", labelKey: "jobs.filter.all" },
+  { value: "active", labelKey: "jobs.filter.active" },
+  { value: "failed", labelKey: "jobs.filter.failed" },
+  { value: "completed", labelKey: "jobs.filter.completed" },
+] as const satisfies ReadonlyArray<{ value: JobStatusFilter; labelKey: Parameters<ReturnType<typeof useI18n>["t"]>[0] }>;
 
 /**
  * 专业任务列表与详情检查器组成的转码中心。
@@ -80,12 +80,14 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
         request: { jobId, action: "cancel" },
       });
       if (!response.ok) {
-        throw new Error("任务状态已经变化，取消操作未生效");
+        throw new Error(t("jobs.action.cancelStale"));
       }
       onJobsChanged();
     } catch (error) {
       // Tauri 命令可能抛出结构化对象或 Error，统一提取成可读反馈。
-      setActionError(`取消任务失败：${formatActionError(error)}`);
+      setActionError(t("jobs.action.cancelFailed", {
+        message: formatActionError(error, t("jobs.action.unknownError")),
+      }));
     } finally {
       setCancelingJobId(null);
     }
@@ -98,9 +100,7 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
   async function deleteJob(jobId: string) {
     const job = sortedJobs.find((item) => item.id === jobId);
     const jobName = job?.name?.trim() || formatPathName(job?.outputFile ?? "") || jobId;
-    const confirmed = window.confirm(
-      `只删除“${jobName}”的任务记录。\n\n输出文件不会被删除，仍会保留在磁盘上。\n\n确定继续吗？`,
-    );
+    const confirmed = window.confirm(t("jobs.action.deleteConfirm", { name: jobName }));
     if (!confirmed) {
       return;
     }
@@ -116,12 +116,14 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
         request: { jobId },
       });
       if (!response.ok) {
-        throw new Error("记录仍然存在，删除操作未生效");
+        throw new Error(t("jobs.action.deleteStale"));
       }
       onJobsChanged();
     } catch (error) {
       // 删除失败时保留当前详情，避免用户失去错误上下文。
-      setActionError(`删除记录失败：${formatActionError(error)}`);
+      setActionError(t("jobs.action.deleteFailed", {
+        message: formatActionError(error, t("jobs.action.unknownError")),
+      }));
     } finally {
       setDeletingJobId(null);
     }
@@ -137,14 +139,14 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
           aria-live="polite"
         >
           <span className={`size-1.5 rounded-full ${activeCount > 0 ? "bg-primary" : "bg-muted-foreground/50"}`} />
-          {activeCount > 0 ? `${activeCount} 个任务正在执行` : "本机队列空闲"}
+          {activeCount > 0 ? t("jobs.queue.active", { count: activeCount }) : t("jobs.queue.idle")}
         </span>
 
         <div className="flex flex-wrap items-center divide-x text-sm">
-          <QueueCounter label="运行" value={runningCount} tone={runningCount > 0 ? "primary" : "default"} />
-          <QueueCounter label="排队" value={queuedCount} />
-          <QueueCounter label="异常" value={failedCount} tone={failedCount > 0 ? "danger" : "default"} />
-          <QueueCounter label="完成" value={completedCount} tone="success" />
+          <QueueCounter label={t("jobs.counter.running")} value={runningCount} tone={runningCount > 0 ? "primary" : "default"} />
+          <QueueCounter label={t("jobs.counter.queued")} value={queuedCount} />
+          <QueueCounter label={t("jobs.counter.failed")} value={failedCount} tone={failedCount > 0 ? "danger" : "default"} />
+          <QueueCounter label={t("jobs.counter.completed")} value={completedCount} tone="success" />
         </div>
       </header>
 
@@ -155,26 +157,26 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
             variant="ghost"
             className="absolute right-2 top-2 text-destructive"
             onClick={() => setActionError(null)}
-            aria-label="关闭错误提示"
+            aria-label={t("jobs.closeError")}
           >
             <X aria-hidden="true" />
           </Button>
           <AlertTriangle className="absolute left-4 top-4 size-4 text-destructive" aria-hidden="true" />
-          <AlertTitle className="text-destructive">任务操作未完成</AlertTitle>
+          <AlertTitle className="text-destructive">{t("jobs.actionErrorTitle")}</AlertTitle>
           <AlertDescription className="pr-8 text-destructive/90">{actionError}</AlertDescription>
         </Alert>
       ) : null}
 
       <div className="grid min-h-0 flex-1 overflow-hidden rounded-xl border bg-card xl:grid-cols-[minmax(560px,1fr)_440px]">
-        <section className="flex min-h-0 min-w-0 flex-col" aria-label="转码任务列表">
+        <section className="flex min-h-0 min-w-0 flex-col" aria-label={t("jobs.listLabel")}>
           <div className="flex flex-col gap-3 border-b px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex items-baseline gap-2">
-              <h2 className="text-sm font-semibold">任务队列</h2>
+              <h2 className="text-sm font-semibold">{t("jobs.queueTitle")}</h2>
               <span className="text-xs tabular-nums text-muted-foreground">
                 {filteredJobs.length} / {jobs.length}
               </span>
             </div>
-            <div className="flex w-fit items-center gap-1 rounded-lg bg-muted/60 p-1" aria-label="任务状态筛选">
+            <div className="flex w-fit items-center gap-1 rounded-lg bg-muted/60 p-1" aria-label={t("jobs.filterLabel")}>
               <ListFilter className="ml-1 size-3.5 text-muted-foreground" aria-hidden="true" />
               {STATUS_FILTER_OPTIONS.map((option) => (
                 <Button
@@ -188,17 +190,17 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
                   }}
                   aria-pressed={statusFilter === option.value}
                 >
-                  {option.label}
+                  {t(option.labelKey)}
                 </Button>
               ))}
             </div>
           </div>
 
           <div className="hidden grid-cols-[minmax(0,1fr)_96px_138px_116px] gap-3 border-b bg-muted/20 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground lg:grid">
-            <div>任务 / 进度</div>
-            <div>状态</div>
-            <div>实时</div>
-            <div>输出</div>
+            <div>{t("jobs.column.taskProgress")}</div>
+            <div>{t("jobs.column.status")}</div>
+            <div>{t("jobs.column.live")}</div>
+            <div>{t("jobs.column.output")}</div>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto">
@@ -250,16 +252,16 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
               <div className="flex min-h-56 flex-col items-center justify-center px-6 text-center">
                 <CheckCircle2 className="size-7 text-muted-foreground/50" aria-hidden="true" />
                 <div className="mt-3 text-sm font-medium">
-                  {jobs.length === 0 ? "还没有转码任务" : "当前筛选下没有任务"}
+                  {jobs.length === 0 ? t("jobs.empty.noJobs") : t("jobs.empty.noMatches")}
                 </div>
                 <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
                   {jobs.length === 0
-                    ? "从工作台验证参数并加入队列后，实时进度和输出结果会出现在这里。"
-                    : "切换状态筛选，或等待任务状态更新。"}
+                    ? t("jobs.empty.noJobsDescription")
+                    : t("jobs.empty.noMatchesDescription")}
                 </p>
                 {jobs.length > 0 && statusFilter !== "all" ? (
                   <Button className="mt-3" size="sm" variant="outline" onClick={() => setStatusFilter("all")}>
-                    查看全部任务
+                    {t("jobs.empty.showAll")}
                   </Button>
                 ) : null}
               </div>
@@ -350,19 +352,20 @@ function JobProgress({
   metrics?: JobMetricsEvent;
   emptyText: string;
 }) {
+  const { t } = useI18n();
   if (job.status !== "queued" && job.status !== "running") {
     return null;
   }
 
   const progress = typeof metrics?.progress === "number" ? clampProgress(metrics.progress) : null;
-  const label = job.status === "queued" ? "等待调度" : formatProgress(progress, emptyText);
+  const label = job.status === "queued" ? t("jobs.progress.waiting") : formatProgress(progress, emptyText);
 
   return (
     <div className="mt-2 flex items-center gap-2">
       <div
         className="h-1.5 min-w-20 flex-1 overflow-hidden rounded-full bg-muted"
         role="progressbar"
-        aria-label={`${job.name ?? job.id} 转码进度`}
+        aria-label={t("jobs.progress.aria", { name: job.name ?? job.id })}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={progress ?? undefined}
@@ -381,6 +384,7 @@ function JobProgress({
  * 展示列表中的实时性能与阶段信息。
  */
 function JobRuntimeSummary({ job, metrics }: { job: JobHistory; metrics?: JobMetricsEvent }) {
+  const { t } = useI18n();
   if (job.status === "running") {
     return (
       <div className="min-w-0 text-xs tabular-nums">
@@ -395,7 +399,7 @@ function JobRuntimeSummary({ job, metrics }: { job: JobHistory; metrics?: JobMet
   if (job.status === "queued") {
     return (
       <div className="text-xs">
-        <div className="font-medium">等待调度</div>
+        <div className="font-medium">{t("jobs.progress.waiting")}</div>
         <div className="mt-1 text-muted-foreground">{formatTimestamp(job.createdAt)}</div>
       </div>
     );
@@ -403,7 +407,7 @@ function JobRuntimeSummary({ job, metrics }: { job: JobHistory; metrics?: JobMet
 
   return (
     <div className="text-xs">
-      <div className="text-muted-foreground">{job.endedAt ? "结束于" : "创建于"}</div>
+      <div className="text-muted-foreground">{job.endedAt ? t("jobs.runtime.endedAt") : t("jobs.runtime.createdAt")}</div>
       <div className="mt-1 tabular-nums">{formatTimestamp(job.endedAt ?? job.createdAt)}</div>
     </div>
   );
@@ -413,6 +417,7 @@ function JobRuntimeSummary({ job, metrics }: { job: JobHistory; metrics?: JobMet
  * 展示列表中的输出结果摘要。
  */
 function JobOutputSummary({ job }: { job: JobHistory }) {
+  const { t } = useI18n();
   if (job.status === "completed") {
     const toneClass =
       typeof job.sizeChangePercent !== "number"
@@ -427,7 +432,7 @@ function JobOutputSummary({ job }: { job: JobHistory }) {
         <div className={`font-mono font-semibold tabular-nums ${toneClass}`}>
           {formatSizeChangePercent(job.sizeChangePercent)}
         </div>
-        <div className="mt-1 text-muted-foreground">{formatBytes(job.outputSizeBytes)}</div>
+        <div className="mt-1 text-muted-foreground">{formatBytes(job.outputSizeBytes, t("jobs.size.pending"))}</div>
       </div>
     );
   }
@@ -435,15 +440,15 @@ function JobOutputSummary({ job }: { job: JobHistory }) {
   if (job.status === "failed" || job.status === "interrupted") {
     return (
       <div className="text-xs text-destructive">
-        <div className="font-medium">不可用</div>
-        <div className="mt-1 opacity-80">查看错误</div>
+        <div className="font-medium">{t("jobs.output.unavailable")}</div>
+        <div className="mt-1 opacity-80">{t("jobs.output.seeError")}</div>
       </div>
     );
   }
 
   return (
     <div className="text-xs text-muted-foreground">
-      <div>{job.status === "canceled" ? "未生成" : "目标已设置"}</div>
+      <div>{job.status === "canceled" ? t("jobs.output.notGenerated") : t("jobs.output.targetSet")}</div>
       <div className="mt-1 truncate">{formatPathName(job.outputFile)}</div>
     </div>
   );
@@ -453,15 +458,16 @@ function JobOutputSummary({ job }: { job: JobHistory }) {
  * 将任务状态转换为一致的中文徽标。
  */
 function JobStatusBadge({ status }: { status: JobHistory["status"] }) {
-  const labelMap: Record<JobHistory["status"], string> = {
-    queued: "排队",
-    running: "运行",
-    paused: "暂停",
-    completed: "完成",
-    failed: "失败",
-    canceled: "取消",
-    interrupted: "中断",
-  };
+  const { t } = useI18n();
+  const labelKeyMap = {
+    queued: "jobs.status.queued",
+    running: "jobs.status.running",
+    paused: "jobs.status.paused",
+    completed: "jobs.status.completed",
+    failed: "jobs.status.failed",
+    canceled: "jobs.status.canceled",
+    interrupted: "jobs.status.interrupted",
+  } as const;
   const className =
     status === "completed"
       ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
@@ -470,7 +476,7 @@ function JobStatusBadge({ status }: { status: JobHistory["status"] }) {
         : status === "running"
           ? "bg-primary text-primary-foreground"
           : "bg-muted text-muted-foreground";
-  return <Badge className={`w-fit ${className}`}>{labelMap[status]}</Badge>;
+  return <Badge className={`w-fit ${className}`}>{t(labelKeyMap[status])}</Badge>;
 }
 
 /**
@@ -483,7 +489,7 @@ function formatJobId(value: string) {
 /**
  * 将未知异常转换为用户可读的后端错误信息。
  */
-function formatActionError(error: unknown) {
+function formatActionError(error: unknown, fallback: string) {
   if (error instanceof Error) {
     return error.message;
   }
@@ -493,7 +499,7 @@ function formatActionError(error: unknown) {
   if (typeof error === "string" && error.trim()) {
     return error;
   }
-  return "未知错误，请刷新队列后重试";
+  return fallback;
 }
 
 /**
@@ -571,9 +577,9 @@ function formatEta(value?: number | null) {
 /**
  * 按常见文件单位格式化可选字节数。
  */
-function formatBytes(value?: number | null) {
+function formatBytes(value: number | null | undefined, fallback: string) {
   if (typeof value !== "number") {
-    return "体积待记录";
+    return fallback;
   }
   const units = ["B", "KB", "MB", "GB", "TB"];
   let nextValue = value;

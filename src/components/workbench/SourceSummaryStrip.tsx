@@ -1,6 +1,7 @@
 import { AlertCircle, CheckCircle2, FileVideo2, RefreshCw, Replace } from "lucide-react";
 import { formatBytes, formatDuration, formatFps, formatHdrType, getPathName } from "../../lib/mediaFormat";
 import type { VideoMetadataResult } from "../../types/workbench";
+import { useI18n } from "../../i18n/I18nProvider";
 import { Button } from "../ui/button";
 
 type SourceSummaryStripProps = {
@@ -25,6 +26,7 @@ export function SourceSummaryStrip({
   onPickSource,
   onRetry,
 }: SourceSummaryStripProps) {
+  const { t } = useI18n();
   const video = metadata?.video;
   const audio = metadata?.audio;
 
@@ -38,27 +40,27 @@ export function SourceSummaryStrip({
             </h2>
             <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
               {loading ? <RefreshCw className="size-3 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="size-3" aria-hidden="true" />}
-              {loading ? "正在分析" : "素材已分析"}
+              {loading ? t("source.summary.analyzing") : t("source.summary.analyzed")}
             </span>
-            <span className="text-xs text-muted-foreground">方案：{activeTemplateName}</span>
+            <span className="text-xs text-muted-foreground">{t("source.summary.preset", { name: activeTemplateName })}</span>
           </div>
           <dl className="mt-2 grid gap-x-5 gap-y-2 text-xs sm:grid-cols-2 xl:grid-cols-5">
-            <SummaryValue label="容器" value={metadata?.containerFormat ?? "-"} />
+            <SummaryValue label={t("source.summary.container")} value={metadata?.containerFormat ?? "-"} />
             <SummaryValue
-              label="视频"
+              label={t("source.summary.video")}
               value={video?.width && video?.height ? `${video.width} × ${video.height} · ${formatFps(video.fps)} fps` : "-"}
             />
             <SummaryValue
-              label="编码"
+              label={t("source.summary.codec")}
               value={[video?.codecName, video?.pixFmt, video?.bitDepth ? `${video.bitDepth}-bit` : ""].filter(Boolean).join(" · ") || "-"}
             />
             <SummaryValue
-              label="音频"
+              label={t("source.summary.audio")}
               value={[audio?.codecName, audio?.sampleRate ? `${audio.sampleRate / 1000} kHz` : "", audio?.channelLayout].filter(Boolean).join(" · ") || "-"}
             />
             <SummaryValue
-              label="HDR / 时长 / 体积"
-              value={`${formatHdrType(video?.hdrType)} · ${formatDuration(metadata?.durationSec)} · ${formatBytes(metadata?.sizeBytes)}`}
+              label={t("source.summary.hdrDurationSize")}
+              value={`${formatHdrType(video?.hdrType, t("source.summary.unknownHdr"))} · ${formatDuration(metadata?.durationSec)} · ${formatBytes(metadata?.sizeBytes)}`}
             />
           </dl>
         </div>
@@ -66,12 +68,12 @@ export function SourceSummaryStrip({
           {error ? (
             <Button size="sm" variant="outline" onClick={onRetry}>
               <RefreshCw data-icon="inline-start" aria-hidden="true" />
-              重试读取
+              {t("source.retry")}
             </Button>
           ) : null}
           <Button size="sm" variant="secondary" onClick={onPickSource}>
             <Replace data-icon="inline-start" aria-hidden="true" />
-            替换源素材
+            {t("source.summary.replace")}
           </Button>
         </div>
       </div>

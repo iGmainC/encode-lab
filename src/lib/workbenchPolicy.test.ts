@@ -100,6 +100,15 @@ describe("workbench HDR output policy", () => {
     expect(getColorIssueIds(metadata, snapshot)).toEqual([]);
   });
 
+  test("rejects custom audio in the Dolby Vision preservation path", () => {
+    const metadata = buildMetadata("DolbyVision");
+    const snapshot = buildSnapshot();
+    snapshot.video.preserveDolbyVisionMetadata = true;
+    snapshot.audio = { mode: "custom", customArgs: "-c:a aac" };
+
+    expect(getIssueIds(metadata, snapshot)).toContain("dolby-vision-audio-mode");
+  });
+
   test("allows stream copy because it does not re-encode the HDR signal", () => {
     const snapshot = buildSnapshot();
     snapshot.video.codecFormat = "copy";

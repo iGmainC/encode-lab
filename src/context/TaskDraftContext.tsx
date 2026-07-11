@@ -10,6 +10,8 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useI18n } from "../i18n/I18nProvider";
+import type { TranslationKey } from "../i18n/translations";
 import { isTauriRuntime } from "../lib/tauriRuntime";
 import type {
   TaskDraftSnapshot,
@@ -22,6 +24,8 @@ type TaskDraftContextValue = {
   setDraftName: (value: string) => void;
   /** 当前参数来源；仅用于界面说明，不与输入素材绑定。 */
   activeTemplateName: string;
+  /** 当前参数是否来自一个具名方案；默认自定义配置不属于具名方案。 */
+  hasNamedTemplate: boolean;
   setActiveTemplateName: (value: string) => void;
   formCodec: string;
   setFormCodec: (value: string) => void;
@@ -102,6 +106,88 @@ type TaskDraftContextValue = {
 
 const TaskDraftContext = createContext<TaskDraftContextValue | null>(null);
 
+/** 源素材选择状态；revision 让重复选择同一路径仍能触发一次新的元数据读取。 */
+type SourceSelectionState = {
+  path: string;
+  revision: number;
+};
+
+/** 元数据错误保留稳定翻译键，切换语言时无需重新触发文件选择。 */
+type VideoMetadataErrorState = {
+  message: string;
+  key?: TranslationKey;
+};
+
+/**
+ * 推进源素材选择版本，不能仅依赖路径字符串判断用户是否重新选择了素材。
+ * @param current 当前选择状态
+ * @param path 新选择的素材路径
+ * @returns 带有新选择版本的状态
+ */
+export function advanceSourceSelection(
+  current: SourceSelectionState,
+  path: string,
+): SourceSelectionState {
+  return { path, revision: current.revision + 1 };
+}
+
+/**
+ * 解析 Dolby Vision 保留链路允许的音频模式。
+ * @param preservesDolbyVision 是否启用 RPU 保留链路
+ * @param requestedMode 表单或模板请求的音频模式
+ * @returns 可进入任务快照的音频模式
+ */
+export function resolveDolbyVisionAudioMode(
+  preservesDolbyVision: boolean,
+  requestedMode: "copy" | "custom",
+): "copy" | "custom" {
+  return preservesDolbyVision ? "copy" : requestedMode;
+}
+
+/**
+ * 新元数据到达时收敛 Dolby Vision 保留意图。
+ * @param current 当前是否已启用保留
+ * @param metadata 已确认属于当前源文件的元数据
+ * @returns 只有新源仍是 Dolby Vision 时才继续保留
+ */
+export function resolveDolbyVisionPreservationAfterMetadata(
+  current: boolean,
+  metadata: VideoMetadataResult,
+) {
+  return current && metadata.video?.hdrType === "DolbyVision";
+}
+
+/**
+ * 根据素材读取阶段收敛截取范围。
+ * @param input 当前源路径、可能尚未返回的时长和用户输入
+ * @returns null 表示元数据刷新中，应保持原值；否则返回已收敛范围
+ */
+export function resolveClipRangeAfterMetadataRefresh({
+  sourceFilePath,
+  durationSec,
+  currentStartSec,
+  currentEndSec,
+}: {
+  sourceFilePath: string;
+  durationSec?: number;
+  currentStartSec: number;
+  currentEndSec: number;
+}): { startSec: number; endSec: number } | null {
+  if (sourceFilePath.trim() && durationSec === undefined) {
+    return null;
+  }
+  if (!sourceFilePath.trim() || !durationSec || durationSec <= 0) {
+    return { startSec: 0, endSec: 0 };
+  }
+
+  return {
+    startSec: Math.min(Math.max(0, currentStartSec), durationSec),
+    endSec: currentEndSec <= 0
+      ? durationSec
+      : Math.min(Math.max(currentEndSec, 0), durationSec),
+  };
+}
+
 /**
  * 普通浏览器预览用的只读示例素材，避免设计 QA 被 Tauri 宿主缺失阻断。
  * @returns 示例视频元数据
@@ -144,10 +230,17 @@ export function TaskDraftProvider({
   /** 全局默认输出目录；只用于尚未指定任务级目录的新草稿。 */
   defaultOutputDir?: string;
 }) {
+  const { t } = useI18n();
+  const desktopRuntime = isTauriRuntime();
   const [draftName, setDraftName] = useState("preview-draft");
-  const [activeTemplateName, setActiveTemplateName] = useState(() =>
-    isTauriRuntime() ? "自定义配置" : "线上发布副本",
-  );
+  const [activeTemplateOverride, setActiveTemplateOverride] = useState<string | null>(null);
+  // 默认方案名由当前 locale 动态解析，切换语言时不会保留首次渲染的旧文案。
+  const activeTemplateName = activeTemplateOverride
+    ?? t(desktopRuntime ? "taskDraft.template.custom" : "app.browserPreview.templateName");
+  const hasNamedTemplate = activeTemplateOverride !== null || !desktopRuntime;
+  const setActiveTemplateName = useCallback((value: string) => {
+    setActiveTemplateOverride(value.trim() || null);
+  }, []);
   const [formCodec, setFormCodec] = useState("h265");
   const [formEncoder, setFormEncoder] = useState("libx265");
   const [formMode, setFormMode] = useState<"CRF" | "CBR" | "ABR">("CRF");
@@ -189,14 +282,16 @@ export function TaskDraftProvider({
   const [fileNamePattern, setFileNamePattern] = useState("{inputName}_{taskName}");
   const [clipStartSec, setClipStartSec] = useState(0);
   const [clipEndSec, setClipEndSec] = useState(0);
-  const [sourceFilePath, setSourceFilePathState] = useState(() =>
-    isTauriRuntime() ? "" : "/Users/encode-lab/Travel_2024_Film.mov",
-  );
+  const [sourceSelection, setSourceSelection] = useState<SourceSelectionState>(() => ({
+    path: isTauriRuntime() ? "" : "/Users/encode-lab/Travel_2024_Film.mov",
+    revision: 0,
+  }));
+  const sourceFilePath = sourceSelection.path;
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadataResult | null>(() =>
     isTauriRuntime() ? null : buildBrowserPreviewMetadata(),
   );
   const [videoMetadataLoading, setVideoMetadataLoading] = useState(false);
-  const [videoMetadataError, setVideoMetadataError] = useState<string | null>(null);
+  const [videoMetadataErrorState, setVideoMetadataErrorState] = useState<VideoMetadataErrorState | null>(null);
   const metadataRequestRef = useRef(0);
   const initializedDefaultOutputRef = useRef(false);
 
@@ -206,9 +301,10 @@ export function TaskDraftProvider({
    */
   const setSourceFilePath = useCallback((value: string) => {
     metadataRequestRef.current += 1;
-    setSourceFilePathState(value);
+    // 即使路径相同也推进 revision，确保“重新选择”表达为新的读取意图。
+    setSourceSelection((current) => advanceSourceSelection(current, value));
     setVideoMetadata(null);
-    setVideoMetadataError(null);
+    setVideoMetadataErrorState(null);
     setVideoMetadataLoading(Boolean(value.trim()) && isTauriRuntime());
   }, []);
 
@@ -228,20 +324,24 @@ export function TaskDraftProvider({
     const requestId = ++metadataRequestRef.current;
     if (!trimmed) {
       setVideoMetadata(null);
-      setVideoMetadataError(null);
+      setVideoMetadataErrorState(null);
       setVideoMetadataLoading(false);
       return;
     }
 
     if (!isTauriRuntime()) {
       // 浏览器 QA 仍保持元数据与当前路径一一对应，覆盖替换素材的竞态分支。
-      setVideoMetadata({ ...buildBrowserPreviewMetadata(), inputFile: trimmed });
+      const result = { ...buildBrowserPreviewMetadata(), inputFile: trimmed };
+      setPreserveDolbyVisionMetadata((current) =>
+        resolveDolbyVisionPreservationAfterMetadata(current, result),
+      );
+      setVideoMetadata(result);
       setVideoMetadataLoading(false);
       return;
     }
 
     setVideoMetadataLoading(true);
-    setVideoMetadataError(null);
+    setVideoMetadataErrorState(null);
     try {
       const result = await invoke<VideoMetadataResult>("read_video_metadata", {
         inputFile: trimmed,
@@ -250,13 +350,17 @@ export function TaskDraftProvider({
       if (requestId !== metadataRequestRef.current) {
         return;
       }
+      // 与元数据落地同一批更新，不能留出“新源非 DV 但旧 preserve=true”的可提交帧。
+      setPreserveDolbyVisionMetadata((current) =>
+        resolveDolbyVisionPreservationAfterMetadata(current, result),
+      );
       setVideoMetadata(result);
     } catch (err) {
       if (requestId !== metadataRequestRef.current) {
         return;
       }
       setVideoMetadata(null);
-      setVideoMetadataError(err instanceof Error ? err.message : String(err));
+      setVideoMetadataErrorState({ message: err instanceof Error ? err.message : String(err) });
     } finally {
       if (requestId === metadataRequestRef.current) {
         setVideoMetadataLoading(false);
@@ -270,7 +374,7 @@ export function TaskDraftProvider({
       // 使仍在飞行中的读取结果失效，空素材状态不能被旧请求反写。
       metadataRequestRef.current += 1;
       setVideoMetadata(null);
-      setVideoMetadataError(null);
+      setVideoMetadataErrorState(null);
       setVideoMetadataLoading(false);
       return;
     }
@@ -280,7 +384,7 @@ export function TaskDraftProvider({
     }, 300);
 
     return () => window.clearTimeout(timer);
-  }, [sourceFilePath, fetchVideoMetadata]);
+  }, [sourceFilePath, sourceSelection.revision, fetchVideoMetadata]);
 
   useEffect(() => {
     if (!keepOriginalResolution) {
@@ -308,27 +412,26 @@ export function TaskDraftProvider({
   }, [keepOriginalFps, videoMetadata?.video?.fps]);
 
   useEffect(() => {
-    const durationSec = videoMetadata?.durationSec;
-    if (!durationSec || durationSec <= 0) {
-      setClipStartSec(0);
-      setClipEndSec(0);
+    const nextRange = resolveClipRangeAfterMetadataRefresh({
+      sourceFilePath,
+      durationSec: videoMetadata?.durationSec,
+      currentStartSec: clipStartSec,
+      currentEndSec: clipEndSec,
+    });
+    // 有源素材但元数据正在刷新时保留截取意图，等新时长返回后再统一收敛边界。
+    if (!nextRange) {
       return;
     }
-
-    setClipStartSec((current) => Math.min(Math.max(0, current), durationSec));
-    setClipEndSec((current) => {
-      if (current <= 0) {
-        return durationSec;
-      }
-      return Math.min(Math.max(current, 0), durationSec);
-    });
-  }, [videoMetadata?.durationSec]);
+    setClipStartSec(nextRange.startSec);
+    setClipEndSec(nextRange.endSec);
+  }, [clipEndSec, clipStartSec, sourceFilePath, videoMetadata?.durationSec]);
 
   useEffect(() => {
-    if (videoMetadata?.video?.hdrType !== "DolbyVision") {
+    // 重读期间 metadata 会暂时为空；只有清空源或新元数据明确不支持时才撤销用户意图。
+    if (!sourceFilePath.trim() || (videoMetadata && videoMetadata.video?.hdrType !== "DolbyVision")) {
       setPreserveDolbyVisionMetadata(false);
     }
-  }, [videoMetadata?.video?.hdrType]);
+  }, [sourceFilePath, videoMetadata]);
 
   const pickSourceFile = useCallback(async () => {
     try {
@@ -346,7 +449,10 @@ export function TaskDraftProvider({
         setSourceFilePath(selected);
       }
     } catch (error) {
-      setVideoMetadataError(`选择源素材失败：${error instanceof Error ? error.message : String(error)}`);
+      setVideoMetadataErrorState({
+        key: "taskDraft.source.pickFailed",
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }, [setSourceFilePath]);
 
@@ -363,6 +469,8 @@ export function TaskDraftProvider({
     const video = snapshot.video;
     const container = snapshot.container;
     const advancedArgs = snapshot.advancedArgs ?? "";
+    const preservesDolbyVision = Boolean(video.preserveDolbyVisionMetadata);
+    const resolvedAudioMode = resolveDolbyVisionAudioMode(preservesDolbyVision, snapshot.audio.mode);
 
     // 方案只写入编码参数；当前素材、截取范围、任务名称和输出目录保持任务级语义。
     setFormCodec(video.codecFormat);
@@ -373,15 +481,16 @@ export function TaskDraftProvider({
     setFormPreset(video.preset ?? "");
     setKeepOriginalResolution(video.keepOriginalResolution ?? !video.resolution);
     setKeepOriginalFps(video.keepOriginalFps ?? !video.fps);
-    setPreserveDolbyVisionMetadata(Boolean(video.preserveDolbyVisionMetadata));
+    setPreserveDolbyVisionMetadata(preservesDolbyVision);
     setFormWidth(video.resolution?.width ? String(video.resolution.width) : "1920");
     setFormHeight(video.resolution?.height ? String(video.resolution.height) : "1080");
     setFormFps(video.fps ? String(video.fps) : "30");
     setFormPixelFormat(video.pixelFormat ?? "yuv420p");
     setContainerFormat(container.format);
     setContainerFaststart(Boolean(container.faststart));
-    setActiveTemplateName(templateName?.trim() || snapshot.name || "自定义配置");
-    setAudioMode(snapshot.audio.mode);
+    setActiveTemplateName(templateName?.trim() || snapshot.name);
+    // 历史模板可能包含后端不接受的 DV + Custom Audio 组合，恢复时直接归一化。
+    setAudioMode(resolvedAudioMode);
     setAudioCustomArgs(snapshot.audio.customArgs ?? "");
     setFileNamePattern(snapshot.output.fileNamePattern || "{inputName}_{taskName}");
     setFormBitrateKbps(readAdvancedArgValue(advancedArgs, "-b:v") ?? "5000");
@@ -396,7 +505,7 @@ export function TaskDraftProvider({
     setAv1TileRows(readTilePart(advancedArgs, 1) ?? "1");
     setAv1SvtTune(readSvtParamValue(advancedArgs, "tune") ?? "0");
     setAv1FilmGrain(readSvtParamValue(advancedArgs, "film-grain") ?? "0");
-  }, []);
+  }, [setActiveTemplateName]);
 
   /**
    * 构建色彩元数据参数。
@@ -497,6 +606,7 @@ export function TaskDraftProvider({
         // 非默认输入即进入快照，让非法区间由统一策略明确阻断，不能静默退回整片。
         (clipStartSec !== 0 || clipEndSec !== durationSec);
       const isVideoStreamCopy = !preserveDolbyVisionMetadata && formCodec === "copy";
+      const resolvedAudioMode = resolveDolbyVisionAudioMode(preserveDolbyVisionMetadata, audioMode);
 
       return {
         name: draftName.trim() || "preview-draft",
@@ -534,8 +644,8 @@ export function TaskDraftProvider({
           enableTwoPass: isVideoStreamCopy || preserveDolbyVisionMetadata ? false : formTwoPass,
         },
         audio: {
-          mode: audioMode,
-          customArgs: audioMode === "custom" ? audioCustomArgs.trim() || undefined : undefined,
+          mode: resolvedAudioMode,
+          customArgs: resolvedAudioMode === "custom" ? audioCustomArgs.trim() || undefined : undefined,
         },
         container: {
           format: preserveDolbyVisionMetadata ? "mkv" : containerFormat,
@@ -582,11 +692,18 @@ export function TaskDraftProvider({
     ],
   );
 
+  const videoMetadataError = videoMetadataErrorState
+    ? videoMetadataErrorState.key
+      ? t(videoMetadataErrorState.key, { message: videoMetadataErrorState.message })
+      : videoMetadataErrorState.message
+    : null;
+
   const value = useMemo(
     () => ({
       draftName,
       setDraftName,
       activeTemplateName,
+      hasNamedTemplate,
       setActiveTemplateName,
       formCodec,
       setFormCodec,
@@ -667,6 +784,7 @@ export function TaskDraftProvider({
     [
       draftName,
       activeTemplateName,
+      hasNamedTemplate,
       formCodec,
       formEncoder,
       formMode,

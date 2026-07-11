@@ -1,5 +1,6 @@
 mod commands;
 mod evaluation;
+mod ffmpeg_args;
 mod ffmpeg_runtime;
 mod models;
 mod preview;

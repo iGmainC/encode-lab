@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{
+    ffmpeg_args::{guard_advanced_output_args, guard_audio_output_args, split_args},
     models::{
         task::{
             AudioMode, ContainerFormat, Resolution, VideoBitrateMode, VideoCodecFormat,
@@ -26,6 +27,9 @@ pub struct CommandBuildOutput {
 
 /// 编码预览使用的小片段帧数，避免部分编码器单帧输出灰帧或延迟帧。
 const PREVIEW_ENCODE_FRAME_COUNT: u8 = 8;
+
+/// Copy 预览使用 FFV1 作为无损临时运输层，避免把任意有损编码结果冒充为流复制画面。
+const COPY_PREVIEW_ENCODER: &str = "ffv1";
 
 /// 重编码后必须删除的源视频统计标签；这些值不会随新码流自动更新。
 const STALE_REENCODED_VIDEO_METADATA_KEYS: [&str; 7] = [
@@ -187,9 +191,14 @@ pub fn build_preview_encoded_frame_command_args(
 
     guard_advanced_args(payload.advanced_args.as_deref())?;
 
+    let previews_stream_copy = matches!(payload.video.codec_format, VideoCodecFormat::Copy);
     let mut warnings = Vec::new();
-    let sanitized_advanced =
-        sanitize_preview_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
+    let sanitized_advanced = if previews_stream_copy {
+        // Copy 不包含画面编码参数；预览只传递源画面证据，不消费高级编码参数。
+        None
+    } else {
+        sanitize_preview_advanced_args(payload.advanced_args.as_deref(), &mut warnings)
+    };
     let mut preview_payload = payload.clone();
 
     // 单帧编码预览不执行 2-pass，也不携带 DV 元数据保留；DV 需要完整 profile 上下文。
@@ -212,7 +221,11 @@ pub fn build_preview_encoded_frame_command_args(
         input_file.to_string(),
     ];
 
-    append_video_args(&preview_payload, &mut args)?;
+    if previews_stream_copy {
+        append_copy_preview_video_args(&mut args);
+    } else {
+        append_video_args(&preview_payload, &mut args)?;
+    }
     append_preview_video_filter(
         &mut args,
         preview_resolution.as_ref(),
@@ -664,6 +677,14 @@ fn append_video_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> Sto
     Ok(())
 }
 
+/// 为 Copy 单帧预览添加无损临时编码器；正式转码路径仍由 `append_video_args` 生成流复制参数。
+fn append_copy_preview_video_args(args: &mut Vec<String>) {
+    args.push("-c:v".to_string());
+    args.push(COPY_PREVIEW_ENCODER.to_string());
+    args.push("-level".to_string());
+    args.push("3".to_string());
+}
+
 fn append_audio_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> StorageResult<()> {
     match payload.audio.mode {
         AudioMode::Copy => {
@@ -674,6 +695,8 @@ fn append_audio_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> Sto
             let custom_args = payload.audio.custom_args.as_ref().ok_or_else(|| {
                 StorageError::InvalidPayload("audio.customArgs is required".to_string())
             })?;
+            // 命令构建层再次执行同一白名单，防止绕过模型 validate 的内部调用注入参数。
+            guard_audio_output_args(custom_args)?;
             args.extend(split_args(custom_args));
         }
     }
@@ -712,45 +735,7 @@ pub(crate) fn append_reencoded_video_metadata_cleanup(args: &mut Vec<String>) {
 }
 
 fn guard_advanced_args(value: Option<&str>) -> StorageResult<()> {
-    let Some(raw) = value else {
-        return Ok(());
-    };
-
-    let tokens = split_args(raw);
-    if tokens.iter().any(|t| t == "-i") {
-        return Err(StorageError::InvalidPayload(
-            "advancedArgs cannot contain -i".to_string(),
-        ));
-    }
-
-    if contains_positional_output_token(&tokens) {
-        return Err(StorageError::InvalidPayload(
-            "advancedArgs cannot contain positional output paths".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn contains_positional_output_token(tokens: &[String]) -> bool {
-    let mut expects_value = false;
-
-    for token in tokens {
-        if token.starts_with('-') {
-            expects_value = !is_flag_without_value(token);
-            continue;
-        }
-
-        if expects_value {
-            expects_value = false;
-            continue;
-        }
-
-        // 不跟随参数名的裸 token 会被 FFmpeg 解释为输出路径，必须拒绝。
-        return true;
-    }
-
-    false
+    guard_advanced_output_args(value)
 }
 
 fn sanitize_advanced_args(raw: Option<&str>, warnings: &mut Vec<String>) -> Option<String> {
@@ -883,14 +868,6 @@ fn is_hardware_encoder(encoder: &VideoEncoder) -> bool {
             | VideoEncoder::HevcNvenc
             | VideoEncoder::Av1Nvenc
     )
-}
-
-fn split_args(raw: &str) -> Vec<String> {
-    raw.split_whitespace().map(ToString::to_string).collect()
-}
-
-fn is_flag_without_value(flag: &str) -> bool {
-    matches!(flag, "-y" | "-n" | "-an" | "-vn" | "-sn" | "-dn")
 }
 
 pub(crate) fn build_passlog_path(input_file: &str, output_file: &str) -> String {
@@ -1141,9 +1118,49 @@ mod tests {
     }
 
     #[test]
+    fn custom_audio_command_accepts_whitelisted_output_options() {
+        let mut value = payload();
+        value.audio.mode = AudioMode::Custom;
+        value.audio.custom_args = Some("-c:a aac -b:a 320k -ar 48000 -ac 2".to_string());
+
+        let commands = build_ffmpeg_command_args(&value, "input.mp4", "output.mp4")
+            .expect("audio args should build");
+        let args = &commands[0];
+
+        for pair in [
+            ["-c:a", "aac"],
+            ["-b:a", "320k"],
+            ["-ar", "48000"],
+            ["-ac", "2"],
+        ] {
+            assert!(args
+                .windows(2)
+                .any(|item| item[0] == pair[0] && item[1] == pair[1]));
+        }
+    }
+
+    #[test]
+    fn custom_audio_command_rejects_video_input_and_extra_output_overrides() {
+        for custom_args in [
+            "-c:a aac -c:v libx264",
+            "-c:a aac -i injected.wav",
+            "-c:a aac extra.mka",
+            "-c:a aac -f tee",
+            "-c:a aac -af astats=metadata=1,ametadata=mode=print:file=/tmp/audio.txt",
+        ] {
+            let mut value = payload();
+            value.audio.mode = AudioMode::Custom;
+            value.audio.custom_args = Some(custom_args.to_string());
+
+            build_ffmpeg_command_args(&value, "input.mp4", "output.mp4")
+                .expect_err("unsafe custom audio option should fail command building");
+        }
+    }
+
+    #[test]
     fn structured_conflict_flags_are_removed_and_warned() {
         let mut value = payload();
-        value.advanced_args = Some("-crf 18 -preset veryslow -x264-params keyint=120".to_string());
+        value.advanced_args = Some("-crf 18 -preset veryslow -metadata title=kept".to_string());
 
         let result = build_ffmpeg_commands(&value, "input.mp4", "output.mp4").expect("build");
         assert!(result
@@ -1159,7 +1176,7 @@ mod tests {
         assert!(cmd.contains("-crf 23"));
         assert!(!cmd.contains("-crf 18"));
         assert!(!cmd.contains("-preset veryslow"));
-        assert!(cmd.contains("-x264-params keyint=120"));
+        assert!(cmd.contains("-metadata title=kept"));
     }
 
     #[test]
@@ -1276,6 +1293,42 @@ mod tests {
         assert!(args.windows(2).any(|item| {
             item[0] == "-vf" && item[1] == "scale=trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2"
         }));
+    }
+
+    #[test]
+    fn build_copy_preview_should_use_lossless_transport_instead_of_stream_copy() {
+        let mut value = payload();
+        value.video.codec_format = VideoCodecFormat::Copy;
+        value.video.encoder = VideoEncoder::Copy;
+        value.video.crf = None;
+        value.video.preset = None;
+        value.video.pixel_format = None;
+        // Copy 的高级参数不属于画面变化，预览链路应忽略并只传递源画面证据。
+        value.advanced_args = Some("-metadata title=copy".to_string());
+
+        let args = build_preview_encoded_frame_command_args(
+            &value,
+            "input.mkv",
+            "preview.mkv",
+            PreviewCommandOptions {
+                time_sec: 1.0,
+                render_scale: 0.5,
+                sdr_tonemap_mode: PreviewSdrTonemapMode::Disabled,
+                source_color: None,
+            },
+        )
+        .expect("copy preview args");
+
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-c:v" && item[1] == "ffv1"));
+        assert!(!args
+            .windows(2)
+            .any(|item| item[0] == "-c:v" && item[1] == "copy"));
+        assert!(args.windows(2).any(|item| {
+            item[0] == "-vf" && item[1] == "scale=trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2"
+        }));
+        assert!(!args.iter().any(|item| item == "-metadata"));
     }
 
     #[test]

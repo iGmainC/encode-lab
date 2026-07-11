@@ -44,14 +44,18 @@ export function formatBytes(value?: number | null) {
 /**
  * 将后端 HDR 枚举翻译为界面标签。
  * @param value HDR 类型
+ * @param unknownLabel 未识别类型的本地化标签
  */
-export function formatHdrType(value?: VideoStreamMetadata["hdrType"]) {
+export function formatHdrType(
+  value?: VideoStreamMetadata["hdrType"],
+  unknownLabel = "Unknown",
+) {
   const labels: Record<NonNullable<VideoStreamMetadata["hdrType"]>, string> = {
     Sdr: "SDR",
     Hdr10: "HDR10",
     Hlg: "HLG",
     DolbyVision: "Dolby Vision",
-    Unknown: "未知",
+    Unknown: unknownLabel,
   };
   return value ? labels[value] : "-";
 }
@@ -67,18 +71,65 @@ export function getPathName(path?: string | null) {
   return path.split(/[\\/]/).pop() || path;
 }
 
+/** 输出文件名预告；jobId 与冲突序号只能在真正入队时确定。 */
+export type OutputFileNamePreview = {
+  /** 与后端一致清理后的文件名主干。 */
+  sanitizedStem: string;
+  /** 包含动态后缀占位符的可展示文件名。 */
+  displayName: string;
+};
+
+/** 默认动态后缀使用语言无关的技术占位符；界面可传入本地化文案。 */
+const DEFAULT_DYNAMIC_SUFFIX_PLACEHOLDER = "<job-id:8>[-N]";
+
 /**
- * 根据当前草稿构造预告输出文件名。
+ * 按后端 `sanitize_file_stem` 的规则清理输出文件名主干。
+ * @param value 已展开变量的文件名主干
+ * @returns 可安全用于预告的文件名主干
+ */
+export function sanitizeOutputFileStem(value: string) {
+  const sanitized = Array.from(value)
+    .map((character) => {
+      const isControl = /\p{Cc}/u.test(character);
+      if (!isControl && !/[\\/:*?"<>|]/u.test(character)) {
+        return character;
+      }
+
+      // 与后端一致：控制字符和路径分隔符直接移除，其余高风险字符替换为下划线。
+      return isControl || character === "/" || character === "\\" ? "" : "_";
+    })
+    .join("")
+    .trim()
+    .replace(/^\.+|\.+$/gu, "");
+
+  return sanitized || "encode-lab-output";
+}
+
+/**
+ * 根据当前草稿构造与后端命名规则一致的输出文件名预告。
  * @param inputFile 源文件路径
  * @param snapshot 当前任务快照
+ * @param dynamicSuffixPlaceholder jobId 与冲突序号的展示占位符
+ * @returns 清理后的主干和带动态后缀占位符的文件名
  */
-export function buildOutputFileName(inputFile: string, snapshot: TaskDraftSnapshot) {
-  const inputName = getPathName(inputFile);
-  const baseName = inputName.replace(/\.[^.]+$/, "") || "output";
+export function buildOutputFileNamePreview(
+  inputFile: string,
+  snapshot: TaskDraftSnapshot,
+  dynamicSuffixPlaceholder = DEFAULT_DYNAMIC_SUFFIX_PLACEHOLDER,
+): OutputFileNamePreview {
+  const inputName = inputFile.split(/[\\/]/).filter(Boolean).pop() || "input";
+  const lastDotIndex = inputName.lastIndexOf(".");
+  // 点文件没有扩展名；普通文件仅去掉最后一段扩展名，与后端 Path::file_stem 对齐。
+  const inputStem = lastDotIndex > 0 ? inputName.slice(0, lastDotIndex) : inputName;
   const renderedPattern = snapshot.output.fileNamePattern
-    .split("{inputName}").join(baseName)
+    .split("{inputName}").join(inputStem || "input")
     .split("{taskName}").join(snapshot.name || "task");
-  return `${renderedPattern}.${snapshot.container.format}`;
+  const sanitizedStem = sanitizeOutputFileStem(renderedPattern);
+
+  return {
+    sanitizedStem,
+    displayName: `${sanitizedStem}-${dynamicSuffixPlaceholder}.${snapshot.container.format}`,
+  };
 }
 
 /**

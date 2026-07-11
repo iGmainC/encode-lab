@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauriRuntime } from "../lib/tauriRuntime";
+import { useI18n } from "../i18n/I18nProvider";
+import type { TranslationKey } from "../i18n/translations";
 
 /** 当前桌面端允许直接拖入的常见视频扩展名。 */
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "mkv", "avi", "m4v", "webm", "flv", "ts"]);
+
+/** 拖放提示保存稳定翻译键，避免切换语言时重建原生窗口监听。 */
+type DropNoticeState = {
+  key: TranslationKey;
+  params?: Record<string, string | number>;
+};
 
 /**
  * 只在挂载当前 Hook 的工作台页面接收 Tauri 文件拖放。
@@ -11,8 +19,9 @@ const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "mkv", "avi", "m4v", "webm", "fl
  * @returns 拖放高亮和用户可读提示
  */
 export function useSourceDropTarget(onSourceFile: (path: string) => void) {
+  const { t } = useI18n();
   const [isDragOver, setIsDragOver] = useState(false);
-  const [dropNotice, setDropNotice] = useState<string | null>(null);
+  const [dropNoticeState, setDropNoticeState] = useState<DropNoticeState | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -37,15 +46,21 @@ export function useSourceDropTarget(onSourceFile: (path: string) => void) {
         const paths = event.payload.paths ?? [];
         const videoPaths = paths.filter(isSupportedVideoPath);
         if (videoPaths.length === 0) {
-          setDropNotice("未找到支持的视频文件，请选择 MP4、MOV、MKV 等常见格式。");
+          setDropNoticeState({ key: "workbench.drop.unsupported" });
           return;
         }
 
         // 当前任务仍是单素材语义，明确告知多文件时只接收首个视频。
         onSourceFile(videoPaths[0]);
-        setDropNotice(
+        setDropNoticeState(
           videoPaths.length > 1
-            ? `已导入 ${getPathName(videoPaths[0])}，其余 ${videoPaths.length - 1} 个视频未加入当前任务。`
+            ? {
+              key: "workbench.drop.multiple",
+              params: {
+                name: getPathName(videoPaths[0]),
+                count: videoPaths.length - 1,
+              },
+            }
             : null,
         );
       })
@@ -55,7 +70,7 @@ export function useSourceDropTarget(onSourceFile: (path: string) => void) {
       })
       .catch(() => {
         if (!disposed) {
-          setDropNotice("桌面拖放监听启动失败，仍可使用“选择源素材”。");
+          setDropNoticeState({ key: "workbench.drop.listenerFailed" });
         }
       });
 
@@ -65,7 +80,11 @@ export function useSourceDropTarget(onSourceFile: (path: string) => void) {
     };
   }, [onSourceFile]);
 
-  return { isDragOver, dropNotice, clearDropNotice: () => setDropNotice(null) };
+  const dropNotice = dropNoticeState
+    ? t(dropNoticeState.key, dropNoticeState.params)
+    : null;
+
+  return { isDragOver, dropNotice, clearDropNotice: () => setDropNoticeState(null) };
 }
 
 /**

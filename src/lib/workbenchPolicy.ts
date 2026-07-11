@@ -4,6 +4,7 @@ import type {
   TaskDraftSnapshot,
   VideoMetadataResult,
 } from "../types/workbench";
+import type { TranslationKey } from "../i18n/translations";
 
 /** 专业参数检查器的固定分组。 */
 export type InspectorTab = "video" | "audio" | "color" | "output";
@@ -12,7 +13,10 @@ export type InspectorTab = "video" | "audio" | "color" | "output";
 export type WorkbenchValidationIssue = {
   id: string;
   tab: InspectorTab;
-  message: string;
+  /** 本地化文案键；策略层只返回稳定语义，不内嵌任一界面语言。 */
+  messageKey: TranslationKey;
+  /** 动态文案参数。 */
+  messageParams?: Record<string, string | number>;
   tone: "warning" | "error";
 };
 
@@ -50,23 +54,59 @@ export function getDolbyVisionPreserveStatus(
   metadata: VideoMetadataResult | null,
   ffmpegProbe: FfmpegProbeResult | null,
 ) {
+  if (!metadata) {
+    return {
+      available: false,
+      resolved: false,
+      detailKey: "parameterInspector.dv.status.metadataPending" as const,
+    };
+  }
+
   const video = metadata?.video;
   if (video?.hdrType !== "DolbyVision") {
-    return { available: false, detail: "当前源素材不是 Dolby Vision，动态元数据保留不可用。" };
+    return {
+      available: false,
+      resolved: true,
+      detailKey: "parameterInspector.dv.status.notDolbyVision" as const,
+    };
   }
-  if (!ffmpegProbe?.ffmpegFound) {
-    return { available: false, detail: "FFmpeg 尚未就绪，无法验证 Dolby Vision 保留链路。" };
+  if (!ffmpegProbe) {
+    return {
+      available: false,
+      resolved: false,
+      detailKey: "parameterInspector.dv.status.probing" as const,
+    };
+  }
+  if (!ffmpegProbe.ffmpegFound) {
+    return {
+      available: false,
+      resolved: true,
+      detailKey: "parameterInspector.dv.status.ffmpegUnavailable" as const,
+    };
   }
   if (!ffmpegProbe.dolbyVision.supportsPreservePipeline) {
-    return { available: false, detail: "当前运行时缺少 dovi_tool、x265 CLI 或 RPU 注入能力。" };
+    return {
+      available: false,
+      resolved: true,
+      detailKey: "parameterInspector.dv.status.pipelineUnavailable" as const,
+    };
   }
   if (!isDolbyVisionPreserveSourceSupported(video)) {
     return {
       available: false,
-      detail: `源片 Profile ${video.dolbyVisionProfile ?? "-"} / compatibility ${video.dolbyVisionCompatibilityId ?? "-"} 不满足当前单层 RPU 保留约束。`,
+      resolved: true,
+      detailKey: "parameterInspector.dv.status.sourceUnsupported" as const,
+      detailParams: {
+        profile: video.dolbyVisionProfile ?? "-",
+        compatibility: video.dolbyVisionCompatibilityId ?? "-",
+      },
     };
   }
-  return { available: true, detail: "可用；开启后会锁定 H.265、libx265、MKV、源尺寸、源帧率与完整时长。" };
+  return {
+    available: true,
+    resolved: true,
+    detailKey: "parameterInspector.dv.status.available" as const,
+  };
 }
 
 /**
@@ -87,15 +127,15 @@ export function buildWorkbenchValidationIssues({
 }): WorkbenchValidationIssue[] {
   const issues: WorkbenchValidationIssue[] = [];
   if (!sourceFilePath.trim() || !metadata) {
-    issues.push({ id: "source", tab: "video", tone: "error", message: "需要先读取有效的源素材。" });
+    issues.push({ id: "source", tab: "video", tone: "error", messageKey: "parameterInspector.validation.source" });
   } else if (metadata.inputFile.trim() !== sourceFilePath.trim()) {
-    issues.push({ id: "source-metadata", tab: "video", tone: "error", message: "源素材已变化，正在等待对应媒体信息刷新。" });
+    issues.push({ id: "source-metadata", tab: "video", tone: "error", messageKey: "parameterInspector.validation.sourceMetadata" });
   }
   if (ffmpegProbe && !ffmpegProbe.ffmpegFound) {
-    issues.push({ id: "ffmpeg", tab: "video", tone: "error", message: "FFmpeg 不可用，当前参数无法执行。" });
+    issues.push({ id: "ffmpeg", tab: "video", tone: "error", messageKey: "parameterInspector.validation.ffmpeg" });
   }
   if (selectedEncoderCapability && !selectedEncoderCapability.available) {
-    issues.push({ id: "encoder", tab: "video", tone: "error", message: "当前编码器在本机不可用，请选择可用编码器。" });
+    issues.push({ id: "encoder", tab: "video", tone: "error", messageKey: "parameterInspector.validation.encoder" });
   }
   if (
     snapshot.video.codecFormat !== "copy" &&
@@ -105,14 +145,14 @@ export function buildWorkbenchValidationIssues({
       snapshot.video.crf < 0 ||
       snapshot.video.crf > 51)
   ) {
-    issues.push({ id: "crf", tab: "video", tone: "error", message: "CRF 必须是 0–51 之间的有效数值。" });
+    issues.push({ id: "crf", tab: "video", tone: "error", messageKey: "parameterInspector.validation.crf" });
   }
   if (
     snapshot.video.codecFormat !== "copy" &&
     snapshot.video.bitrateMode !== "CRF" &&
     !["-b:v", "-maxrate", "-bufsize"].every((flag) => isPositiveRateValue(readAdvancedArgValue(snapshot.advancedArgs, flag)))
   ) {
-    issues.push({ id: "bitrate", tab: "video", tone: "error", message: "目标码率、maxrate 和 bufsize 必须是大于 0 的有效数值。" });
+    issues.push({ id: "bitrate", tab: "video", tone: "error", messageKey: "parameterInspector.validation.bitrate" });
   }
   if (
     snapshot.video.resolution &&
@@ -123,22 +163,29 @@ export function buildWorkbenchValidationIssues({
       snapshot.video.resolution.width <= 0 ||
       snapshot.video.resolution.height <= 0)
   ) {
-    issues.push({ id: "resolution", tab: "video", tone: "error", message: "输出宽高必须大于 0。" });
+    issues.push({ id: "resolution", tab: "video", tone: "error", messageKey: "parameterInspector.validation.resolution" });
   }
   if (typeof snapshot.video.fps === "number" && (!Number.isFinite(snapshot.video.fps) || snapshot.video.fps <= 0)) {
-    issues.push({ id: "fps", tab: "video", tone: "error", message: "输出帧率必须大于 0。" });
+    issues.push({ id: "fps", tab: "video", tone: "error", messageKey: "parameterInspector.validation.fps" });
   }
   appendClipRangeIssues(issues, metadata, snapshot);
   appendStreamCopyIssues(issues, snapshot);
   appendHdrOutputIssues(issues, metadata, snapshot);
-  if (snapshot.audio.mode === "custom" && !snapshot.audio.customArgs?.trim()) {
-    issues.push({ id: "audio", tab: "audio", tone: "error", message: "自定义音频模式需要填写 FFmpeg 音频参数。" });
+  if (snapshot.video.preserveDolbyVisionMetadata && snapshot.audio.mode !== "copy") {
+    issues.push({
+      id: "dolby-vision-audio-mode",
+      tab: "audio",
+      tone: "error",
+      messageKey: "parameterInspector.validation.dolbyVisionAudioMode",
+    });
+  } else if (snapshot.audio.mode === "custom" && !snapshot.audio.customArgs?.trim()) {
+    issues.push({ id: "audio", tab: "audio", tone: "error", messageKey: "parameterInspector.validation.audio" });
   }
   if (!snapshot.output.fileNamePattern.trim()) {
-    issues.push({ id: "filename", tab: "output", tone: "error", message: "输出文件名规则不能为空。" });
+    issues.push({ id: "filename", tab: "output", tone: "error", messageKey: "parameterInspector.validation.filename" });
   }
   if (snapshot.container.faststart && snapshot.container.format !== "mp4") {
-    issues.push({ id: "faststart", tab: "output", tone: "warning", message: "Fast Start 只对 MP4 容器生效。" });
+    issues.push({ id: "faststart", tab: "output", tone: "warning", messageKey: "parameterInspector.validation.faststart" });
   }
   return issues;
 }
@@ -168,7 +215,7 @@ function appendClipRangeIssues(
       id: "clip-range",
       tab: "output",
       tone: "error",
-      message: "截取范围必须满足 0 ≤ 开始 < 结束 ≤ 源素材时长。",
+      messageKey: "parameterInspector.validation.clipRange",
     });
   }
 }
@@ -191,7 +238,7 @@ function appendStreamCopyIssues(
       id: "copy-encoder",
       tab: "video",
       tone: "error",
-      message: "视频流复制必须使用 copy 编码器。",
+      messageKey: "parameterInspector.validation.copyEncoder",
     });
   }
 
@@ -223,7 +270,7 @@ function appendStreamCopyIssues(
       id: "copy-video-parameters",
       tab: "video",
       tone: "error",
-      message: "视频流复制不能同时使用码率、画面缩放、帧率、像素格式或色彩重编码参数。",
+      messageKey: "parameterInspector.validation.copyVideoParameters",
     });
   }
 }
@@ -257,7 +304,7 @@ function appendHdrOutputIssues(
         id: "dolby-vision-profile-5-output",
         tab: "color",
         tone: "error",
-        message: "Profile 5 源不能当作普通 HDR10/SDR 重编码；请开启 Dolby Vision RPU 保留，或改用视频流复制。",
+        messageKey: "parameterInspector.validation.dolbyVisionProfile5",
       });
       return;
     }
@@ -266,7 +313,7 @@ function appendHdrOutputIssues(
       id: "dolby-vision-rpu-loss",
       tab: "color",
       tone: "warning",
-      message: "当前重编码将丢弃 Dolby Vision RPU，只保留可用的基础层信号。",
+      messageKey: "parameterInspector.validation.dolbyVisionRpuLoss",
     });
   }
   if (preservesDolbyVision) {
@@ -280,7 +327,7 @@ function appendHdrOutputIssues(
       id: "hdr-bit-depth",
       tab: "color",
       tone: "error",
-      message: "HDR 重编码需要 10-bit 或更高像素格式；正式输出不会自动执行 SDR tone map。",
+      messageKey: "parameterInspector.validation.hdrBitDepth",
     });
   }
 
@@ -292,7 +339,8 @@ function appendHdrOutputIssues(
       id: "hdr-color-tags",
       tab: "color",
       tone: "error",
-      message: `当前 HDR 输出标签不匹配源信号；请使用 bt2020 / ${expectedTransfer} / bt2020nc。`,
+      messageKey: "parameterInspector.validation.hdrColorTags",
+      messageParams: { transfer: expectedTransfer },
     });
   }
 }

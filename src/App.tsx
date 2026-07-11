@@ -57,7 +57,7 @@ function buildSeedPayload(suffix: string): TaskDraftSnapshot {
  * 普通浏览器预览态的数据，专用于设计 QA 和前端首屏验证。
  * @returns 不依赖 Tauri 命令的前端示例数据
  */
-function buildBrowserPreviewState(): {
+function buildBrowserPreviewState(browserTemplateName: string): {
   settings: AppSettings;
   jobs: JobHistory[];
   templates: Template[];
@@ -102,7 +102,7 @@ function buildBrowserPreviewState(): {
     templates: [
       {
         id: "browser-publish-plan",
-        name: "线上发布副本",
+        name: browserTemplateName,
         tags: ["web", "balanced"],
         version: 1,
         taskConfigSnapshot: buildSeedPayload("publish"),
@@ -336,7 +336,7 @@ function AppRoutes({
 
     if (!isTauriRuntime()) {
       // 浏览器预览态没有后端队列，直接给调用方一个可展示的明确错误。
-      throw new Error("浏览器预览模式不会发送真实转码任务，请在桌面应用中执行。");
+      throw new Error(t("app.workbench.enqueueBrowserUnavailable"));
     }
 
     const blockingIssue = buildWorkbenchValidationIssues({
@@ -348,7 +348,9 @@ function AppRoutes({
     }).find((issue) => issue.tone === "error");
     if (blockingIssue) {
       // CTA 的 disabled 只是交互提示；处理器必须独立复核，避免键盘或未来调用方绕过。
-      throw new Error(`入队被阻止：${blockingIssue.message}`);
+      throw new Error(t("app.workbench.enqueueBlocked", {
+        message: t(blockingIssue.messageKey, blockingIssue.messageParams),
+      }));
     }
 
     await invoke<EnqueueTranscodeJobResponse>("enqueue_transcode_job", {
@@ -359,7 +361,7 @@ function AppRoutes({
     });
     onJobsChanged();
     navigate("/jobs");
-  }, [ffmpegProbe, navigate, onJobsChanged, selectedEncoderCapability, sourceFilePath, taskDraftSnapshot, videoMetadata]);
+  }, [ffmpegProbe, navigate, onJobsChanged, selectedEncoderCapability, sourceFilePath, t, taskDraftSnapshot, videoMetadata]);
 
   /**
    * 把当前编码参数保存为可复用方案，同时剥离素材相关的任务级字段。
@@ -367,7 +369,7 @@ function AppRoutes({
    */
   const saveCurrentTemplate = useCallback(async ({ name, tags }: { name: string; tags: string[] }) => {
     if (!isTauriRuntime()) {
-      throw new Error("浏览器预览模式不会写入本机方案库，请在桌面应用中保存。");
+      throw new Error(t("app.workbench.templateBrowserUnavailable"));
     }
 
     const templateSnapshot: TaskDraftSnapshot = {
@@ -390,7 +392,7 @@ function AppRoutes({
     });
     setActiveTemplateName(name);
     onRefresh();
-  }, [onRefresh, setActiveTemplateName, taskDraftSnapshot]);
+  }, [onRefresh, setActiveTemplateName, t, taskDraftSnapshot]);
 
   return (
     <WorkbenchLayout
@@ -454,9 +456,60 @@ function AppRoutes({
   );
 }
 
+/** 带单调版本号的实时任务更新，用于和全量快照建立明确的先后关系。 */
+type VersionedJobUpdate = {
+  version: number;
+  job: JobHistory;
+};
+
+/** 监听器错误保留稳定语义和原始详情，渲染时再按当前语言组合。 */
+type AppListenerError = {
+  key: "app.listener.jobStatusFailed" | "app.listener.jobMetricsFailed";
+  message: string;
+};
+
+/**
+ * 将一条任务事实写入任务列表。
+ * @param jobs 当前任务列表
+ * @param update 最新任务事实
+ * @returns 更新后的任务列表；新任务放在列表顶部
+ */
+function upsertJob(jobs: JobHistory[], update: JobHistory): JobHistory[] {
+  const index = jobs.findIndex((job) => job.id === update.id);
+  if (index < 0) {
+    return [update, ...jobs];
+  }
+
+  const next = [...jobs];
+  next[index] = update;
+  return next;
+}
+
+/**
+ * 将全量读取期间到达的实时事件重新应用到快照，避免旧 list_jobs 结果回滚任务状态。
+ * @param snapshot 后端全量任务快照
+ * @param updates 已收到的各任务最新事件
+ * @param versionAtRequestStart 发起 list_jobs 请求时的事件版本
+ * @returns 保留请求发起后新事件的任务列表
+ */
+export function reconcileJobSnapshot(
+  snapshot: JobHistory[],
+  updates: Iterable<VersionedJobUpdate>,
+  versionAtRequestStart: number,
+): JobHistory[] {
+  return Array.from(updates)
+    .filter((update) => update.version > versionAtRequestStart)
+    .sort((left, right) => left.version - right.version)
+    .reduce((jobs, update) => upsertJob(jobs, update.job), [...snapshot]);
+}
+
 function WorkbenchApp() {
+  const { t } = useI18n();
+  const desktopRuntime = isTauriRuntime();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [listenerError, setListenerError] = useState<AppListenerError | null>(null);
+  const [jobEventListenerReady, setJobEventListenerReady] = useState(!desktopRuntime);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [jobs, setJobs] = useState<JobHistory[]>([]);
   const [jobMetrics, setJobMetrics] = useState<Record<string, JobMetricsEvent>>({});
@@ -464,14 +517,24 @@ function WorkbenchApp() {
   const [ffmpegProbe, setFfmpegProbe] = useState<FfmpegProbeResult | null>(null);
   const [encoderCapabilities, setEncoderCapabilities] = useState<EncoderCapabilityResult | null>(null);
   const fetchRequestRef = useRef(0);
+  const jobEventListenerReadyRef = useRef(!desktopRuntime);
+  const jobEventVersionRef = useRef(0);
+  const latestJobEventsRef = useRef<Map<string, VersionedJobUpdate>>(new Map());
 
   const fetchAll = useCallback(async () => {
+    // 桌面端必须先建立实时事件订阅，再读取快照，避免订阅空窗永久丢失状态变化。
+    if (!jobEventListenerReadyRef.current) {
+      return;
+    }
+
     const requestId = ++fetchRequestRef.current;
+    // 请求发起前建立事件边界；请求执行期间到达的重复事件可幂等覆盖快照。
+    const jobEventVersionAtStart = jobEventVersionRef.current;
     setLoading(true);
     setError(null);
     try {
-      if (!isTauriRuntime()) {
-        const browserPreviewState = buildBrowserPreviewState();
+      if (!desktopRuntime) {
+        const browserPreviewState = buildBrowserPreviewState(t("app.browserPreview.templateName"));
         if (requestId !== fetchRequestRef.current) return;
         setSettings(browserPreviewState.settings);
         setJobs(browserPreviewState.jobs);
@@ -493,7 +556,18 @@ function WorkbenchApp() {
       // 只允许最后一次全量读取落地，连续刷新时旧响应不能覆盖较新的队列状态。
       if (requestId !== fetchRequestRef.current) return;
       setSettings(settingsResult);
-      setJobs(jobsResult);
+      // list_jobs 请求发起后的事件可能晚于或重复于快照，按事件到达顺序幂等合并。
+      setJobs(reconcileJobSnapshot(
+        jobsResult,
+        latestJobEventsRef.current.values(),
+        jobEventVersionAtStart,
+      ));
+      // 已被这次全量读取覆盖的旧事件不再保留，避免缓存随任务历史无限增长。
+      latestJobEventsRef.current.forEach((update, jobId) => {
+        if (update.version <= jobEventVersionAtStart) {
+          latestJobEventsRef.current.delete(jobId);
+        }
+      });
       setTemplates(templatesResult);
       setFfmpegProbe(ffmpegProbeResult);
       setEncoderCapabilities(encoderCapabilitiesResult);
@@ -506,34 +580,50 @@ function WorkbenchApp() {
         setLoading(false);
       }
     }
-  }, []);
+  }, [desktopRuntime, t]);
 
   useEffect(() => {
-    void fetchAll();
-  }, [fetchAll]);
+    if (jobEventListenerReady) {
+      void fetchAll();
+    }
+  }, [fetchAll, jobEventListenerReady]);
 
   useEffect(() => {
-    if (!isTauriRuntime()) {
+    if (!desktopRuntime) {
       return;
     }
 
     let disposed = false;
     let disposeUpdated: (() => void) | undefined;
     let disposeMetrics: (() => void) | undefined;
+    const markJobEventListenerReady = () => {
+      if (disposed) {
+        return;
+      }
+      jobEventListenerReadyRef.current = true;
+      setJobEventListenerReady(true);
+    };
+
     void listen<JobHistory>("job:updated", (event) => {
       // 事件已经携带最新事实，直接 upsert，避免每秒状态变化触发六路全量读取。
-      setJobs((current) => {
-        const index = current.findIndex((job) => job.id === event.payload.id);
-        if (index < 0) return [event.payload, ...current];
-        const next = [...current];
-        next[index] = event.payload;
-        return next;
-      });
+      const version = ++jobEventVersionRef.current;
+      latestJobEventsRef.current.set(event.payload.id, { version, job: event.payload });
+      setJobs((current) => upsertJob(current, event.payload));
     }).then((unlisten) => {
       if (disposed) unlisten();
-      else disposeUpdated = unlisten;
+      else {
+        disposeUpdated = unlisten;
+        markJobEventListenerReady();
+      }
     }).catch((listenError) => {
-      if (!disposed) setError(`任务状态监听失败：${listenError instanceof Error ? listenError.message : String(listenError)}`);
+      if (!disposed) {
+        setListenerError({
+          key: "app.listener.jobStatusFailed",
+          message: listenError instanceof Error ? listenError.message : String(listenError),
+        });
+        // 监听失败时仍加载静态快照，同时保留可见错误，避免整个应用卡在 loading。
+        markJobEventListenerReady();
+      }
     });
 
     void listen<JobMetricsEvent>("job:metrics", (event) => {
@@ -545,15 +635,25 @@ function WorkbenchApp() {
       if (disposed) unlisten();
       else disposeMetrics = unlisten;
     }).catch((listenError) => {
-      if (!disposed) setError(`任务指标监听失败：${listenError instanceof Error ? listenError.message : String(listenError)}`);
+      if (!disposed) {
+        setListenerError({
+          key: "app.listener.jobMetricsFailed",
+          message: listenError instanceof Error ? listenError.message : String(listenError),
+        });
+      }
     });
 
     return () => {
       disposed = true;
+      jobEventListenerReadyRef.current = false;
       disposeUpdated?.();
       disposeMetrics?.();
     };
-  }, []);
+  }, [desktopRuntime]);
+
+  const listenerErrorText = listenerError
+    ? t(listenerError.key, { message: listenerError.message })
+    : null;
 
   return (
     <TaskDraftProvider defaultOutputDir={settings?.defaultOutputDir}>
@@ -565,7 +665,7 @@ function WorkbenchApp() {
         ffmpegProbe={ffmpegProbe}
         encoderCapabilities={encoderCapabilities}
         loading={loading}
-        error={error}
+        error={error ?? listenerErrorText}
         onRefresh={() => void fetchAll()}
         onJobsChanged={() => void fetchAll()}
       />

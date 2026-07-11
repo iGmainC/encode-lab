@@ -4,7 +4,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
-    models::{Template, TemplatePayload},
+    models::{Template, TemplatePayload, Validate},
     storage::{
         errors::{StorageError, StorageResult},
         file_store::FileStore,
@@ -81,6 +81,7 @@ impl TemplatesRepo {
             .find(|item| item.id == template_id)
             .cloned()
             .ok_or_else(|| StorageError::NotFound(template_id.to_string()))?;
+        validate_stored_template(&source)?;
 
         let now = Utc::now().to_rfc3339();
         let new_id = Uuid::new_v4().to_string();
@@ -107,6 +108,7 @@ impl TemplatesRepo {
             .iter_mut()
             .find(|item| item.id == template_id)
             .ok_or_else(|| StorageError::NotFound(template_id.to_string()))?;
+        validate_stored_template(template)?;
 
         // 应用模板本身不修改模板内容，只记录最近使用时间用于排序和追踪。
         template.last_used_at = Some(Utc::now().to_rfc3339());
@@ -116,4 +118,14 @@ impl TemplatesRepo {
         self.store.save_data(&self.path, &templates)?;
         Ok(applied)
     }
+}
+
+/// 旧版本已持久化的方案在派生写入或应用前必须重新满足当前参数契约。
+fn validate_stored_template(template: &Template) -> StorageResult<()> {
+    TemplatePayload {
+        name: template.name.clone(),
+        tags: template.tags.clone(),
+        task_config_snapshot: template.task_config_snapshot.clone(),
+    }
+    .validate()
 }

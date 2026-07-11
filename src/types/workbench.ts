@@ -305,6 +305,19 @@ export type DeleteJobResponse = {
 };
 
 /** 任务运行指标事件。 */
+export type JobStepCode =
+  | "ffmpeg_transcode"
+  | "dv_extract_source_video"
+  | "dv_extract_source_rpu"
+  | "dv_encode_base_layer"
+  | "dv_extract_output_video"
+  | "dv_extract_output_rpu"
+  | "dv_export_source_rpu"
+  | "dv_export_output_rpu"
+  | "dv_verify_output"
+  | "finalize_output";
+
+/** 任务运行指标事件。 */
 export type JobMetricsEvent = {
   /** 任务 id。 */
   jobId: string;
@@ -314,6 +327,8 @@ export type JobMetricsEvent = {
   stepCount: number;
   /** 当前多工具执行阶段名称。 */
   stepLabel: string;
+  /** 当前阶段的稳定代码；旧版本事件可能缺省。 */
+  stepCode?: JobStepCode;
   /** 当前已处理媒体时间，单位毫秒。 */
   timeMs?: number | null;
   /** 当前帧号。 */

@@ -17,6 +17,8 @@ export type DetachedPreviewPayload = {
   sourceFile: string;
   /** 源视频时长，单位秒 */
   sourceDurationSec?: number;
+  /** 源视频帧率；用于让独立窗口按真实帧数预留片尾安全区。 */
+  sourceFps?: number;
   /** 源视频 HDR 类型；独立窗口重建预览 session 时继续保持 SDR 映射策略。 */
   sourceHdrType?: VideoStreamMetadata["hdrType"];
   /** 源视频色彩原色；独立窗口重建普通 HDR fallback 映射时继续固定 zscale 输入端。 */
@@ -42,6 +44,21 @@ export type DetachedPreviewPayload = {
   /** 快照更新时间，用于排查窗口同步问题 */
   updatedAt: number;
 };
+
+/**
+ * 构造独立预览窗口快照，并在单一边界写入更新时间。
+ * @param payload 除更新时间外的完整预览上下文
+ * @param now 提供当前时间，测试时可注入稳定值
+ */
+export function buildDetachedPreviewPayload(
+  payload: Omit<DetachedPreviewPayload, "updatedAt">,
+  now: () => number = Date.now,
+): DetachedPreviewPayload {
+  return {
+    ...payload,
+    updatedAt: now(),
+  };
+}
 
 /**
  * 写入独立预览窗口启动快照。

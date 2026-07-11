@@ -18,6 +18,7 @@ import { useSourceDropTarget } from "../hooks/useSourceDropTarget";
 import { useI18n } from "../i18n/I18nProvider";
 import {
   DETACHED_PREVIEW_UPDATE_EVENT,
+  buildDetachedPreviewPayload,
   type DetachedPreviewPayload,
   writeDetachedPreviewPayload,
 } from "../lib/detachedPreview";
@@ -127,14 +128,15 @@ export function ProfessionalWorkbenchPage({
 
     if (!isTauriRuntime()) {
       // 普通浏览器没有 Tauri 窗口 API，必须明确反馈而不是静默退化成页面内全屏。
-      setDetachedPreviewError("浏览器预览模式不能打开独立桌面预览窗口，请在桌面应用中使用。");
+      setDetachedPreviewError(t("workbench.detached.browserUnavailable"));
       return;
     }
 
     const latestRuntime = runtimeOverride ?? previewRuntimeRef.current;
-    const payload: DetachedPreviewPayload = {
+    const payload: DetachedPreviewPayload = buildDetachedPreviewPayload({
       sourceFile: draft.sourceFilePath,
       sourceDurationSec: draft.videoMetadata?.durationSec,
+      sourceFps: draft.videoMetadata?.video?.fps,
       sourceHdrType: draft.videoMetadata?.video?.hdrType,
       sourceColorPrimaries: draft.videoMetadata?.video?.colorPrimaries,
       sourceColorTransfer: draft.videoMetadata?.video?.colorTransfer,
@@ -146,8 +148,7 @@ export function ProfessionalWorkbenchPage({
       compareOrder,
       currentTimeSec: latestRuntime.currentTimeSec,
       currentFrame: latestRuntime.currentFrame,
-      updatedAt: Date.now(),
-    };
+    });
 
     setDetachedPreviewError(null);
     writeDetachedPreviewPayload(payload);
@@ -219,8 +220,8 @@ export function ProfessionalWorkbenchPage({
         <div className="pointer-events-none fixed inset-3 z-50 grid place-items-center rounded-xl border-2 border-dashed border-primary bg-background/90 text-center shadow-2xl backdrop-blur-sm">
           <div>
             <FileVideo2 className="mx-auto size-10 text-primary" aria-hidden="true" />
-            <div className="mt-3 text-lg font-semibold">松开以替换当前源素材</div>
-            <div className="mt-1 text-sm text-muted-foreground">当前任务参数会保留，只更新输入文件与媒体信息。</div>
+            <div className="mt-3 text-lg font-semibold">{t("workbench.drop.replaceTitle")}</div>
+            <div className="mt-1 text-sm text-muted-foreground">{t("workbench.drop.preserveHint")}</div>
           </div>
         </div>
       ) : null}
@@ -228,7 +229,7 @@ export function ProfessionalWorkbenchPage({
       {dropNotice ? (
         <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           <span>{dropNotice}</span>
-          <Button size="sm" variant="ghost" onClick={clearDropNotice}>知道了</Button>
+          <Button size="sm" variant="ghost" onClick={clearDropNotice}>{t("common.gotIt")}</Button>
         </div>
       ) : null}
 
@@ -246,27 +247,31 @@ export function ProfessionalWorkbenchPage({
         <>
           <header className="flex shrink-0 flex-col gap-3 border-b px-1 pb-2.5 md:flex-row md:items-center md:justify-between">
             <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
-              <span className="text-muted-foreground">源文件</span>
+              <span className="text-muted-foreground">{t("workbench.sourceLabel")}</span>
               <span className="max-w-72 truncate font-medium" title={draft.sourceFilePath}>{draft.sourceFilePath.split(/[\\/]/).pop()}</span>
               <span className="text-border">/</span>
-              <span className="text-muted-foreground">方案</span>
+              <span className="text-muted-foreground">{t("workbench.presetLabel")}</span>
               <button type="button" className="rounded-md border bg-background px-2 py-1 font-medium text-primary transition hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40" onClick={onOpenTemplates}>
                 {draft.activeTemplateName}
               </button>
               <span className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-primary">
-                <CheckCircle2 className="size-3" aria-hidden="true" />已载入到当前表单
+                <CheckCircle2 className="size-3" aria-hidden="true" />{t("workbench.presetApplied")}
               </span>
             </div>
             <div className="flex items-center gap-1">
               <Button size="sm" variant="ghost" onClick={onOpenTemplates}>
-                <Library data-icon="inline-start" aria-hidden="true" />方案库
+                <Library data-icon="inline-start" aria-hidden="true" />{t("workbench.openPresetLibrary")}
               </Button>
               <Button size="sm" variant="ghost" onClick={onOpenJobs}>
-                <FolderKanban data-icon="inline-start" aria-hidden="true" />任务中心
+                <FolderKanban data-icon="inline-start" aria-hidden="true" />{t("workbench.openJobs")}
               </Button>
               <span className={`ml-1 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs ${runtimeState === "ready" ? "text-emerald-600 dark:text-emerald-400" : runtimeState === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
                 <span className={`size-1.5 rounded-full ${runtimeState === "ready" ? "bg-emerald-500" : runtimeState === "failed" ? "bg-destructive" : "bg-muted-foreground/50"}`} aria-hidden="true" />
-                {runtimeState === "ready" ? "系统就绪" : runtimeState === "failed" ? "运行时异常" : "正在探测运行时"}
+                {runtimeState === "ready"
+                  ? t("workbench.runtime.ready")
+                  : runtimeState === "failed"
+                    ? t("workbench.runtime.error")
+                    : t("workbench.runtime.probing")}
               </span>
             </div>
           </header>
@@ -286,12 +291,12 @@ export function ProfessionalWorkbenchPage({
               <section className="overflow-hidden rounded-lg border bg-card/70" aria-labelledby="preview-heading">
                 <div className="flex items-center justify-between gap-3 border-b px-3 py-2.5">
                   <div>
-                    <h2 id="preview-heading" className="text-sm font-semibold">单帧参数预览</h2>
-                    <p className="mt-0.5 text-xs text-muted-foreground">仅比较当前参数对画面的影响，不代表整片播放效果。</p>
+                    <h2 id="preview-heading" className="text-sm font-semibold">{t("workbench.preview.title")}</h2>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{t("workbench.preview.description")}</p>
                   </div>
                   <div className="flex items-center gap-2 text-xs">
                     <span className={`size-2 rounded-full ${previewRuntime.previewError ? "bg-destructive" : previewRuntime.previewState === "running" ? "bg-emerald-500" : "bg-amber-500"}`} aria-hidden="true" />
-                    <span className="text-muted-foreground">{formatPreviewState(previewRuntime)}</span>
+                    <span className="text-muted-foreground">{formatPreviewState(previewRuntime, t)}</span>
                   </div>
                 </div>
                 <div className="p-2">
@@ -329,7 +334,7 @@ export function ProfessionalWorkbenchPage({
               {previewRuntime.degradedFromTwoPass || previewRuntime.degradedFromDolbyVision || previewRuntime.degradedFromSdrTonemap ? (
                 <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-300">
                   <CircleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
-                  <span>当前单帧预览使用兼容性降级路径；正式转码仍按任务快照执行完整参数。</span>
+                  <span>{t("workbench.preview.degraded")}</span>
                 </div>
               ) : null}
 
@@ -337,7 +342,7 @@ export function ProfessionalWorkbenchPage({
                 sourceFilePath={draft.sourceFilePath}
                 metadata={draft.videoMetadata}
                 snapshot={draft.taskDraftSnapshot}
-                issues={issues.map((issue) => issue.message)}
+                issueCount={issues.length}
               />
             </div>
 
@@ -377,40 +382,42 @@ function EmptySourceWorkspace({
   onPickSource: () => void;
   onRetry: () => void;
 }) {
+  const { t } = useI18n();
+
   return (
     <div className="grid min-h-[calc(100vh-5rem)] place-items-center px-4 py-10">
       <section className="w-full max-w-2xl rounded-lg border bg-card/70 p-6 text-center shadow-sm">
         <FileVideo2 className="mx-auto size-10 text-primary" aria-hidden="true" />
-        <h1 className="mt-4 text-xl font-semibold">打开一个源素材，开始专业转码会话</h1>
+        <h1 className="mt-4 text-xl font-semibold">{t("workbench.empty.title")}</h1>
         <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-muted-foreground">
-          读取容器、视频、音频和 HDR 信息后，所有编码参数、单帧预览和输出校验会在同一工作台中展开。
+          {t("workbench.empty.description")}
         </p>
         <div className="mx-auto mt-5 grid max-w-xl gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
           <input
             className="h-10 rounded-md border bg-background px-3 text-left text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-3 focus-visible:ring-ring/40"
             value={sourceFilePath}
             onChange={(event) => onSourcePathChange(event.target.value)}
-            placeholder="输入本机视频绝对路径"
-            aria-label="源视频路径"
+            placeholder={t("workbench.empty.pathPlaceholder")}
+            aria-label={t("workbench.empty.pathLabel")}
           />
           <Button onClick={onPickSource}>
-            <FileVideo2 data-icon="inline-start" aria-hidden="true" />选择源素材
+            <FileVideo2 data-icon="inline-start" aria-hidden="true" />{t("workbench.empty.pick")}
           </Button>
         </div>
         {loading ? (
           <div className="mt-4 flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <RefreshCw className="size-4 animate-spin" aria-hidden="true" />正在读取媒体信息
+            <RefreshCw className="size-4 animate-spin" aria-hidden="true" />{t("workbench.empty.analyzing")}
           </div>
         ) : null}
         {error ? (
           <div className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-left text-sm text-destructive" role="alert">
             <div>{error}</div>
-            <Button className="mt-3" size="sm" variant="outline" onClick={onRetry}>重试读取</Button>
+            <Button className="mt-3" size="sm" variant="outline" onClick={onRetry}>{t("source.retry")}</Button>
           </div>
         ) : null}
         <div className={`mt-5 inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs ${ffmpegReady ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
           <span className={`size-2 rounded-full ${ffmpegReady ? "bg-emerald-500" : "bg-destructive"}`} aria-hidden="true" />
-          {ffmpegReady ? "本机 FFmpeg / FFprobe 已就绪" : "运行时尚未就绪，请先检查环境与设置"}
+          {ffmpegReady ? t("workbench.empty.runtimeReady") : t("workbench.empty.runtimeUnavailable")}
         </div>
       </section>
     </div>
@@ -418,15 +425,15 @@ function EmptySourceWorkspace({
 }
 
 /** 把内部预览状态翻译为简洁状态文本。 */
-function formatPreviewState(runtime: ComparePreviewRuntime) {
-  if (runtime.previewError) return "预览失败";
+function formatPreviewState(runtime: ComparePreviewRuntime, t: ReturnType<typeof useI18n>["t"]) {
+  if (runtime.previewError) return t("preview.state.error");
   const labels: Record<ComparePreviewRuntime["previewState"], string> = {
-    idle: "等待交互",
-    warming: "正在启动",
-    running: "预览就绪",
-    updating: "正在刷新",
-    stopped: "已停止",
-    error: "预览失败",
+    idle: t("preview.state.idle"),
+    warming: t("preview.state.warming"),
+    running: t("preview.state.running"),
+    updating: t("preview.state.updating"),
+    stopped: t("preview.state.stopped"),
+    error: t("preview.state.error"),
   };
   return labels[runtime.previewState];
 }

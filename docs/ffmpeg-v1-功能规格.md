@@ -27,7 +27,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 1. 账号体系与云端同步。
 2. 远程转码农场与分布式调度（此能力作为 V2+ 后期展望，见第 13 章）。
 3. Linux 全量适配与平台级特殊优化。
-4. 音频复杂参数面板（V1 仅支持 `copy` 或原始参数输入）。
+4. 音频复杂参数面板（V1 仅支持 `copy` 或受音频输出白名单约束的原始参数输入）。
 
 ## 2. 范围定义（In Scope / Out of Scope）
 
@@ -64,7 +64,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 5. 在转码中心查看队列、进度、fps、错误和参数详情，并可取消任务或清理已结束记录。
 6. 从方案库应用参数快照后回到工作台继续验证和调整。
 
-切换或替换源素材时，旧素材元数据立即失效；只有路径与最新元数据来源一致后才恢复预览、校验和入队。
+切换或替换源素材时，旧素材元数据立即失效；重复选择同一路径也会推进选择版本并重新读取，只有路径与最新元数据来源一致后才恢复预览、校验和入队。
 
 ## 4. 模块规格
 
@@ -96,7 +96,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 ### 4.2.1 表单范围
 
 1. 视频参数：结构化字段（V1 核心）。
-2. 音频参数：仅 `copy` 或原始参数输入框。
+2. 音频参数：仅 `copy` 或受音频输出白名单约束的原始参数输入框。
 3. 高级参数：原始命令行参数输入（文本区）。
 4. 容器参数：输出容器支持 `mp4` / `mkv` / `mov`，MP4 可配置 `faststart`。
 5. 时长截取：在输出页签通过起止时间输入设置 `clipRange`；Dolby Vision RPU 保留链路锁定完整时长。
@@ -126,20 +126,24 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 ### 4.2.3 音频参数字段
 
 1. `audioMode`：`copy` 或 `custom`。
-2. `audioCustomArgs`：当 `audioMode=custom` 时可编辑（例如 `-c:a aac -b:a 192k`）。
-3. 当输出容器为 MP4 时，命令拼装追加 `-strict -2`，兼容 TrueHD 等 FFmpeg 标记为 experimental 的音频 copy 写入场景。
+2. `audioCustomArgs`：当 `audioMode=custom` 时可编辑（例如 `-c:a aac -b:a 192k`），只接受“选项 + 值”成对出现的音频输出白名单。
+3. 全音轨白名单为 `-acodec`、`-ab`、`-ar`、`-ac`、`-sample_fmt`、`-channel_layout`、`-ch_layout`、`-audio_service_type`。
+4. 可限定音轨且允许追加数字索引（例如 `-b:a:0`）的白名单为 `-c:a`、`-codec:a`、`-b:a`、`-q:a`、`-qscale:a`、`-ar:a`、`-ac:a`、`-sample_fmt:a`、`-channel_layout:a`、`-ch_layout:a`、`-profile:a`、`-compression_level:a`、`-bsf:a`、`-frames:a`、`-disposition:a`、`-metadata:s:a`、`-tag:a`。
+5. 视频参数、`-i`、容器或输出控制参数、裸路径与额外输出均拒绝；原始 `-af` / `-filter:a` 也不开放，因为 FFmpeg filtergraph 可内嵌文件或网络 I/O。模板保存、任务校验和命令构建复用同一白名单，旧方案在复制或应用前重新校验。
+6. 当输出容器为 MP4 时，命令拼装追加 `-strict -2`，兼容 TrueHD 等 FFmpeg 标记为 experimental 的音频 copy 写入场景。
 
 ### 4.2.4 高级原始参数
 
 1. 字段：`advancedArgs`（字符串）。
-2. 允许用户追加参数，但禁止覆盖 I/O 路径（应用托管输入输出路径）。
-3. 与结构化参数冲突时，规则固定为：结构化参数优先，冲突项在提交前提示。
+2. 只接受当前专业面板生成的安全输出参数白名单：码率（`-b:v` / `-maxrate` / `-minrate` / `-bufsize`）、CRF/preset、色彩标签、libaom 速度与 tiles、受控的 SVT-AV1 tune/film-grain、`-dolbyvision 0|1` 与单值输出 metadata；所有参数必须按“选项 + 值”成对出现。
+3. 未知 flag、无值 flag、filtergraph、任意编码器嵌套参数和 I/O 控制参数一律拒绝；开放式 FFmpeg CLI 无法可靠推断未知选项是否消费下一个 token，不能用启发式裸路径扫描替代白名单。
+4. 与结构化参数冲突时，规则固定为：结构化参数优先，冲突项在提交前提示。
 
 ### 4.2.5 参数校验规则
 
 1. `enableTwoPass=true` 时，`videoCodecFormat` 不能为 `copy`。
 2. `bitrateMode=CRF` 时，`crf` 必填。
-3. `audioMode=copy` 时，`audioCustomArgs` 必须为空。
+3. `audioMode=copy` 时，`audioCustomArgs` 必须为空；`audioMode=custom` 时必须通过音频输出白名单校验。
 4. 当 `resolution` 与 `fps` 都为 `source` 时，不生成对应覆盖参数。
 5. `videoEncoder` 必须属于当前 `videoCodecFormat` 的允许集合。
 6. 当 `videoEncoder` 不支持 `2-pass` 时，`enableTwoPass` 必须强制为 `false` 且 UI 禁用该选项。
@@ -158,7 +162,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 7. `bitrateMode=CRF` 且新编码器不支持时，自动改为 `CBR` 并提示用户确认。
 8. 预览与正式转码都复用同一能力矩阵，避免行为不一致。
 9. HDR10/HLG 重编码必须使用 10-bit 或更高像素格式，并保持 BT.2020/PQ 或 BT.2020/HLG 标签；正式任务不会复用预览专用 SDR tone map。
-10. Dolby Vision Profile 5 / compatibility 0 未开启 RPU 保留时禁止普通重编码；视频流复制不受该限制。
+10. Dolby Vision Profile 5 / compatibility 0 未开启 RPU 保留时禁止普通重编码；视频流复制不受该限制。开启 RPU 保留后 `audioMode` 必须为 `copy`，草稿和模板恢复时同步归一化，后端执行计划再次强制校验。
 
 ## 4.3 任务预览（单播放器分割线对比）
 
@@ -169,13 +173,13 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 3. 分割线方向支持切换：`vertical`（左右对比）与 `horizontal`（上下对比）。
 4. 对比显示顺序支持切换：`source-first` 表示原始图像在左/上，`preview-first` 表示转码后图像在左/上。
 5. 参数变更后自动刷新当前时间点的预览帧，保证按帧对比体验。
-6. 主预览区支持打开独立 Tauri 预览窗口，并由系统窗口全屏承载画面对比；打开时同步当前时间点、分割线位置、分割方向、对比显示顺序和当前已生成帧，独立窗口首屏应复用该帧且暂不启动新的预览会话，只有用户继续拖动时间轴或复用帧加载失败时才生成新帧；同一预览 session 内已生成 PNG 需保留到 session 结束，避免独立窗口拿到的帧路径失效；独立窗口内的右上角按钮用于关闭该窗口。
+6. 主预览区支持打开独立 Tauri 预览窗口，并由系统窗口全屏承载画面对比；打开时同步当前时间点、源帧率、分割线位置、分割方向、对比显示顺序和当前已生成帧，独立窗口首屏应复用该帧且暂不启动新的预览会话，只有用户继续拖动时间轴或复用帧加载失败时才生成新帧；源帧率用于复用主窗口按真实帧数计算的片尾安全区；同一预览 session 内已生成 PNG 需保留到 session 结束，避免独立窗口拿到的帧路径失效；独立窗口内的右上角按钮用于关闭该窗口。
 
 ### 4.3.2 技术语义（V1）
 
 1. 预览为“近实时”，目标是快速反馈，不承诺逐帧绝对实时。
 2. 仅展示后端实际测得的 `previewSpeed`；不把单帧速度伪装为整片转码耗时或体积预测。
-3. 预览帧先按当前编码参数编码为临时单帧视频，再解码为 PNG 展示；因此 `codec`、`CRF`、`preset`、`advancedArgs` 等质量参数应体现在对比图中。
+3. 普通重编码的预览帧先按当前编码参数编码为临时单帧视频，再解码为 PNG 展示，因此 `codec`、`CRF`、`preset`、`advancedArgs` 等质量参数应体现在对比图中；视频 Copy 的正式命令仍使用 `-c:v copy`，其单帧预览不执行流复制与滤镜的非法组合，而是忽略 Copy 下的高级编码参数并使用 Matroska 内的 FFV1 无损临时运输层，使预览只表达源画面证据。
 4. 当任务启用 `2-pass` 时，预览阶段自动降级为单帧单 pass 编码预览，并在 UI 明确提示“预览近似最终效果”。
 5. 正式转码时仍执行完整 `2-pass`。
 6. 预览组件使用 PNG 单帧图片承载源帧与预览帧，避免 WebView 直接解码原始输入或目标编码格式失败。
@@ -195,7 +199,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 
 1. V1 工作台每个会话绑定一个源视频和一份任务快照。
 2. 多文件拖入时只接收第一个受支持视频并给出明确提示；批量套用保留为后续能力。
-3. 统一输出目录，自动处理重名；入队时输出文件名包含 `jobId` 短后缀。所有正式转码先写入同目录、同容器扩展名的 partial 文件，成功后再以禁止覆盖已有目标的原子 rename 发布，避免并发任务或外部程序在 FFmpeg 启动前占用最终路径。
+3. 统一输出目录，自动处理重名；输出校验使用 `-<jobId前8位>[-N]` 展示动态后缀占位，其中 `[-N]` 仅在同名冲突时出现，入队后再写入真实 jobId 与冲突序号。所有正式转码先写入同目录、同容器扩展名的 partial 文件，成功后再以禁止覆盖已有目标的原子 rename 发布，避免并发任务或外部程序在 FFmpeg 启动前占用最终路径。
 4. 单个预览任务确认后可直接创建 task 与 job，job 写入 `jobs-history.json`，任务中心从真实历史读取，不使用前端 mock 数据。
 5. V1 后台转码任务先记录 `queued`，调度器分配并发槽位后更新为 `running`，结束后更新为 `completed` 或 `failed`；应用退出中断时更新为 `interrupted`，并通过 `job:updated` 事件触发前端刷新；成功进入 `completed` 后发送系统通知，点击通知会打开客户端并进入任务中心。
 
@@ -369,7 +373,7 @@ type Template = {
 ## 6.2 事件通道
 
 1. `job:updated`：推送任务状态变化。
-2. `job:metrics`：基于 FFmpeg `-progress pipe:1` 推送运行指标，包含 `progress`、`fps`、`speed`、`etaSec`、`timeMs` 和 2-pass 阶段。
+2. `job:metrics`：基于 FFmpeg `-progress pipe:1` 推送运行指标，包含 `progress`、`fps`、`speed`、`etaSec`、`timeMs`、阶段序号与稳定 `stepCode`；`stepLabel` 仅作诊断兼容，前端按 `stepCode` 使用当前语言渲染阶段名称。
 3. `preview:frame`：推送预览帧或帧引用。
 4. `preview:state`：推送预览状态变化。
 
@@ -412,6 +416,10 @@ type Job = {
 };
 
 type JobMetrics = {
+  stepIndex: number;
+  stepCount: number;
+  stepCode?: "ffmpeg_transcode" | "dv_extract_source_video" | "dv_extract_source_rpu" | "dv_encode_base_layer" | "dv_extract_output_video" | "dv_extract_output_rpu" | "dv_export_source_rpu" | "dv_export_output_rpu" | "dv_verify_output" | "finalize_output"; // 旧事件兼容可缺省
+  stepLabel: string; // 仅作诊断兼容，不直接用于本地化界面
   frame: number;
   fps: number;
   speed: number; // x 倍速
