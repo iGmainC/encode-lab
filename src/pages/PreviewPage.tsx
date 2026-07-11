@@ -378,25 +378,21 @@ export function PreviewPage({
                 label="预计文件体积"
                 value={outputDecision.predictedSize}
                 detail={outputDecision.sizeDetail}
-                badge="良好"
-                badgeClassName="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                badge={outputDecision.sizeBadge}
+                badgeClassName={outputDecision.sizeBadgeClassName}
               />
               <DecisionRow
-                label="质量信心"
+                label="质量策略"
                 value={outputDecision.quality}
-                detail="预计在多数观看场景下保持稳定观感。"
-                badge="高"
-                badgeClassName="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                detail={outputDecision.qualityDetail}
+                badge={outputDecision.qualityBadge}
+                badgeClassName={outputDecision.qualityBadgeClassName}
               />
               <DecisionRow
                 label="预计转码耗时"
                 value={outputDecision.estimatedTime}
-                detail={
-                  runtime.estimatedTranscodeSpeed
-                    ? `${runtime.estimatedTranscodeSpeed.toFixed(2)}x 预览估算`
-                    : "基于当前机器和编码器估算。"
-                }
-                badge="正常"
+                detail={outputDecision.timeDetail}
+                badge="需实测"
                 badgeClassName="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
               />
               <div className="space-y-2 border-t pt-4">
@@ -652,15 +648,26 @@ function buildSourceSummary(videoMetadata: VideoMetadataResult | null, sourceFil
  * @param snapshot 当前参数草稿快照
  */
 function buildOutputDecision(videoMetadata: VideoMetadataResult | null, snapshot: TaskDraftSnapshot) {
-  const inputSize = videoMetadata?.sizeBytes ?? 0;
-  const lower = inputSize > 0 ? inputSize * 0.16 : 0;
-  const upper = inputSize > 0 ? inputSize * 0.22 : 0;
+  const isCrf = snapshot.video.bitrateMode === "CRF";
+  const crf = snapshot.video.crf ?? 23;
   const fileName = buildOutputFileName(videoMetadata?.inputFile, snapshot);
   return {
-    predictedSize: inputSize > 0 ? `${formatBytes(lower)} - ${formatBytes(upper)}` : "-",
-    sizeDetail: inputSize > 0 ? `预计比源文件小 78% - 84%（源文件 ${formatBytes(inputSize)}）。` : "选择源文件后估算体积。",
-    quality: snapshot.video.bitrateMode === "CRF" ? `${100 - Math.min(51, snapshot.video.crf ?? 23)} 分信心` : "高信心",
-    estimatedTime: snapshot.video.enableTwoPass ? "18 - 24 分钟" : "9 - 14 分钟",
+    predictedSize: "需短片实测",
+    sizeDetail: isCrf
+      ? `CRF ${crf} 以质量为目标，不保证输出小于源文件；内容复杂度和源编码效率都可能让体积增加。`
+      : `${snapshot.video.bitrateMode} 的最终体积还取决于复制音轨和容器开销，请先用短片段验证。`,
+    sizeBadge: "不可预判",
+    sizeBadgeClassName: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
+    quality: isCrf ? `CRF ${crf}` : snapshot.video.bitrateMode,
+    qualityDetail: isCrf
+      ? "数值越低质量通常越高；最终观感以当前帧对比和短片转码为准。"
+      : "固定码率模式的画质会随内容复杂度变化，需要结合目标码率实测。",
+    qualityBadge: isCrf ? "固定质量" : "固定码率",
+    qualityBadgeClassName: "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300",
+    estimatedTime: "需短片实测",
+    timeDetail: snapshot.video.preserveDolbyVisionMetadata
+      ? "Dolby Vision 还包含 RPU 提取、重编码和逐帧校验，单帧预览速度不能代表完整任务。"
+      : "单帧预览只用于画面对比，不能可靠推导完整转码耗时。",
     outputDir: snapshot.output.dir || "默认输出目录",
     fileName,
   };

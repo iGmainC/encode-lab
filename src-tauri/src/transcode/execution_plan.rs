@@ -10,7 +10,9 @@ use crate::{
         read_constant_frame_count, read_video_metadata, HdrType, VideoStreamMetadata,
     },
     storage::errors::{StorageError, StorageResult},
-    transcode::command_builder::{build_ffmpeg_commands, build_passlog_path},
+    transcode::command_builder::{
+        append_reencoded_video_metadata_cleanup, build_ffmpeg_commands, build_passlog_path,
+    },
 };
 
 /// 外部命令类型；执行器根据类型选择 bundled runtime 中的二进制。
@@ -542,6 +544,7 @@ fn dolby_vision_encode_args(
         args.push("-g".to_string());
         args.push(gop.to_string());
     }
+    append_reencoded_video_metadata_cleanup(&mut args);
     args.push("-f".to_string());
     args.push("matroska".to_string());
     args.push(output_file.to_string_lossy().to_string());
@@ -727,6 +730,8 @@ mod tests {
         assert!(joined.contains("colormatrix=ipt-pq-c2"));
         assert!(joined.contains("range=full"));
         assert!(!joined.contains("hdr10=1"));
+        assert!(joined.contains("-metadata:s:v:0 BPS="));
+        assert!(joined.contains("-metadata:s:v:0 NUMBER_OF_BYTES="));
     }
 
     #[test]

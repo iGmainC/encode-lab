@@ -27,6 +27,17 @@ pub struct CommandBuildOutput {
 /// 编码预览使用的小片段帧数，避免部分编码器单帧输出灰帧或延迟帧。
 const PREVIEW_ENCODE_FRAME_COUNT: u8 = 8;
 
+/// 重编码后必须删除的源视频统计标签；这些值不会随新码流自动更新。
+const STALE_REENCODED_VIDEO_METADATA_KEYS: [&str; 7] = [
+    "BPS",
+    "DURATION",
+    "NUMBER_OF_FRAMES",
+    "NUMBER_OF_BYTES",
+    "_STATISTICS_WRITING_APP",
+    "_STATISTICS_WRITING_DATE_UTC",
+    "_STATISTICS_TAGS",
+];
+
 /// 预览 SDR 映射策略。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PreviewSdrTonemapMode {
@@ -511,6 +522,7 @@ fn build_single_pass_args(
     append_audio_args(payload, &mut args)?;
     append_container_args(payload, &mut args);
     append_advanced_args(sanitized_advanced, &mut args);
+    append_reencoded_video_metadata_cleanup(&mut args);
     args.push(output_file.to_string());
 
     Ok(args)
@@ -557,6 +569,7 @@ fn build_pass2_args(
     append_audio_args(payload, &mut args)?;
     append_container_args(payload, &mut args);
     append_advanced_args(sanitized_advanced, &mut args);
+    append_reencoded_video_metadata_cleanup(&mut args);
     args.push(output_file.to_string());
 
     Ok(args)
@@ -676,6 +689,15 @@ fn append_container_args(payload: &TaskConfigPayload, args: &mut Vec<String>) {
 fn append_advanced_args(sanitized_advanced: Option<&str>, args: &mut Vec<String>) {
     if let Some(extra) = sanitized_advanced {
         args.extend(split_args(extra));
+    }
+}
+
+/// 清除从源流继承、但在重编码后已经失效的 Matroska 统计标签。
+pub(crate) fn append_reencoded_video_metadata_cleanup(args: &mut Vec<String>) {
+    for key in STALE_REENCODED_VIDEO_METADATA_KEYS {
+        // 空 metadata 值会让 FFmpeg 删除该键，同时保留语言、标题等有效流元数据。
+        args.push("-metadata:s:v:0".to_string());
+        args.push(format!("{key}="));
     }
 }
 
@@ -995,6 +1017,19 @@ mod tests {
     }
 
     #[test]
+    fn reencoded_output_should_clear_inherited_video_statistics() {
+        let commands =
+            build_ffmpeg_command_args(&payload(), "input.mkv", "output.mkv").expect("build");
+        let args = &commands[0];
+
+        for key in ["BPS", "DURATION", "NUMBER_OF_FRAMES", "NUMBER_OF_BYTES"] {
+            assert!(args
+                .windows(2)
+                .any(|item| item[0] == "-metadata:s:v:0" && item[1] == format!("{key}=")));
+        }
+    }
+
+    #[test]
     fn build_single_pass_command_should_apply_clip_range() {
         let mut value = payload();
         value.clip_range = Some(ClipRange {
@@ -1021,6 +1056,7 @@ mod tests {
         assert!(result.commands[0].contains("passlog-"));
         assert!(result.commands[1].contains("passlog-"));
         assert!(result.commands[0].contains("/dev/null"));
+        assert!(result.commands[1].contains("-metadata:s:v:0 BPS="));
     }
 
     #[test]
