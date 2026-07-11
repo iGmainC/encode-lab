@@ -61,6 +61,32 @@ impl Validate for TaskConfigPayload {
             }
         }
 
+        let copies_video_stream = matches!(self.video.codec_format, VideoCodecFormat::Copy);
+        if copies_video_stream {
+            // Copy 是独立的流复制语义：编码器必须同步为 copy，且不能混入结构化重编码字段。
+            if !matches!(self.video.encoder, VideoEncoder::Copy) {
+                return Err(StorageError::InvalidPayload(
+                    "codecFormat=copy requires encoder=copy".to_string(),
+                ));
+            }
+
+            if self.video.crf.is_some()
+                || self.video.preset.is_some()
+                || self.video.preserve_dolby_vision_metadata.unwrap_or(false)
+                || self.video.profile.is_some()
+                || self.video.tune.is_some()
+                || self.video.resolution.is_some()
+                || self.video.fps.is_some()
+                || self.video.pixel_format.is_some()
+                || self.video.gop.is_some()
+                || self.video.enable_two_pass
+            {
+                return Err(StorageError::InvalidPayload(
+                    "codecFormat=copy cannot include structured video re-encode fields".to_string(),
+                ));
+            }
+        }
+
         // 数值边界校验
         if let Some(resolution) = &self.video.resolution {
             if resolution.width == 0 || resolution.height == 0 {
@@ -78,25 +104,28 @@ impl Validate for TaskConfigPayload {
             }
         }
 
-        match self.video.bitrate_mode {
-            VideoBitrateMode::Crf => {
-                if self.video.crf.is_none() {
-                    return Err(StorageError::InvalidPayload(
-                        "video.crf is required when bitrateMode is CRF".to_string(),
-                    ));
+        // bitrateMode 是兼容旧数据的必填枚举；Copy 不消费它，也不要求 CRF 或 -b:v。
+        if !copies_video_stream {
+            match self.video.bitrate_mode {
+                VideoBitrateMode::Crf => {
+                    if self.video.crf.is_none() {
+                        return Err(StorageError::InvalidPayload(
+                            "video.crf is required when bitrateMode is CRF".to_string(),
+                        ));
+                    }
+                    if !supports_crf(&self.video.encoder) {
+                        return Err(StorageError::InvalidPayload(
+                            "selected encoder does not support CRF mode".to_string(),
+                        ));
+                    }
                 }
-                if !supports_crf(&self.video.encoder) {
-                    return Err(StorageError::InvalidPayload(
-                        "selected encoder does not support CRF mode".to_string(),
-                    ));
-                }
-            }
-            VideoBitrateMode::Cbr | VideoBitrateMode::Abr => {
-                // V1 当前没有结构化 bitrate 字段，CBR/ABR 需要用户通过 advancedArgs 提供 -b:v。
-                if !contains_video_bitrate_flag(self.advanced_args.as_deref()) {
-                    return Err(StorageError::InvalidPayload(
-                        "bitrateMode CBR/ABR requires -b:v in advancedArgs".to_string(),
-                    ));
+                VideoBitrateMode::Cbr | VideoBitrateMode::Abr => {
+                    // V1 当前没有结构化 bitrate 字段，CBR/ABR 需要用户通过 advancedArgs 提供 -b:v。
+                    if !contains_video_bitrate_flag(self.advanced_args.as_deref()) {
+                        return Err(StorageError::InvalidPayload(
+                            "bitrateMode CBR/ABR requires -b:v in advancedArgs".to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -276,5 +305,122 @@ fn encoder_matches_codec(encoder: VideoEncoder, codec: VideoCodecFormat) -> bool
         ),
         VideoCodecFormat::Vp9 => matches!(encoder, VideoEncoder::LibvpxVp9),
         VideoCodecFormat::Copy => matches!(encoder, VideoEncoder::Copy),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::task::{
+        AudioConfig, AudioMode, ContainerConfig, ContainerFormat, OutputConfig, Resolution,
+        TaskConfigPayload, VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
+    };
+
+    use super::Validate;
+
+    /** 构造不携带重编码字段的最小 Copy payload。 */
+    fn copy_payload() -> TaskConfigPayload {
+        TaskConfigPayload {
+            name: "copy-task".to_string(),
+            clip_range: None,
+            video: VideoConfig {
+                codec_format: VideoCodecFormat::Copy,
+                encoder: VideoEncoder::Copy,
+                // bitrateMode 为兼容字段，Copy 路径不会消费该值。
+                bitrate_mode: VideoBitrateMode::Crf,
+                crf: None,
+                preset: None,
+                preserve_dolby_vision_metadata: Some(false),
+                profile: None,
+                tune: None,
+                resolution: None,
+                fps: None,
+                pixel_format: None,
+                gop: None,
+                enable_two_pass: false,
+            },
+            audio: AudioConfig {
+                mode: AudioMode::Copy,
+                custom_args: None,
+            },
+            container: ContainerConfig {
+                format: ContainerFormat::Mkv,
+                faststart: Some(false),
+            },
+            advanced_args: None,
+            output: OutputConfig {
+                dir: String::new(),
+                file_name_pattern: "{inputName}_{taskName}".to_string(),
+                overwrite: "autoRename".to_string(),
+                location: None,
+            },
+        }
+    }
+
+    /** 断言单个结构化重编码字段足以让 Copy payload 失效。 */
+    fn assert_copy_reencode_field_rejected(configure: impl FnOnce(&mut TaskConfigPayload)) {
+        let mut payload = copy_payload();
+        configure(&mut payload);
+
+        let error = payload
+            .validate()
+            .expect_err("copy field should be rejected");
+        assert!(error
+            .to_string()
+            .contains("structured video re-encode fields"));
+    }
+
+    #[test]
+    fn copy_codec_requires_copy_encoder() {
+        let mut payload = copy_payload();
+        payload.video.encoder = VideoEncoder::Libx264;
+
+        let error = payload
+            .validate()
+            .expect_err("encoder mismatch should fail");
+        assert!(error.to_string().contains("requires encoder=copy"));
+    }
+
+    #[test]
+    fn copy_codec_accepts_payload_without_reencode_fields() {
+        for bitrate_mode in [
+            VideoBitrateMode::Crf,
+            VideoBitrateMode::Cbr,
+            VideoBitrateMode::Abr,
+        ] {
+            let mut payload = copy_payload();
+            payload.video.bitrate_mode = bitrate_mode;
+            payload
+                .validate()
+                .expect("copy payload should ignore bitrateMode compatibility field");
+        }
+    }
+
+    #[test]
+    fn copy_codec_rejects_every_structured_reencode_field() {
+        assert_copy_reencode_field_rejected(|payload| payload.video.crf = Some(23));
+        assert_copy_reencode_field_rejected(|payload| {
+            payload.video.preset = Some("medium".to_string())
+        });
+        assert_copy_reencode_field_rejected(|payload| {
+            payload.video.preserve_dolby_vision_metadata = Some(true)
+        });
+        assert_copy_reencode_field_rejected(|payload| {
+            payload.video.profile = Some("main".to_string())
+        });
+        assert_copy_reencode_field_rejected(|payload| {
+            payload.video.tune = Some("film".to_string())
+        });
+        assert_copy_reencode_field_rejected(|payload| {
+            payload.video.resolution = Some(Resolution {
+                width: 1920,
+                height: 1080,
+            })
+        });
+        assert_copy_reencode_field_rejected(|payload| payload.video.fps = Some(24.0));
+        assert_copy_reencode_field_rejected(|payload| {
+            payload.video.pixel_format = Some("yuv420p".to_string())
+        });
+        assert_copy_reencode_field_rejected(|payload| payload.video.gop = Some(48));
+        assert_copy_reencode_field_rejected(|payload| payload.video.enable_two_pass = true);
     }
 }

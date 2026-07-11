@@ -1,7 +1,7 @@
 # Encode Lab V1 功能规格（PRD + 技术规格）
 
-- 文档版本：`v1.0`
-- 更新时间：`2026-02-21`
+- 文档版本：`v1.1`
+- 更新时间：`2026-07-12`
 - 文档类型：`单一 MD（PRD + 技术规格）`
 - 适用平台：`macOS 优先（接口预留跨平台扩展）`
 
@@ -11,16 +11,16 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 
 1. 通过可视化表单快速生成 FFmpeg 参数。
 2. 在转码前用近实时预览验证效果（并尽量贴近真实转码速率）。
-3. 将单文件或多文件批量转码纳入统一队列管理。
+3. 将多个单文件转码任务纳入统一队列管理。
 4. 复用任务模板，减少重复配置成本。
 
 ### 1.1 产品目标
 
-1. 提供可观测、可控制的进行中转码管理能力（进度、fps、暂停/继续、缩略图、参数明细）。
+1. 提供可观测、可控制的进行中转码管理能力（进度、fps、取消、错误诊断、参数明细）。
 2. 提供覆盖视频常用参数的结构化任务表单，同时保留高级原始参数扩展能力。
 3. 支持单播放器分割线对比预览，并允许实时调整参数。
-4. 支持预览后批量转码（单选/多选），并由统一队列调度。
-5. 支持本地任务模板库（增删改查、复用、直预览）。
+4. 支持预览后单文件入队，并由统一队列调度；多文件批量套用保留为后续能力。
+5. 支持本地参数方案库（保存、搜索、应用、复制和删除）；完整编辑保留为后续能力。
 
 ### 1.2 非目标（V1 不做）
 
@@ -34,14 +34,14 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 ### 2.1 In Scope
 
 1. 系统 FFmpeg/FFprobe 检测与可用性提示。
-2. 新建任务、编辑任务、预览任务、批量转码。
+2. 新建任务、编辑任务、预览任务和单文件入队执行。
 3. 转码任务队列：全局并发 `N`、FIFO、运行态控制。
 4. 任务模板本地存储与复用。
 5. 本地 JSON 数据持久化。
 
 ### 2.2 Out of Scope
 
-1. FFmpeg 二进制随安装包分发。
+1. 用户自行替换或管理应用内置的 FFmpeg runtime。
 2. 在线模板市场。
 3. Web 端/移动端同步。
 4. 完整覆盖 FFmpeg 全参数结构化配置。
@@ -52,17 +52,19 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 ### 3.1 目标用户
 
 1. 内容创作者：反复调参以兼顾画质与体积。
-2. 后期/运营：批量处理多个源视频，要求过程可监控、可暂停。
+2. 后期/运营：持续处理多个源视频，要求队列可监控、异常可定位、任务可取消。
 3. 技术用户：需要原始参数兜底能力，确保灵活性。
 
 ### 3.2 端到端主流程
 
 1. 启动应用 -> 检测 `ffmpeg`/`ffprobe`。
-2. 在工作台第一步选择或拖入源视频，并读取素材元数据。
-3. 在参数配置页调整视频参数（含 `CRF`、`2-pass`）与音频模式，并可返回上一步重新选择源文件。
-4. 在预览校验页用按帧对比复查当前参数效果，并在同页确认源文件、参数摘要和输出决策后加入队列。
-5. 在任务中心查看进度、fps、缩略图、参数详情，并可暂停/继续。
-6. 将配置保存为模板；后续可“模板直预览”并快速发起转码。
+2. 在统一工作台选择或拖入源视频，并读取素材元数据。
+3. 在常驻检查器中调整视频、音频、色彩/HDR、输出和高级参数。
+4. 在同页用按帧对比复查当前参数效果，确认输出事实与执行约束后加入队列。
+5. 在转码中心查看队列、进度、fps、错误和参数详情，并可取消任务或清理已结束记录。
+6. 从方案库应用参数快照后回到工作台继续验证和调整。
+
+切换或替换源素材时，旧素材元数据立即失效；只有路径与最新元数据来源一致后才恢复预览、校验和入队。
 
 ## 4. 模块规格
 
@@ -72,22 +74,22 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 
 1. 查看进度：百分比、已处理时长、剩余预估时长。
 2. 查看每秒渲染帧数：显示 `fps` 与 `speed`。
-3. 控制任务：`pause`、`resume`、`cancel`。
-4. 查看当前进度缩略图：按当前时间点抓取。
+3. 控制任务：当前稳定契约支持 `cancel`；`pause`、`resume` 保留为后续能力。
+4. 运行中缩略图保留为后续能力；当前以进度、fps、speed、ETA 与错误摘要作为执行证据。
 5. 查看本次转码详细参数：结构化参数 + 实际命令行。
 
 ### 4.1.2 行为规则
 
 1. 进度更新频率默认 `1s`（可内部 500ms 采样、1s 刷新 UI）。
 2. 进度计算优先依据 FFmpeg `time=` 与输入总时长比值。
-3. `pause`/`resume` 在 macOS 使用进程信号（`SIGSTOP` / `SIGCONT`），必须保留同一进程上下文。
-4. 缩略图优先基于当前 `timeMs` 生成，失败时保留上一次有效缩略图并提示“当前帧抓取失败”。
+3. `pause`/`resume` 在后端状态机、退出恢复和跨平台行为稳定前不得在前端展示为可用控制。
+4. 后续接入缩略图时，应基于当前 `timeMs` 生成，并在抓取失败时保留上一次有效缩略图。
 5. 参数详情必须可复制（便于排障与复现）。
 
 ### 4.1.3 边界与失败处理
 
 1. 输入时长未知（直播流等）时，进度条降级为不定进度，仅展示已处理时长与瞬时 fps。
-2. 暂停后若进程意外退出，任务状态转为 `failed`，并记录退出码与 stderr 摘要。
+2. 取消或运行异常后必须回写最终状态，并保留 stderr 摘要供详情检查器排障。
 
 ## 4.2 新建任务（大表单生成 FFmpeg 参数）
 
@@ -97,7 +99,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 2. 音频参数：仅 `copy` 或原始参数输入框。
 3. 高级参数：原始命令行参数输入（文本区）。
 4. 容器参数：输出容器支持 `mp4` / `mkv` / `mov`，MP4 可配置 `faststart`。
-5. 时长截取：通过双向拖动条和起止时间输入框设置 `clipRange`，拖动步长按源视频帧率精确到一帧。
+5. 时长截取：在输出页签通过起止时间输入设置 `clipRange`；Dolby Vision RPU 保留链路锁定完整时长。
 
 ### 4.2.2 视频参数（结构化）字段
 
@@ -110,9 +112,10 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 7. `tune`：可选（如 `film`, `zerolatency`）。
 8. `resolution`：`source` 或 `WxH`。
 9. `fps`：`source` 或指定值（如 `24/25/30/60`）；UI 通过“保持原始帧率”开关控制，开启时不生成 `-r` 覆盖参数。
-10. `pixelFormat`：如 `yuv420p`。
+10. `pixelFormat`：如 `yuv420p`、`yuv420p10le`。
 11. `gop`：关键帧间隔（可选）。
 12. `enableTwoPass`：布尔，V1 必须支持（仅在编码器能力支持时可开启）。
+13. `codecFormat=copy` 时固定 `encoder=copy`，隐藏并清空码率、preset、分辨率、帧率、像素格式、色彩重编码和 2-pass 字段；正式命令只生成视频流复制语义。
 
 ### 4.2.2.1 AV1 高级参数（结构化入口，写入 advancedArgs）
 
@@ -141,6 +144,8 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 5. `videoEncoder` 必须属于当前 `videoCodecFormat` 的允许集合。
 6. 当 `videoEncoder` 不支持 `2-pass` 时，`enableTwoPass` 必须强制为 `false` 且 UI 禁用该选项。
 7. 当编码器为硬件编码器且不支持 `CRF` 时，`bitrateMode` 不可选 `CRF`，自动回退为 `CBR/ABR`。
+8. 截取范围必须满足 `0 <= start < end <= duration`；非法输入必须阻止入队，不能静默退回整片。
+9. 宽高、FPS、CRF 和码率字段必须是有限且在约束范围内的数值，`NaN` 或非法字符串不得进入队列。
 
 ### 4.2.6 编码器能力联动（V1）
 
@@ -152,6 +157,8 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 6. `enableTwoPass=true` 且新编码器不支持时，自动改为 `false` 并 toast 提示。
 7. `bitrateMode=CRF` 且新编码器不支持时，自动改为 `CBR` 并提示用户确认。
 8. 预览与正式转码都复用同一能力矩阵，避免行为不一致。
+9. HDR10/HLG 重编码必须使用 10-bit 或更高像素格式，并保持 BT.2020/PQ 或 BT.2020/HLG 标签；正式任务不会复用预览专用 SDR tone map。
+10. Dolby Vision Profile 5 / compatibility 0 未开启 RPU 保留时禁止普通重编码；视频流复制不受该限制。
 
 ## 4.3 任务预览（单播放器分割线对比）
 
@@ -167,25 +174,27 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 ### 4.3.2 技术语义（V1）
 
 1. 预览为“近实时”，目标是快速反馈，不承诺逐帧绝对实时。
-2. 预览速率优先与真实转码能力对齐（显示 `previewSpeed` 与 `estimatedTranscodeSpeed`）。
+2. 仅展示后端实际测得的 `previewSpeed`；不把单帧速度伪装为整片转码耗时或体积预测。
 3. 预览帧先按当前编码参数编码为临时单帧视频，再解码为 PNG 展示；因此 `codec`、`CRF`、`preset`、`advancedArgs` 等质量参数应体现在对比图中。
 4. 当任务启用 `2-pass` 时，预览阶段自动降级为单帧单 pass 编码预览，并在 UI 明确提示“预览近似最终效果”。
 5. 正式转码时仍执行完整 `2-pass`。
 6. 预览组件使用 PNG 单帧图片承载源帧与预览帧，避免 WebView 直接解码原始输入或目标编码格式失败。
-7. 当源视频为 HDR 时，预览信息区展示 HDR 类型、色彩原色、传递函数、色彩空间、位深、MaxCLL/MaxFALL 与 mastering display 亮度；同时标注当前对比帧已转换为 SDR 图片显示，不代表真实 HDR 亮度效果。
+7. 当源视频为 HDR 时，检查器展示当前可读取的 HDR 类型、位深、色彩原色与传递函数。仅当运行时具备对应 tone map 能力时，预览帧才转换为 SDR 显示；降级路径会明确提示，不能把 SDR 显示效果当作真实 HDR 亮度依据。
 
 ### 4.3.3 预览更新策略
 
 1. 参数改动触发 `300ms` 防抖。
 2. 拖动时间轴时只更新当前时间指示，松手后生成该时间点的新帧；松手提交需覆盖控件外 release、pointer cancel、窗口失焦等边界，避免长期停留在 scrubbing 状态。
 3. 新预览任务启动前取消旧预览任务，避免资源占满。
+4. 时间轴上限按源帧率为 8 帧编码样本额外预留 2 帧余量，避免精确 EOF 生成只有容器头、不可解码的临时文件。
+5. 预览失败先展示可操作摘要和“重试当前帧”，完整 stderr 放入可展开技术详情。
 
-## 4.4 预览后批量转码
+## 4.4 预览后入队执行
 
 ### 4.4.1 功能点
 
-1. 可单选或多选输入视频。
-2. 复用同一任务配置批量入队。
+1. V1 工作台每个会话绑定一个源视频和一份任务快照。
+2. 多文件拖入时只接收第一个受支持视频并给出明确提示；批量套用保留为后续能力。
 3. 统一输出目录，自动处理重名；入队时输出文件名包含 `jobId` 短后缀。所有正式转码先写入同目录、同容器扩展名的 partial 文件，成功后再以禁止覆盖已有目标的原子 rename 发布，避免并发任务或外部程序在 FFmpeg 启动前占用最终路径。
 4. 单个预览任务确认后可直接创建 task 与 job，job 写入 `jobs-history.json`，任务中心从真实历史读取，不使用前端 mock 数据。
 5. V1 后台转码任务先记录 `queued`，调度器分配并发槽位后更新为 `running`，结束后更新为 `completed` 或 `failed`；应用退出中断时更新为 `interrupted`，并通过 `job:updated` 事件触发前端刷新；成功进入 `completed` 后发送系统通知，点击通知会打开客户端并进入任务中心。
@@ -202,10 +211,12 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 ### 4.5.1 功能点
 
 1. 保存模板。
-2. 编辑模板。
-3. 复制模板。
-4. 删除模板。
-5. 按名称/标签搜索模板。
+2. 按名称/标签搜索模板。
+3. 应用模板到当前工作台。
+4. 复制模板。
+5. 删除模板。
+
+完整编辑模板保留为后续能力；当前通过“应用到工作台 -> 调整 -> 另存方案”完成参数迭代。
 
 ### 4.5.2 模板约束
 
@@ -213,11 +224,11 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 2. 模板更新采用版本号递增（用于排错与回滚）。
 3. 模板名允许重名，但推荐唯一；搜索结果按最近使用排序。
 
-## 4.6 模板直预览
+## 4.6 方案应用到工作台
 
-1. 入口：模板列表页直接选择“预览”。
-2. 流程：选择模板 -> 回到工作台选择输入文件 -> 配置参数 -> 预览校验并确认任务。
-3. 无需先进入“新建任务”页面。
+1. 入口：方案库选择参数方案并执行“应用到工作台”。
+2. 方案只写入编码、音频、容器、色彩和文件名规则，不替换当前素材、任务名称、截取范围或输出目录。
+3. 应用后回到统一工作台继续调参、单帧验证和入队；没有素材时进入工作台导入空状态。
 
 ## 5. 数据模型与本地存储（JSON）
 
@@ -317,28 +328,28 @@ type Template = {
 
 ## 6.1 命令清单（V1）
 
-1. `detect_ffmpeg() -> { ffmpegPath, ffprobePath, version }`
-2. `list_encoder_capabilities() -> EncoderCapability[]`
-3. `create_task(payload) -> { taskId }`
-4. `update_task(taskId, payload) -> { ok }`
-5. `start_preview(payload) -> { previewSessionId }`
-6. `update_preview(previewSessionId, patch) -> { ok }`
-7. `stop_preview(previewSessionId) -> { ok }`
-8. `enqueue_transcode(taskId, inputFiles[]) -> { jobIds[] }`
-9. `control_job(jobId, action: cancel) -> { ok }`（当前已接入取消；`pause/resume` 保留为后续控制能力）
-10. `list_jobs(filter) -> Job[]`
-11. `delete_job(jobId) -> { ok }`（删除已结束任务的历史记录，不删除输出文件；`queued/running` 需先取消）
-12. `get_job_metrics(jobId) -> { progress, fps, speed, eta, frame, timeMs }`
-13. `get_job_thumbnail(jobId, atMs?) -> { imagePath|base64 }`
-14. `run_quality_evaluation({ jobId|taskId|referenceFile+distortedFile, metric: "vmaf", vmaf? }) -> { evaluationId, score, logPath }`
-15. `save_template(payload) / list_templates() / apply_template(templateId)`（当前已接入前端保存、列表、应用到任务配置）
-16. `check_update() / download_and_install_update()`：通过 Tauri updater 插件完成签名校验、下载和安装，前端承载触发与进度展示。
+1. `detect_ffmpeg() -> FfmpegProbeResult`
+2. `list_encoder_capabilities() -> EncoderCapabilityResult`
+3. `read_video_metadata(inputFile) -> VideoMetadataResult`
+4. `create_task(payload) -> { taskId }`
+5. `update_task(taskId, payload) -> { ok }`
+6. `list_tasks() -> TaskConfig[]`
+7. `start_preview(payload) -> PreviewStartResponse`
+8. `update_preview(payload) -> PreviewUpdateResponse`
+9. `stop_preview(payload) -> PreviewStopResponse`
+10. `build_ffmpeg_command(request) -> { commands, warnings, sanitizedAdvancedArgs }`
+11. `enqueue_transcode_job(request) -> { taskId, jobId, outputFile }`
+12. `control_job(request: { jobId, action: "cancel" }) -> { ok }`（`pause/resume` 保留为后续控制能力）
+13. `list_jobs() -> Job[]`
+14. `delete_job(request: { jobId }) -> { ok }`（只删除已结束任务的历史记录，不删除输出文件；`queued/running` 需先取消）
+15. `run_quality_evaluation(payload) -> QualityEvaluationResponse`
+16. `save_template(payload) / list_templates() / apply_template(templateId)`
+17. `update_template(templateId, payload) / delete_template(templateId) / duplicate_template(templateId)`
+18. `get_settings() / update_settings(payload)`
 
-为支持模板完整管理，V1 同步补充：
+运行指标不通过逐任务查询命令轮询；执行器通过 `job:metrics` 事件推送。运行中缩略图当前没有命令契约。
 
-1. `update_template(templateId, payload) -> { ok }`
-2. `delete_template(templateId) -> { ok }`（当前已接入前端删除）
-3. `duplicate_template(templateId) -> { templateId }`（当前已接入前端复制）
+自动更新通过 Tauri updater 插件调用，不属于 `generate_handler!` 注册的业务命令；前端负责检查、下载、安装与反馈。
 
 模板应用行为：
 
@@ -355,7 +366,7 @@ type Template = {
 5. 更换 updater 签名密钥时必须同步更新 GitHub Secrets 和 `tauri.conf.json` 公钥；已安装旧公钥版本无法校验新密钥签出的更新包。
 6. updater 端点必须能匿名访问；主仓库必须保持公开，否则客户端无法读取更新清单和安装包。
 
-## 6.2 事件通道（建议）
+## 6.2 事件通道
 
 1. `job:updated`：推送任务状态变化。
 2. `job:metrics`：基于 FFmpeg `-progress pipe:1` 推送运行指标，包含 `progress`、`fps`、`speed`、`etaSec`、`timeMs` 和 2-pass 阶段。
@@ -367,12 +378,12 @@ type Template = {
 ```ts
 type JobStatus =
   | "queued"
-  | "preparing"
   | "running"
-  | "paused"
+  | "paused" // 仅兼容历史数据；当前不能新建、暂停或继续
   | "completed"
   | "failed"
-  | "canceled";
+  | "canceled"
+  | "interrupted";
 
 type Job = {
   id: string;
@@ -423,17 +434,15 @@ type PreviewConfig = {
 
 ## 7.1 Job 状态机
 
-`queued -> preparing -> running <-> paused -> completed | failed | canceled`
+`queued -> running -> completed | failed | canceled | interrupted`
 
 状态转移规则：
 
-1. `queued -> preparing`：调度器分配到并发槽位。
-2. `preparing -> running`：进程成功启动。
-3. `running -> paused`：收到 `pause`（macOS `SIGSTOP`）。
-4. `paused -> running`：收到 `resume`（macOS `SIGCONT`）。
-5. `running -> completed`：退出码 `0`。
-6. `running|paused -> canceled`：用户取消，进程终止后收敛。
-7. 任意运行态 -> `failed`：非零退出码、I/O 错误、依赖缺失。
+1. `queued -> running`：调度器分配并发槽位且进程成功启动。
+2. `running -> completed`：退出码 `0` 且输出发布完成。
+3. `queued|running -> canceled`：用户取消，进程终止后收敛。
+4. `running -> interrupted`：应用退出或任务恢复时确认原进程不再运行。
+5. 任意运行态 -> `failed`：非零退出码、I/O 错误、依赖缺失。
 
 当前实现已支持 `queued|running -> canceled`。`pause/resume` 仍是规格目标，尚未接入前端控制按钮和后端命令。
 
@@ -473,9 +482,9 @@ type PreviewConfig = {
 
 ## 8.3 恢复策略
 
-1. `pause`/`resume` 失败时，立即回读进程状态并与 UI 对齐。
-2. 缩略图生成失败时不影响主任务执行，仅显示告警。
-3. 任务失败后可“一键复制命令行 + 错误摘要”用于重现。
+1. 取消失败时保留当前任务上下文并展示后端错误，不伪造已取消状态。
+2. 预览帧生成失败时不影响正式任务配置，用户可重试当前帧并展开技术详情。
+3. 任务失败后可复制命令行和错误摘要用于重现。
 4. 应用重启后可恢复未完成任务的历史记录（状态标记为 `interrupted` 并建议重试）。
 
 ## 9. 非功能需求（性能、稳定性、可观测性）
@@ -498,24 +507,26 @@ type PreviewConfig = {
 ## 9.3 可观测性
 
 1. 记录命令行、退出码、stderr 尾部、关键时间点。
-2. 对关键行为打点：启动任务、暂停、继续、失败、取消、模板应用。
+2. 对关键行为打点：启动任务、失败、取消、模板应用。
 3. 日志文件按日滚动，限制单文件大小（如 10MB）。
 
 ## 10. 验收标准（可测试条目）
 
 1. 单任务转码时，进度、`fps`、`speed`、`eta` 连续更新且无明显回跳。
 2. 并发 `N=1/2/4` 场景下，队列调度符合 FIFO，无重复启动。
-3. 运行中 `pause/resume` 后，任务可继续并输出可播放文件。
-4. 转码进行中可以查看缩略图，时间点与当前进度基本一致。
+3. `queued` 和 `running` 任务可取消，取消结果与任务历史一致。
+4. 单帧预览失败时可重试，并能查看完整技术详情。
 5. `2-pass` 任务预览自动降级为单帧参数预览，正式转码执行完整两遍。
 6. 当选择 `h265 + hevc_nvenc` 时，UI 必须禁用 `2-pass` 并给出明确提示。
-7. 多文件批量中单个任务失败不阻塞其余任务完成。
-8. 模板保存后可在模板页直接预览并继续发起转码。
+7. 队列中单个任务失败不阻塞其余任务完成。
+8. 方案应用后回到工作台，当前素材保持不变且参数快照更新。
 9. 预览分割线支持横纵切换，切换后拖动行为与画面裁剪方向一致。
 10. 音频 `copy` 与 `custom` 模式命令拼装正确。
 11. 输出重名文件自动追加序号，不覆盖旧文件。
 12. 缺失 FFmpeg 时给出可操作引导，不出现静默失败。
 13. 已完成任务可发起 VMAF 质量评估，并返回平均分、参与帧数、日志路径和实际命令。
+14. HDR10/HLG 的 8-bit 或错误色彩标签输出被入队前校验阻止；Profile 5 未开启 RPU 保留时不能普通重编码。
+15. 时间轴定位到末端时会落在安全可解码帧，不能生成只有容器头的临时预览文件。
 
 ## 11. 测试场景矩阵（单元/集成/E2E）
 
@@ -528,12 +539,14 @@ type PreviewConfig = {
 | T3A | 分割线横纵切换与拖动一致性 | 是 | 是 | 是 |
 | T4 | 2-pass 预览降级为单帧参数预览 | 是 | 是 | 是 |
 | T5 | 队列并发 N 调度 | 是 | 是 | 是 |
-| T6 | pause/resume 信号控制 | 否 | 是 | 是 |
+| T6 | queued/running 任务取消 | 是 | 是 | 是 |
 | T7 | 失败隔离与错误上报 | 是 | 是 | 是 |
-| T8 | 缩略图抓取失败降级 | 是 | 是 | 否 |
-| T9 | 模板增删改查与直预览 | 是 | 是 | 是 |
+| T8 | 单帧预览失败、重试与技术详情 | 是 | 是 | 是 |
+| T9 | 方案保存、搜索、应用、复制与删除 | 是 | 是 | 是 |
 | T10 | 输出重名自动改名 | 是 | 是 | 是 |
 | T11 | 已完成任务 VMAF 质量评估 | 是 | 是 | 是 |
+| T12 | HDR/Dolby Vision 输出安全校验 | 是 | 是 | 是 |
+| T13 | 预览时间轴末端安全窗口 | 是 | 是 | 是 |
 
 ## 12. 里程碑建议（M1 / M2 / M3）
 
@@ -549,12 +562,12 @@ type PreviewConfig = {
 1. 单播放器分割线预览。
 2. 分割线横纵切换与方向记忆。
 3. 参数变更近实时预览。
-4. 队列并发 `N` 与 `pause/resume`。
-5. 缩略图与参数明细面板。
+4. 队列并发 `N`、取消与参数明细面板。
+5. `pause/resume` 与运行中缩略图作为后续增量能力。
 
 ## 12.3 M3：模板与稳定性
 
-1. 模板库（增删改查、复制、搜索、直预览）。
+1. 参数方案库（保存、搜索、应用到工作台、复制、删除）。
 2. 历史记录与日志完善。
 3. 验收用例与 E2E 回归。
 

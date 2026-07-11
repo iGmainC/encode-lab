@@ -1,56 +1,97 @@
-**Findings**
+# Pro Inspector Design QA
+
+## Findings
+
 - No actionable P0/P1/P2 findings remain.
+- P3 intentional deviation: the implementation preserves the real 16:9 preview frame instead of stretching it to the taller generated reference slot.
+- P3 follow-up: the redesigned professional copy is complete in Chinese, but English i18n parity is not yet release-complete.
 
-**Source Visual Truth**
-- Path: `/Users/igmainc/.codex/generated_images/019ec035-d47b-71e1-b65f-dd5454b3061a/ig_0914b6da3017b361016a2d1f91c8388198950ecb8a002a1581.png`
-- Target state: desktop Decision Timeline preview verification screen, 1440 x 1024.
+## Source Visual Truth
 
-**Implementation Evidence**
-- Local URL: `http://127.0.0.1:1420/`
-- Default app entry: `http://127.0.0.1:1420/` redirects to `/preview`
-- Default entry screenshot: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/implementation-default-workbench-1440x1024.png`
-- Workbench screenshot: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/redesigned-workbench-preview-1440x1024.png`
-- Plans screenshot: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/redesigned-plans-1440x1024.png`
-- Transcode Center screenshot: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/redesigned-transcode-center-1440x1024.png`
-- Environment screenshot: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/redesigned-environment-1440x1024.png`
-- Mobile workbench screenshot: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/redesigned-workbench-mobile-390x844.png`
-- Full-view comparison: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/source-vs-implementation-desktop.png`
-- Viewport: desktop 1440 x 1024; mobile 390 x 844.
-- State: browser preview demo state with source metadata, preview frames, queue health, completed-output rows, one reusable plan, and environment capability data.
+- Path: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-source-1487x1058.png`
+- Direction: selected Pro Inspector option 1.
+- Target state: dark desktop professional transcoding workbench with source facts, one-frame comparison, deterministic output validation and a persistent parameter inspector.
+- Viewport: `1487 x 1058`.
 
-**Fidelity Surfaces**
-- Fonts and typography: implementation keeps the existing Geist family and uses compact product typography close to the source hierarchy. Headings, labels, metrics, and small helper text remain readable; no observed truncation blocks the core flow.
-- Spacing and layout rhythm: implementation follows the source's left navigation, process timeline, three-column verification area, output decision panel, and lower queue/results band. The lower band starts slightly lower than the source because the production sidebar includes runtime controls; this is an acceptable P3 drift.
-- Colors and visual tokens: implementation maps the source's neutral workspace, blue primary action, green readiness/success, and amber normal-risk states onto existing shadcn/Tailwind tokens. Contrast is acceptable in the inspected light theme.
-- Image quality and asset fidelity: browser preview uses real generated raster frame assets for source/output comparison; no visible placeholders, CSS art, or broken image states remain. Tauri runtime still uses real FFmpeg preview frames.
-- Preview correctness: source and encoded preview layers keep the documented left/right semantics. Tauri preview now renders both layers at the same preview scale, disables DV metadata preservation for the single-frame preview path, and browser demo output is derived from the same source frame so it cannot present a different scene as the encoded result.
-- Copy and content: implementation replaces raw parameter-first language with product decision language: source, intent, preview validation, output decision, queue health, and completed-output review. The visible Chinese UI is consistent enough for handoff.
+## Implementation Evidence
 
-**Patches Made Since Previous QA Pass**
-- Added non-Tauri runtime guards so browser preview no longer crashes on Tauri window/event APIs.
-- Added browser preview demo data for design QA while preserving real Tauri command paths.
-- Rebuilt the preview route around the Decision Timeline structure.
-- Added generated source/output frame assets for clean browser preview visuals.
-- Replaced debug-style preview text with product-facing Chinese copy.
-- Added compact preview header behavior so the first viewport prioritizes the decision workflow.
-- Added mobile navigation so narrow viewports retain primary routing.
-- Fixed review findings: preview readiness now follows source availability, browser demo write actions no longer call Tauri `invoke`, and previously inert preview buttons now navigate to the relevant page or advanced config.
-- Fixed preview fidelity: encoded preview frames now use the same render scale as source proxy frames when keeping source resolution, DV metadata preservation is stripped only from preview commands, formal transcode keeps structured/manual DV settings, and browser demo output was regenerated from the source frame instead of using an unrelated image.
+- Prototype URL: `http://localhost:1420/workbench`
+- Final browser screenshot: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-implementation-pass-6.jpg`
+- Viewport: `1487 x 1058`.
+- State: browser QA source `Travel_2024_Film.mov`, HDR10, H.265/libx265, CRF 23, source resolution/FPS, 10-bit pixel format, MP4 output.
+- Responsive evidence: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-1024x768.jpg` and `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-390x844.jpg`; DOM measurements showed no horizontal overflow at either width.
+- Native evidence: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-native-dv-safe-end.png`, using a real Dolby Vision Profile 5 source at the safe end position `60.816 / 61.216s`.
 
-**Follow-up Polish**
-- P3: tune the desktop first viewport to show more of the lower queue/results band without scrolling.
-- P3: move newly added product-specific strings into the i18n dictionary if English UI parity becomes a release requirement.
+## Full-view Comparison Evidence
 
-**Implementation Checklist**
-- [x] Desktop Decision Timeline structure implemented.
-- [x] Source, output intent, preview verification, output decision, queue health, and recent output areas visible.
-- [x] Plans, Transcode Center, and Environment pages use the same product-workbench language.
-- [x] Browser preview no longer shows Tauri API runtime errors.
-- [x] Browser preview write actions are disabled or handled as demo-only feedback.
-- [x] Preview page action buttons have concrete navigation or configuration behavior.
-- [x] Source/preview comparison no longer uses unrelated demo scenes or mismatched preview render scale.
-- [x] Single-frame preview no longer carries `-dolbyvision` from either structured settings or advanced args.
-- [x] Desktop and mobile screenshots captured without page or console errors.
-- [x] `bun run build` passes.
+- Combined source/implementation input: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-comparison-pass-6.jpg`
+- The implementation matches the source hierarchy: compact left navigation, source/plan context row, source fact strip, dominant split preview, deterministic output bar and a full-height right inspector.
+- The primary CTA remains visible without scrolling at the target desktop viewport.
+
+## Focused Region Comparison Evidence
+
+- Workbench/preview region: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-focus-workbench-pass-6.jpg`
+- Parameter inspector region: `/Users/igmainc/Projects/encode-lab/design-qa-artifacts/pro-inspector-focus-inspector-pass-6.jpg`
+- The implementation intentionally uses native switches, selects, slider and scroll containment from the existing component system while retaining the reference density and alignment.
+
+## Primary Interactions Tested
+
+- Video, Audio, Color/HDR and Output tabs open and retain the same task context.
+- Parameter tabs support roving focus plus ArrowLeft/ArrowRight/Home/End keyboard navigation.
+- CRF and structured video controls update the live task snapshot and output validation.
+- `Copy` collapses all re-encode controls, emits `COPY · copy`, and removes rate, scale, FPS, pixel-format and color re-encode semantics.
+- Invalid clip input (`start=10`, `end=5`) produces a blocking error and disables enqueue instead of silently converting to full-duration output.
+- Template application returns to the workbench while preserving source, task name, clip range and output directory.
+- Inline save-plan UI opens; browser mode returns an explicit Tauri-boundary error instead of pretending to persist.
+- Legacy `/source`, `/task-config` and `/preview` routes redirect to `/workbench`.
+- Browser fullscreen action returns an explicit desktop-host boundary message.
+- Jobs, Templates and Settings routes render their redesigned professional inspector views.
+- Browser console warnings/errors after the final interaction pass: `[]`.
+
+## Native End-to-End Evidence
+
+- Imported `/Users/igmainc/Downloads/encode-lab-dv-e2e/test-p5-first-minute.mkv` through the latest debug bundle.
+- Profile 5 ordinary re-encode is blocked and the enqueue CTA is disabled while RPU preservation is off.
+- Enabling Dolby Vision RPU preservation locks H.265/libx265, MKV, source resolution/FPS, complete duration, 10-bit output and Profile 5 color matrix requirements; validation then passes.
+- Pressing End on the preview timeline resolves to `60.816s`, leaving ten source frames of guard space, and successfully renders a real source/output comparison.
+- Independent Tauri fullscreen preview opens with the current frame, split position, direction and timestamp, and closes back to the main workbench.
+- No real job was enqueued and no test template was persisted during QA.
+
+## Fidelity Surfaces
+
+- Typography: Geist remains the product font; hierarchy, small-label density and monospace parameter values follow the selected reference.
+- Spacing: compact 160px navigation, 12px workbench gaps, narrow fact rows and a 460px inspector preserve a professional information density.
+- Color: existing semantic tokens provide neutral dark surfaces, blue actions, green readiness, amber warnings and destructive blocking errors.
+- Assets: preview imagery uses real raster assets in browser QA and real FFmpeg-generated frames in Tauri; no CSS art or fake estimate is used.
+- Product semantics: the workbench separates source facts, adjustable parameters, preview evidence and deterministic output facts. Unknown size/time remains explicitly unknown.
+
+## Comparison History
+
+1. Pass 1 — P1 layout: the full-width source summary pushed the inspector below the preview and the primary CTA fell off-screen. Fixed with the desktop `minmax(0, 1fr) / 460px` workbench grid. Evidence: `pro-inspector-implementation-pass-1.jpg` and `pro-inspector-comparison-pass-1.jpg`.
+2. Pass 2 — P1 viewport hierarchy: the inspector became persistent and the CTA returned to the first viewport. Focused inspection then exposed HDR defaults that still allowed 8-bit/BT.709 output for HDR sources. Evidence: `pro-inspector-implementation-pass-2.jpg` and `pro-inspector-comparison-pass-2.jpg`.
+3. Native E2E — P1 EOF failure: exact-duration preview could produce an FFmpeg-successful but undecodable container header. Fixed at the root with an eight-frame sample plus two-frame guard and actionable retry/details UI. Final native evidence is `pro-inspector-native-dv-safe-end.png`.
+4. Parameter-flow audit — P1 correctness: invalid clip ranges, non-finite values, stale source metadata and stream-copy/re-encode mixing could bypass visual intent. Fixed with immediate metadata invalidation, centralized finite/range policy, handler-level revalidation and canonical Copy semantics in both frontend and Rust command generation.
+5. Pass 6 — final visual and interaction comparison. No actionable P0/P1/P2 differences remain. Evidence: `pro-inspector-comparison-pass-6.jpg`, `pro-inspector-focus-workbench-pass-6.jpg` and `pro-inspector-focus-inspector-pass-6.jpg`.
+
+## Implementation Checklist
+
+- [x] Unified `/workbench` professional flow.
+- [x] Adjustable professional video/audio/color/output parameters.
+- [x] Real source/output single-frame comparison.
+- [x] Persistent enqueue action and deterministic validation.
+- [x] No fabricated size, time, speed or quality estimate.
+- [x] HDR/Dolby Vision safeguards and source-profile constraints.
+- [x] Stream-copy semantics separated from re-encode controls.
+- [x] Template save/apply task-boundary semantics.
+- [x] Job, template and environment inspector pages.
+- [x] Browser and Tauri host boundaries are explicit.
+- [x] Desktop, compact and mobile viewport checks.
+- [x] Browser console clean.
+- [x] Latest Tauri debug bundle built and exercised with a real Profile 5 source.
+
+## Follow-up Polish
+
+- P3: complete English translations for all new Pro Inspector copy before making English a release requirement.
+- P3: split the roughly 591 kB frontend bundle by route if startup profiling shows a real need.
 
 final result: passed

@@ -82,30 +82,38 @@ export function DetachedPreviewPage() {
     // 独立窗口创建后主动锁定系统全屏；失败时仍保持独立窗口展示。
     void enforceWindowLock();
 
+    let disposed = false;
     let unlistenPayload: (() => void) | undefined;
     let unlistenResize: (() => void) | undefined;
     const setupListener = async () => {
-      unlistenPayload = await currentWindow.listen<DetachedPreviewPayload>(
+      const disposePayload = await currentWindow.listen<DetachedPreviewPayload>(
         DETACHED_PREVIEW_UPDATE_EVENT,
         (event) => {
           setPayload(event.payload);
         },
       );
-      unlistenResize = await currentWindow.onResized(() => {
+      if (disposed) {
+        disposePayload();
+        return;
+      }
+      unlistenPayload = disposePayload;
+
+      const disposeResize = await currentWindow.onResized(() => {
         // 用户或系统改变窗口尺寸后，立即恢复为锁定的系统全屏窗口。
         void enforceWindowLock();
       });
+      if (disposed) disposeResize();
+      else unlistenResize = disposeResize;
     };
 
-    void setupListener();
+    void setupListener().catch(() => {
+      // 监听失败不影响当前帧展示；下一次打开独立窗口会重新初始化。
+    });
 
     return () => {
-      if (unlistenPayload) {
-        unlistenPayload();
-      }
-      if (unlistenResize) {
-        unlistenResize();
-      }
+      disposed = true;
+      unlistenPayload?.();
+      unlistenResize?.();
     };
   }, []);
 

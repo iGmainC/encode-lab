@@ -522,7 +522,10 @@ fn build_single_pass_args(
     append_audio_args(payload, &mut args)?;
     append_container_args(payload, &mut args);
     append_advanced_args(sanitized_advanced, &mut args);
-    append_reencoded_video_metadata_cleanup(&mut args);
+    if !matches!(payload.video.codec_format, VideoCodecFormat::Copy) {
+        // 流复制保留源视频内容与 metadata，只有重编码输出才清理失效统计字段。
+        append_reencoded_video_metadata_cleanup(&mut args);
+    }
     args.push(output_file.to_string());
 
     Ok(args)
@@ -569,7 +572,9 @@ fn build_pass2_args(
     append_audio_args(payload, &mut args)?;
     append_container_args(payload, &mut args);
     append_advanced_args(sanitized_advanced, &mut args);
-    append_reencoded_video_metadata_cleanup(&mut args);
+    if !matches!(payload.video.codec_format, VideoCodecFormat::Copy) {
+        append_reencoded_video_metadata_cleanup(&mut args);
+    }
     args.push(output_file.to_string());
 
     Ok(args)
@@ -602,6 +607,11 @@ fn append_video_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> Sto
     let encoder = encoder_name(&payload.video.encoder);
     args.push("-c:v".to_string());
     args.push(encoder.to_string());
+
+    // Copy 已完整表达视频流处理策略，后续所有结构化字段都属于重编码参数。
+    if matches!(payload.video.codec_format, VideoCodecFormat::Copy) {
+        return Ok(());
+    }
 
     match payload.video.bitrate_mode {
         VideoBitrateMode::Crf => {
@@ -813,10 +823,12 @@ fn codec_strategy_warnings(payload: &TaskConfigPayload) -> Vec<String> {
         warnings.push("当前视频为 copy 模式：将跳过大部分视频质量参数".to_string());
     }
 
-    if matches!(
-        payload.video.bitrate_mode,
-        VideoBitrateMode::Cbr | VideoBitrateMode::Abr
-    ) {
+    if !matches!(payload.video.codec_format, VideoCodecFormat::Copy)
+        && matches!(
+            payload.video.bitrate_mode,
+            VideoBitrateMode::Cbr | VideoBitrateMode::Abr
+        )
+    {
         warnings.push("当前为 CBR/ABR：视频码率参数来自 advancedArgs（例如 -b:v）".to_string());
     }
 
@@ -959,7 +971,8 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use crate::models::task::{
         AudioConfig, AudioMode, ClipRange, ContainerConfig, ContainerFormat, OutputConfig,
-        TaskConfigPayload, VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
+        Resolution, TaskConfigPayload, VideoBitrateMode, VideoCodecFormat, VideoConfig,
+        VideoEncoder,
     };
 
     use super::{
@@ -1027,6 +1040,54 @@ mod tests {
                 .windows(2)
                 .any(|item| item[0] == "-metadata:s:v:0" && item[1] == format!("{key}=")));
         }
+    }
+
+    #[test]
+    fn copy_command_should_skip_reencode_fields_and_metadata_cleanup() {
+        let mut value = payload();
+        value.video.codec_format = VideoCodecFormat::Copy;
+        value.video.encoder = VideoEncoder::Copy;
+        value.video.bitrate_mode = VideoBitrateMode::Cbr;
+        // 命令层即使收到未经 validate 的脏结构化字段，也不能把它们带入 Copy 命令。
+        value.video.crf = Some(18);
+        value.video.preset = Some("slow".to_string());
+        value.video.profile = Some("main".to_string());
+        value.video.tune = Some("film".to_string());
+        value.video.resolution = Some(Resolution {
+            width: 1920,
+            height: 1080,
+        });
+        value.video.fps = Some(24.0);
+        value.video.pixel_format = Some("yuv420p".to_string());
+        value.video.gop = Some(48);
+        value.container.format = ContainerFormat::Mkv;
+        value.container.faststart = Some(false);
+        // 非冲突专家参数仍沿用既有白名单和清洗边界。
+        value.advanced_args = Some("-metadata title=copy".to_string());
+
+        let result = build_ffmpeg_commands(&value, "input.mkv", "output.mkv").expect("build");
+        let args = &result.command_args[0];
+
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-c:v" && item[1] == "copy"));
+        for flag in [
+            "-crf",
+            "-preset",
+            "-profile:v",
+            "-tune",
+            "-vf",
+            "-r",
+            "-pix_fmt",
+            "-g",
+        ] {
+            assert!(!args.iter().any(|item| item == flag), "unexpected {flag}");
+        }
+        assert!(!args.iter().any(|item| item == "-metadata:s:v:0"));
+        assert!(args
+            .windows(2)
+            .any(|item| item[0] == "-metadata" && item[1] == "title=copy"));
+        assert!(!result.warnings.iter().any(|item| item.contains("CBR/ABR")));
     }
 
     #[test]

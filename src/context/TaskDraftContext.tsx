@@ -5,21 +5,24 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauriRuntime } from "../lib/tauriRuntime";
 import type {
   TaskDraftSnapshot,
   VideoMetadataResult,
-  TaskDraftStep,
 } from "../types/workbench";
 
 type TaskDraftContextValue = {
-  step: TaskDraftStep;
-  setStep: (step: TaskDraftStep) => void;
+  /** 当前任务名称，会进入输出文件名模板。 */
+  draftName: string;
+  setDraftName: (value: string) => void;
+  /** 当前参数来源；仅用于界面说明，不与输入素材绑定。 */
+  activeTemplateName: string;
+  setActiveTemplateName: (value: string) => void;
   formCodec: string;
   setFormCodec: (value: string) => void;
   formEncoder: string;
@@ -74,6 +77,14 @@ type TaskDraftContextValue = {
   setContainerFormat: (value: "mp4" | "mkv" | "mov") => void;
   containerFaststart: boolean;
   setContainerFaststart: (value: boolean) => void;
+  audioMode: "copy" | "custom";
+  setAudioMode: (value: "copy" | "custom") => void;
+  audioCustomArgs: string;
+  setAudioCustomArgs: (value: string) => void;
+  outputDir: string;
+  setOutputDir: (value: string) => void;
+  fileNamePattern: string;
+  setFileNamePattern: (value: string) => void;
   clipStartSec: number;
   setClipStartSec: (value: number) => void;
   clipEndSec: number;
@@ -83,10 +94,9 @@ type TaskDraftContextValue = {
   videoMetadata: VideoMetadataResult | null;
   videoMetadataLoading: boolean;
   videoMetadataError: string | null;
-  isDragOverWindow: boolean;
   pickSourceFile: () => Promise<void>;
   retryVideoMetadata: () => Promise<void>;
-  applyTemplateSnapshot: (snapshot: TaskDraftSnapshot) => void;
+  applyTemplateSnapshot: (snapshot: TaskDraftSnapshot, templateName?: string) => void;
   taskDraftSnapshot: TaskDraftSnapshot;
 };
 
@@ -111,6 +121,10 @@ function buildBrowserPreviewMetadata(): VideoMetadataResult {
       fps: 23.976,
       bitDepth: 10,
       hdrType: "Hdr10",
+      colorPrimaries: "bt2020",
+      colorTransfer: "smpte2084",
+      colorSpace: "bt2020nc",
+      colorRange: "tv",
     },
     audio: {
       codecName: "AAC",
@@ -122,8 +136,18 @@ function buildBrowserPreviewMetadata(): VideoMetadataResult {
   };
 }
 
-export function TaskDraftProvider({ children }: { children: ReactNode }) {
-  const [step, setStep] = useState<TaskDraftStep>("source");
+export function TaskDraftProvider({
+  children,
+  defaultOutputDir,
+}: {
+  children: ReactNode;
+  /** 全局默认输出目录；只用于尚未指定任务级目录的新草稿。 */
+  defaultOutputDir?: string;
+}) {
+  const [draftName, setDraftName] = useState("preview-draft");
+  const [activeTemplateName, setActiveTemplateName] = useState(() =>
+    isTauriRuntime() ? "自定义配置" : "线上发布副本",
+  );
   const [formCodec, setFormCodec] = useState("h265");
   const [formEncoder, setFormEncoder] = useState("libx265");
   const [formMode, setFormMode] = useState<"CRF" | "CBR" | "ABR">("CRF");
@@ -139,10 +163,18 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [formBitrateKbps, setFormBitrateKbps] = useState("5000");
   const [formMaxrateKbps, setFormMaxrateKbps] = useState("7000");
   const [formBufsizeKbps, setFormBufsizeKbps] = useState("10000");
-  const [formPixelFormat, setFormPixelFormat] = useState("yuv420p");
-  const [formColorPrimaries, setFormColorPrimaries] = useState("bt709");
-  const [formColorTrc, setFormColorTrc] = useState("bt709");
-  const [formColorspace, setFormColorspace] = useState("bt709");
+  const [formPixelFormat, setFormPixelFormat] = useState(() =>
+    isTauriRuntime() ? "yuv420p" : "yuv420p10le",
+  );
+  const [formColorPrimaries, setFormColorPrimaries] = useState(() =>
+    isTauriRuntime() ? "bt709" : "bt2020",
+  );
+  const [formColorTrc, setFormColorTrc] = useState(() =>
+    isTauriRuntime() ? "bt709" : "smpte2084",
+  );
+  const [formColorspace, setFormColorspace] = useState(() =>
+    isTauriRuntime() ? "bt709" : "bt2020nc",
+  );
   const [av1CpuUsed, setAv1CpuUsed] = useState("6");
   const [av1RowMt, setAv1RowMt] = useState(true);
   const [av1TileColumns, setAv1TileColumns] = useState("2");
@@ -151,9 +183,13 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   const [av1FilmGrain, setAv1FilmGrain] = useState("0");
   const [containerFormat, setContainerFormat] = useState<"mp4" | "mkv" | "mov">("mp4");
   const [containerFaststart, setContainerFaststart] = useState(true);
+  const [audioMode, setAudioMode] = useState<"copy" | "custom">("copy");
+  const [audioCustomArgs, setAudioCustomArgs] = useState("");
+  const [outputDir, setOutputDir] = useState("");
+  const [fileNamePattern, setFileNamePattern] = useState("{inputName}_{taskName}");
   const [clipStartSec, setClipStartSec] = useState(0);
   const [clipEndSec, setClipEndSec] = useState(0);
-  const [sourceFilePath, setSourceFilePath] = useState(() =>
+  const [sourceFilePath, setSourceFilePathState] = useState(() =>
     isTauriRuntime() ? "" : "/Users/encode-lab/Travel_2024_Film.mov",
   );
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadataResult | null>(() =>
@@ -161,10 +197,35 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   );
   const [videoMetadataLoading, setVideoMetadataLoading] = useState(false);
   const [videoMetadataError, setVideoMetadataError] = useState<string | null>(null);
-  const [isDragOverWindow, setIsDragOverWindow] = useState(false);
+  const metadataRequestRef = useRef(0);
+  const initializedDefaultOutputRef = useRef(false);
+
+  /**
+   * 切换源素材时立即让旧元数据失效，避免新路径短暂复用旧素材的 HDR、尺寸和时长。
+   * @param value 新的源视频路径
+   */
+  const setSourceFilePath = useCallback((value: string) => {
+    metadataRequestRef.current += 1;
+    setSourceFilePathState(value);
+    setVideoMetadata(null);
+    setVideoMetadataError(null);
+    setVideoMetadataLoading(Boolean(value.trim()) && isTauriRuntime());
+  }, []);
+
+  useEffect(() => {
+    const trimmedDefault = defaultOutputDir?.trim();
+    if (initializedDefaultOutputRef.current || !trimmedDefault) {
+      return;
+    }
+
+    // 模板或用户已经指定目录时保持任务级值，否则让设置页的默认目录真正进入任务快照。
+    setOutputDir((current) => current.trim() || trimmedDefault);
+    initializedDefaultOutputRef.current = true;
+  }, [defaultOutputDir]);
 
   const fetchVideoMetadata = useCallback(async (inputFile: string) => {
     const trimmed = inputFile.trim();
+    const requestId = ++metadataRequestRef.current;
     if (!trimmed) {
       setVideoMetadata(null);
       setVideoMetadataError(null);
@@ -173,8 +234,9 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
     }
 
     if (!isTauriRuntime()) {
-      setVideoMetadata(buildBrowserPreviewMetadata());
-      setStep((current) => (current === "source" ? "config" : current));
+      // 浏览器 QA 仍保持元数据与当前路径一一对应，覆盖替换素材的竞态分支。
+      setVideoMetadata({ ...buildBrowserPreviewMetadata(), inputFile: trimmed });
+      setVideoMetadataLoading(false);
       return;
     }
 
@@ -184,23 +246,32 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       const result = await invoke<VideoMetadataResult>("read_video_metadata", {
         inputFile: trimmed,
       });
+      // 只接收最后一次素材读取，避免慢请求覆盖用户刚选择的新文件。
+      if (requestId !== metadataRequestRef.current) {
+        return;
+      }
       setVideoMetadata(result);
-      setStep((current) => (current === "source" ? "config" : current));
     } catch (err) {
+      if (requestId !== metadataRequestRef.current) {
+        return;
+      }
       setVideoMetadata(null);
       setVideoMetadataError(err instanceof Error ? err.message : String(err));
     } finally {
-      setVideoMetadataLoading(false);
+      if (requestId === metadataRequestRef.current) {
+        setVideoMetadataLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     const trimmed = sourceFilePath.trim();
     if (!trimmed) {
+      // 使仍在飞行中的读取结果失效，空素材状态不能被旧请求反写。
+      metadataRequestRef.current += 1;
       setVideoMetadata(null);
       setVideoMetadataError(null);
       setVideoMetadataLoading(false);
-      setStep("source");
       return;
     }
 
@@ -210,44 +281,6 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
 
     return () => window.clearTimeout(timer);
   }, [sourceFilePath, fetchVideoMetadata]);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) {
-      return;
-    }
-
-    let unlisten: (() => void) | null = null;
-    void getCurrentWindow()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "enter" || event.payload.type === "over") {
-          setIsDragOverWindow(true);
-          return;
-        }
-
-        if (event.payload.type === "leave") {
-          setIsDragOverWindow(false);
-          return;
-        }
-
-        if (event.payload.type === "drop") {
-          setIsDragOverWindow(false);
-          const [firstPath] = event.payload.paths ?? [];
-          if (firstPath) {
-            setSourceFilePath(firstPath);
-          }
-        }
-      })
-      .then((dispose) => {
-        unlisten = dispose;
-      })
-      .catch(() => {});
-
-    return () => {
-      if (unlisten) {
-        unlisten();
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (!keepOriginalResolution) {
@@ -312,10 +345,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       if (typeof selected === "string") {
         setSourceFilePath(selected);
       }
-    } catch {
-      // User cancel is a valid path.
+    } catch (error) {
+      setVideoMetadataError(`选择源素材失败：${error instanceof Error ? error.message : String(error)}`);
     }
-  }, []);
+  }, [setSourceFilePath]);
 
   const retryVideoMetadata = useCallback(async () => {
     await fetchVideoMetadata(sourceFilePath);
@@ -324,15 +357,14 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
   /**
    * 将模板快照写回当前任务草稿表单。
    * @param snapshot 模板保存的任务参数快照
+   * @param templateName 模板名称；缺省时沿用快照名称
    */
-  const applyTemplateSnapshot = useCallback((snapshot: TaskDraftSnapshot) => {
+  const applyTemplateSnapshot = useCallback((snapshot: TaskDraftSnapshot, templateName?: string) => {
     const video = snapshot.video;
     const container = snapshot.container;
     const advancedArgs = snapshot.advancedArgs ?? "";
-    const clipRange = snapshot.clipRange;
 
-    setClipStartSec(clipRange ? clipRange.startMs / 1000 : 0);
-    setClipEndSec(clipRange ? clipRange.endMs / 1000 : videoMetadata?.durationSec ?? 0);
+    // 方案只写入编码参数；当前素材、截取范围、任务名称和输出目录保持任务级语义。
     setFormCodec(video.codecFormat);
     setFormEncoder(video.encoder);
     setFormMode(video.bitrateMode);
@@ -348,6 +380,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
     setFormPixelFormat(video.pixelFormat ?? "yuv420p");
     setContainerFormat(container.format);
     setContainerFaststart(Boolean(container.faststart));
+    setActiveTemplateName(templateName?.trim() || snapshot.name || "自定义配置");
+    setAudioMode(snapshot.audio.mode);
+    setAudioCustomArgs(snapshot.audio.customArgs ?? "");
+    setFileNamePattern(snapshot.output.fileNamePattern || "{inputName}_{taskName}");
     setFormBitrateKbps(readAdvancedArgValue(advancedArgs, "-b:v") ?? "5000");
     setFormMaxrateKbps(readAdvancedArgValue(advancedArgs, "-maxrate") ?? "7000");
     setFormBufsizeKbps(readAdvancedArgValue(advancedArgs, "-bufsize") ?? "10000");
@@ -360,8 +396,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
     setAv1TileRows(readTilePart(advancedArgs, 1) ?? "1");
     setAv1SvtTune(readSvtParamValue(advancedArgs, "tune") ?? "0");
     setAv1FilmGrain(readSvtParamValue(advancedArgs, "film-grain") ?? "0");
-    setStep("config");
-  }, [videoMetadata?.durationSec]);
+  }, []);
 
   /**
    * 构建色彩元数据参数。
@@ -459,11 +494,12 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       const hasClipRange =
         !preserveDolbyVisionMetadata &&
         durationSec > 0 &&
-        clipEndSec > clipStartSec &&
-        (clipStartSec > 0 || clipEndSec < durationSec);
+        // 非默认输入即进入快照，让非法区间由统一策略明确阻断，不能静默退回整片。
+        (clipStartSec !== 0 || clipEndSec !== durationSec);
+      const isVideoStreamCopy = !preserveDolbyVisionMetadata && formCodec === "copy";
 
       return {
-        name: "preview-draft",
+        name: draftName.trim() || "preview-draft",
         clipRange: hasClipRange
           ? {
               startMs: Math.round(clipStartSec * 1000),
@@ -474,16 +510,16 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
           codecFormat: preserveDolbyVisionMetadata
             ? "h265"
             : (formCodec as TaskDraftSnapshot["video"]["codecFormat"]),
-          encoder: preserveDolbyVisionMetadata ? "libx265" : formEncoder,
+          encoder: preserveDolbyVisionMetadata ? "libx265" : isVideoStreamCopy ? "copy" : formEncoder,
           bitrateMode: preserveDolbyVisionMetadata ? "CRF" : formMode,
-          crf: preserveDolbyVisionMetadata || formMode === "CRF" ? formCrf : undefined,
-          preset: formPreset || undefined,
-          keepOriginalResolution: preserveDolbyVisionMetadata || keepOriginalResolution,
-          keepOriginalFps: preserveDolbyVisionMetadata || keepOriginalFps,
-          preserveDolbyVisionMetadata,
+          crf: !isVideoStreamCopy && (preserveDolbyVisionMetadata || formMode === "CRF") ? formCrf : undefined,
+          preset: isVideoStreamCopy ? undefined : formPreset || undefined,
+          keepOriginalResolution: isVideoStreamCopy || preserveDolbyVisionMetadata || keepOriginalResolution,
+          keepOriginalFps: isVideoStreamCopy || preserveDolbyVisionMetadata || keepOriginalFps,
+          preserveDolbyVisionMetadata: isVideoStreamCopy ? false : preserveDolbyVisionMetadata,
           // 保持原始尺寸时不传 resolution，让后端跳过 scale 参数并保留源尺寸语义。
           resolution:
-            !preserveDolbyVisionMetadata && !keepOriginalResolution && formWidth && formHeight
+            !isVideoStreamCopy && !preserveDolbyVisionMetadata && !keepOriginalResolution && formWidth && formHeight
               ? {
                   width: Number(formWidth),
                   height: Number(formHeight),
@@ -491,14 +527,15 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
               : undefined,
           // 跟随源视频帧率时不传 fps，让后端跳过 -r 参数并保留源帧率语义。
           fps:
-            !preserveDolbyVisionMetadata && !keepOriginalFps && formFps
+            !isVideoStreamCopy && !preserveDolbyVisionMetadata && !keepOriginalFps && formFps
               ? Number(formFps)
               : undefined,
-          pixelFormat: preserveDolbyVisionMetadata ? "yuv420p10le" : formPixelFormat || undefined,
-          enableTwoPass: preserveDolbyVisionMetadata ? false : formTwoPass,
+          pixelFormat: isVideoStreamCopy ? undefined : preserveDolbyVisionMetadata ? "yuv420p10le" : formPixelFormat || undefined,
+          enableTwoPass: isVideoStreamCopy || preserveDolbyVisionMetadata ? false : formTwoPass,
         },
         audio: {
-          mode: "copy",
+          mode: audioMode,
+          customArgs: audioMode === "custom" ? audioCustomArgs.trim() || undefined : undefined,
         },
         container: {
           format: preserveDolbyVisionMetadata ? "mkv" : containerFormat,
@@ -506,10 +543,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
             !preserveDolbyVisionMetadata && containerFormat === "mp4" ? containerFaststart : false,
         },
         // DV 路径由后端按 Profile 构造色彩和 VBV 参数，避免普通高级参数污染专用链路。
-        advancedArgs: preserveDolbyVisionMetadata ? undefined : buildAdvancedArgs(),
+        advancedArgs: preserveDolbyVisionMetadata || isVideoStreamCopy ? undefined : buildAdvancedArgs(),
         output: {
-          dir: "",
-          fileNamePattern: "{inputName}_{taskName}",
+          dir: outputDir.trim(),
+          fileNamePattern: fileNamePattern.trim() || "{inputName}_{taskName}",
           overwrite: "autoRename",
         },
       };
@@ -517,6 +554,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
     [
       clipStartSec,
       clipEndSec,
+      draftName,
       formCodec,
       formEncoder,
       formMode,
@@ -535,6 +573,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       formBufsizeKbps,
       containerFormat,
       containerFaststart,
+      audioMode,
+      audioCustomArgs,
+      outputDir,
+      fileNamePattern,
       buildAdvancedArgs,
       videoMetadata?.durationSec,
     ],
@@ -542,8 +584,10 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(
     () => ({
-      step,
-      setStep,
+      draftName,
+      setDraftName,
+      activeTemplateName,
+      setActiveTemplateName,
       formCodec,
       setFormCodec,
       formEncoder,
@@ -598,6 +642,14 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       setContainerFormat,
       containerFaststart,
       setContainerFaststart,
+      audioMode,
+      setAudioMode,
+      audioCustomArgs,
+      setAudioCustomArgs,
+      outputDir,
+      setOutputDir,
+      fileNamePattern,
+      setFileNamePattern,
       clipStartSec,
       setClipStartSec,
       clipEndSec,
@@ -607,14 +659,14 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       videoMetadata,
       videoMetadataLoading,
       videoMetadataError,
-      isDragOverWindow,
       pickSourceFile,
       retryVideoMetadata,
       applyTemplateSnapshot,
       taskDraftSnapshot,
     }),
     [
-      step,
+      draftName,
+      activeTemplateName,
       formCodec,
       formEncoder,
       formMode,
@@ -642,13 +694,16 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
       av1FilmGrain,
       containerFormat,
       containerFaststart,
+      audioMode,
+      audioCustomArgs,
+      outputDir,
+      fileNamePattern,
       clipStartSec,
       clipEndSec,
       sourceFilePath,
       videoMetadata,
       videoMetadataLoading,
       videoMetadataError,
-      isDragOverWindow,
       pickSourceFile,
       retryVideoMetadata,
       applyTemplateSnapshot,

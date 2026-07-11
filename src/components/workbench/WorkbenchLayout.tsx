@@ -14,9 +14,7 @@ type Props = {
   ffmpegProbe: FfmpegProbeResult | null;
   concurrencyN: number | string;
   onRefresh: () => void;
-  onSeed: () => void;
   loading: boolean;
-  seeding: boolean;
   compactHeader?: boolean;
   children: ReactNode;
 };
@@ -28,9 +26,7 @@ export function WorkbenchLayout({
   ffmpegProbe,
   concurrencyN,
   onRefresh,
-  onSeed,
   loading,
-  seeding,
   compactHeader = false,
   children,
 }: Props) {
@@ -44,12 +40,10 @@ export function WorkbenchLayout({
           ffmpegProbe={ffmpegProbe}
           concurrencyN={concurrencyN}
           onRefresh={onRefresh}
-          onSeed={onSeed}
           loading={loading}
-          seeding={seeding}
         />
         <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-          <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-5 px-4 py-4 md:px-6 lg:px-8">
+          <div className="mx-auto flex w-full max-w-[1680px] flex-col gap-3 px-3 py-3 md:px-4">
             {!compactHeader ? (
               <section className="flex min-w-0 flex-col gap-2 border-b pb-4">
                 <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground" translate="no">

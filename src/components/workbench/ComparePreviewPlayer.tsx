@@ -26,6 +26,7 @@ import type {
 type Props = {
   sourceFile: string;
   sourceDurationSec?: number;
+  sourceFps?: number;
   sourceHdrType?: VideoStreamMetadata["hdrType"];
   sourceColorPrimaries?: VideoStreamMetadata["colorPrimaries"];
   sourceColorTransfer?: VideoStreamMetadata["colorTransfer"];
@@ -67,6 +68,8 @@ const CONTROL_AUTO_HIDE_MS = 2500;
 const UPDATE_INTERVAL_MS = 300;
 /** 预览帧固定使用半尺寸渲染，兼顾可读性和生成速度。 */
 const PREVIEW_RENDER_SCALE: PreviewConfig["renderScale"] = 0.5;
+/** 后端会编码 8 帧作为质量样本；额外保留 2 帧避免容器时长与末帧 PTS 偏差。 */
+const PREVIEW_END_GUARD_FRAMES = 10;
 
 /** 兼容部分 WebView 只暴露 WebKit 前缀 Fullscreen API 的情况。 */
 type WebkitFullscreenElement = HTMLElement & {
@@ -153,6 +156,24 @@ function clampTimeSec(value: number, durationSec: number) {
 }
 
 /**
+ * 计算最后一个可请求的预览时间点，避免把 FFmpeg 定位到精确 EOF。
+ * @param durationSec 源视频总时长，单位秒
+ * @param sourceFps 源视频帧率
+ * @returns 为编码样本窗口预留足够帧数的安全时间轴上限
+ */
+function getPreviewTimelineMaxSec(durationSec: number, sourceFps?: number) {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    return 0;
+  }
+
+  // 帧率缺失时按 25fps 预留 400ms；避免 FFmpeg 在不足 8 帧时只写出不可解码的容器头。
+  const endGuardSec = sourceFps && Number.isFinite(sourceFps) && sourceFps > 0
+    ? PREVIEW_END_GUARD_FRAMES / sourceFps
+    : 0.4;
+  return Math.max(0, durationSec - endGuardSec);
+}
+
+/**
  * 生成前端用于判断帧是否仍匹配当前参数的稳定 key。
  * @param inputFile 源文件路径
  * @param timeMs 当前时间点，单位毫秒
@@ -215,6 +236,21 @@ function formatPreviewInvokeError(error: unknown) {
 }
 
 /**
+ * 把后端诊断压缩成操作建议，完整日志仍保留在技术详情中。
+ * @param error 已格式化的预览错误
+ * @returns 面向当前操作的简短说明
+ */
+function getPreviewErrorSummary(error: string) {
+  if (error.includes("End of file") || error.includes("EOF")) {
+    return "当前时间点已经没有可解码帧。请向前移动时间轴，或直接重试当前帧。";
+  }
+  if (error.includes("Error opening input")) {
+    return "预览临时文件无法读取。请重试当前帧；若持续失败，再展开技术详情排查运行时。";
+  }
+  return "当前帧未能生成。请重试或移动时间轴；持续失败时可展开技术详情。";
+}
+
+/**
  * 管理预览时间轴的草稿时间和松手提交。
  * @param options 时间轴配置和提交回调
  * @returns 当前时间、拖动状态和 Slider 事件处理函数
@@ -268,6 +304,11 @@ function usePreviewTimeline({
 
     setCurrentTimeSec(initialFrame.timeMs / 1000);
   }, [initialFrame, setCurrentTimeSec]);
+
+  useEffect(() => {
+    // 素材或帧率变化后把旧时间点重新限制到当前可解码范围内。
+    setCurrentTimeSec(currentTimeSecRef.current);
+  }, [durationSec, setCurrentTimeSec]);
 
   /**
    * 标记用户已开始拖动时间轴。
@@ -489,16 +530,19 @@ function usePreviewFrameSession({
    * 请求生成指定时间和参数对应的预览帧。
    * @param timeMs 当前时间点，单位毫秒
    * @param renderKey 本次渲染请求对应的前端 key
+   * @param resetImageRecovery 是否允许新帧再次触发一次自动恢复
    */
   const requestFrame = useCallback(
-    async (timeMs: number, renderKey: string) => {
+    async (timeMs: number, renderKey: string, resetImageRecovery = true) => {
       if (!sourceFile) {
         return;
       }
 
       if (!isTauriRuntime()) {
         lastSubmittedRenderKeyRef.current = renderKey;
-        fallbackRenderKeyRef.current = null;
+        if (resetImageRecovery) {
+          fallbackRenderKeyRef.current = null;
+        }
         setPreviewState("running");
         setPreviewSpeed(1.6);
         setEstimatedTranscodeSpeed(0.72);
@@ -515,7 +559,9 @@ function usePreviewFrameSession({
       }
 
       lastSubmittedRenderKeyRef.current = renderKey;
-      fallbackRenderKeyRef.current = null;
+      if (resetImageRecovery) {
+        fallbackRenderKeyRef.current = null;
+      }
       setPreviewState((state) => (state === "idle" ? "warming" : "updating"));
 
       void invoke<UpdatePreviewResponse>("update_preview", {
@@ -539,9 +585,9 @@ function usePreviewFrameSession({
   );
 
   /**
-   * 复用帧加载失败时重新生成当前目标帧。
+   * 图片资源加载失败时自动重新生成一次当前目标帧。
    */
-  const retryCurrentFrame = useCallback(() => {
+  const recoverImageLoadFailure = useCallback(() => {
     if (fallbackRenderKeyRef.current === desiredRenderKey) {
       setPreviewState("error");
       setPreviewError(imageLoadFailedText);
@@ -551,8 +597,19 @@ function usePreviewFrameSession({
     // 当前图片路径已失效时立即隐藏旧帧，避免继续展示错误资源。
     fallbackRenderKeyRef.current = desiredRenderKey;
     clearFrameSnapshot();
-    void requestFrame(desiredTimeMs, desiredRenderKey);
+    // 自动恢复期间保留标记，防止新返回的无效路径再次触发无限请求。
+    void requestFrame(desiredTimeMs, desiredRenderKey, false);
   }, [clearFrameSnapshot, desiredRenderKey, desiredTimeMs, imageLoadFailedText, requestFrame]);
+
+  /**
+   * 用户主动重试当前目标帧；每次操作都重新提交渲染请求。
+   */
+  const retryCurrentFrame = useCallback(() => {
+    fallbackRenderKeyRef.current = null;
+    clearFrameSnapshot();
+    setPreviewError(undefined);
+    void requestFrame(desiredTimeMs, desiredRenderKey);
+  }, [clearFrameSnapshot, desiredRenderKey, desiredTimeMs, requestFrame]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -560,68 +617,101 @@ function usePreviewFrameSession({
       return;
     }
 
+    let disposed = false;
     let unlistenFrame: (() => void) | undefined;
     let unlistenState: (() => void) | undefined;
 
+    /**
+     * 释放当前已经完成注册的预览事件监听器。
+     */
+    const disposeListeners = () => {
+      unlistenFrame?.();
+      unlistenState?.();
+      unlistenFrame = undefined;
+      unlistenState = undefined;
+    };
+
+    /**
+     * 依次注册帧与状态事件，并在注册期间卸载时回收迟到的监听器。
+     */
     const setup = async () => {
-      unlistenFrame = await listen<PreviewFrameEvent>("preview:frame", (event) => {
-        const payload = event.payload;
-        if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
-          return;
-        }
-        if (payload.seq <= lastFrameSeqRef.current) {
-          return;
-        }
+      try {
+        const nextUnlistenFrame = await listen<PreviewFrameEvent>("preview:frame", (event) => {
+          const payload = event.payload;
+          if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
+            return;
+          }
+          if (payload.seq <= lastFrameSeqRef.current) {
+            return;
+          }
 
-        lastFrameSeqRef.current = payload.seq;
-        if (!payload.sourceImagePath || !payload.previewImagePath) {
-          return;
-        }
+          lastFrameSeqRef.current = payload.seq;
+          if (!payload.sourceImagePath || !payload.previewImagePath) {
+            return;
+          }
 
-        const submittedRenderKey = lastSubmittedRenderKeyRef.current;
-        if (!submittedRenderKey || submittedRenderKey !== desiredRenderKeyRef.current) {
-          return;
-        }
+          const submittedRenderKey = lastSubmittedRenderKeyRef.current;
+          if (!submittedRenderKey || submittedRenderKey !== desiredRenderKeyRef.current) {
+            return;
+          }
 
-        setCurrentFrame({
-          sourceImagePath: payload.sourceImagePath,
-          previewImagePath: payload.previewImagePath,
-          timeMs: payload.timeMs,
-          seq: payload.seq,
-          renderKey: submittedRenderKey,
+          setCurrentFrame({
+            sourceImagePath: payload.sourceImagePath,
+            previewImagePath: payload.previewImagePath,
+            timeMs: payload.timeMs,
+            seq: payload.seq,
+            renderKey: submittedRenderKey,
+          });
+          setPreviewError(undefined);
         });
-        setPreviewError(undefined);
-      });
 
-      unlistenState = await listen<PreviewStateEvent>("preview:state", (event) => {
-        const payload = event.payload;
-        if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
+        // StrictMode 清理可能早于异步注册完成，迟到的监听器必须立即释放。
+        if (disposed) {
+          nextUnlistenFrame();
           return;
         }
-        setPreviewState(payload.state);
-        setPreviewSpeed(payload.previewSpeed);
-        setEstimatedTranscodeSpeed(payload.estimatedTranscodeSpeed);
-        setDegradedFromTwoPass(Boolean(payload.degradedFromTwoPass));
-        setDegradedFromDolbyVision(Boolean(payload.degradedFromDolbyVision));
-        setDegradedFromSdrTonemap(Boolean(payload.degradedFromSdrTonemap));
-        setPreviewError(
-          payload.error ? formatPreviewInvokeError(payload.error) : undefined,
-        );
-      });
+        unlistenFrame = nextUnlistenFrame;
 
-      setListenersReady(true);
+        const nextUnlistenState = await listen<PreviewStateEvent>("preview:state", (event) => {
+          const payload = event.payload;
+          if (!sessionIdRef.current || payload.previewSessionId !== sessionIdRef.current) {
+            return;
+          }
+          setPreviewState(payload.state);
+          setPreviewSpeed(payload.previewSpeed);
+          setEstimatedTranscodeSpeed(payload.estimatedTranscodeSpeed);
+          setDegradedFromTwoPass(Boolean(payload.degradedFromTwoPass));
+          setDegradedFromDolbyVision(Boolean(payload.degradedFromDolbyVision));
+          setDegradedFromSdrTonemap(Boolean(payload.degradedFromSdrTonemap));
+          setPreviewError(
+            payload.error ? formatPreviewInvokeError(payload.error) : undefined,
+          );
+        });
+
+        if (disposed) {
+          nextUnlistenState();
+          disposeListeners();
+          return;
+        }
+        unlistenState = nextUnlistenState;
+        setListenersReady(true);
+      } catch (err) {
+        disposeListeners();
+        if (disposed) {
+          return;
+        }
+
+        setListenersReady(false);
+        setPreviewState("error");
+        setPreviewError(`预览事件监听启动失败：${formatPreviewInvokeError(err)}`);
+      }
     };
 
     void setup();
 
     return () => {
-      setListenersReady(false);
-      if (unlistenFrame) {
-        unlistenFrame();
-      }
-      if (unlistenState) {
-        unlistenState();
-      }
+      disposed = true;
+      disposeListeners();
     };
   }, []);
 
@@ -699,16 +789,20 @@ function usePreviewFrameSession({
     sourceImageSrc,
     previewImageSrc,
     previewState: !isTauriRuntime() && sourceFile ? "running" : previewState,
-    previewSpeed: !isTauriRuntime() && sourceFile ? 1.6 : previewSpeed,
-    estimatedTranscodeSpeed: !isTauriRuntime() && sourceFile ? 0.72 : estimatedTranscodeSpeed,
+    previewSpeed: !isTauriRuntime() && sourceFile ? undefined : previewSpeed,
+    estimatedTranscodeSpeed: !isTauriRuntime() && sourceFile ? undefined : estimatedTranscodeSpeed,
     previewError: !isTauriRuntime() && sourceFile ? undefined : previewError,
-    degradedFromTwoPass: !isTauriRuntime() && sourceFile ? true : degradedFromTwoPass,
+    degradedFromTwoPass:
+      !isTauriRuntime() && sourceFile
+        ? taskDraftSnapshot.video.enableTwoPass
+        : degradedFromTwoPass,
     degradedFromDolbyVision:
       !isTauriRuntime() && sourceFile
         ? Boolean(taskDraftSnapshot.video.preserveDolbyVisionMetadata)
         : degradedFromDolbyVision,
     degradedFromSdrTonemap: !isTauriRuntime() && sourceFile ? false : degradedFromSdrTonemap,
     requestFrame,
+    recoverImageLoadFailure,
     retryCurrentFrame,
   };
 }
@@ -844,6 +938,7 @@ function useCompareSplitterDrag({
 export function ComparePreviewPlayer({
   sourceFile,
   sourceDurationSec,
+  sourceFps,
   sourceHdrType,
   sourceColorPrimaries,
   sourceColorTransfer,
@@ -875,6 +970,7 @@ export function ComparePreviewPlayer({
   const fullscreenActive = isFullscreen || isFullscreenFallback;
   const previewFullscreenActive = fullscreenActive || fillViewport;
   const durationSec = sourceDurationSec ?? 0;
+  const previewTimelineMaxSec = getPreviewTimelineMaxSec(durationSec, sourceFps);
   const taskDraftSnapshotKey = useMemo(
     () => JSON.stringify(taskDraftSnapshot),
     [taskDraftSnapshot],
@@ -891,7 +987,7 @@ export function ComparePreviewPlayer({
   );
 
   const timeline = usePreviewTimeline({
-    durationSec,
+    durationSec: previewTimelineMaxSec,
     initialTimeSec,
     initialFrame,
     onCommitTimeMs: (timeMs) => {
@@ -957,24 +1053,24 @@ export function ComparePreviewPlayer({
   const secondPaneLabel = sourceIsFirst ? t("preview.frame.preview") : t("preview.frame.source");
   const firstPaneSideLabel = splitMode === "vertical" ? t("preview.side.left") : t("preview.side.top");
   const secondPaneSideLabel = splitMode === "vertical" ? t("preview.side.right") : t("preview.side.bottom");
-  const firstPaneClass = "left-4 top-20";
+  const firstPaneClass = "left-3 top-3";
   const secondPaneClass =
-    splitMode === "vertical" ? "right-4 top-20" : "left-4 bottom-28";
-  const previewModeLabel = previewSession.degradedFromDolbyVision
-    ? previewSession.degradedFromSdrTonemap
-      ? t("preview.sdrTonemapUnavailable")
-      : previewSession.degradedFromTwoPass
-      ? t("preview.degradedWithDolbyVision")
-      : t("preview.dolbyVisionDegraded")
-    : previewSession.degradedFromSdrTonemap
-      ? t("preview.sdrTonemapUnavailable")
-      : previewSession.degradedFromTwoPass
-      ? t("preview.degraded")
-      : t("preview.singleFrame");
+    splitMode === "vertical" ? "right-14 top-3" : "left-3 bottom-28";
   const emptyFrameContent = previewSession.previewError ? (
     <div className="mx-auto max-w-md rounded-lg border border-red-300/25 bg-red-950/35 p-4 text-center text-red-100">
       <div className="text-sm font-medium">{t("preview.frameFailed")}</div>
-      <div className="mt-2 text-xs leading-5 text-red-100/80">{previewSession.previewError}</div>
+      <div className="mt-2 text-xs leading-5 text-red-100/80">{getPreviewErrorSummary(previewSession.previewError)}</div>
+      <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+        <Button size="sm" variant="secondary" onClick={previewSession.retryCurrentFrame}>重试当前帧</Button>
+        <details className="text-left text-xs text-red-100/75">
+          <summary className="cursor-pointer rounded px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
+            技术详情
+          </summary>
+          <pre className="mt-2 max-h-28 max-w-sm overflow-auto whitespace-pre-wrap break-all rounded bg-black/35 p-2 font-mono text-[10px] leading-4">
+            {previewSession.previewError}
+          </pre>
+        </details>
+      </div>
     </div>
   ) : (
     <span>{t("preview.frameLoading")}</span>
@@ -1122,7 +1218,7 @@ export function ComparePreviewPlayer({
         onDoubleClick={handleFullscreenButtonClick}
       >
         {sourceFile ? (
-          <div className={`relative w-full bg-black ${previewFullscreenActive ? "h-full" : "aspect-video"}`}>
+          <div className={`relative w-full bg-black ${previewFullscreenActive ? "h-full" : "aspect-video xl:aspect-[8/5]"}`}>
             {hasFrame ? (
               <>
                 <img
@@ -1130,7 +1226,7 @@ export function ComparePreviewPlayer({
                   alt="source frame"
                   draggable={false}
                   className="absolute inset-0 h-full w-full object-contain"
-                  onError={previewSession.retryCurrentFrame}
+                  onError={previewSession.recoverImageLoadFailure}
                 />
                 <img
                   src={previewSession.previewImageSrc ?? ""}
@@ -1138,7 +1234,7 @@ export function ComparePreviewPlayer({
                   draggable={false}
                   className="absolute inset-0 h-full w-full object-contain"
                   style={{ clipPath }}
-                  onError={previewSession.retryCurrentFrame}
+                  onError={previewSession.recoverImageLoadFailure}
                 />
               </>
             ) : (
@@ -1157,17 +1253,34 @@ export function ComparePreviewPlayer({
 
         {hasFrame ? (
           <div
+            role="separator"
+            tabIndex={0}
+            aria-label="调整原始图像与输出预览的分割位置"
+            aria-orientation={splitMode === "vertical" ? "vertical" : "horizontal"}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(splitterPosition * 100)}
             className={`absolute ${
               splitMode === "vertical"
                 ? "inset-y-0 w-1 -translate-x-1/2 cursor-col-resize"
                 : "inset-x-0 h-1 -translate-y-1/2 cursor-row-resize"
-            } bg-primary shadow-[0_0_0_1px_rgba(255,255,255,0.4)]`}
+            } bg-primary shadow-[0_0_0_1px_rgba(255,255,255,0.4)] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-white/70`}
             style={
               splitMode === "vertical"
                 ? { left: `${splitterPosition * 100}%` }
                 : { top: `${splitterPosition * 100}%` }
             }
             onPointerDown={splitterDrag.beginSplitterDrag}
+            onKeyDown={(event) => {
+              const decrease = event.key === "ArrowLeft" || event.key === "ArrowUp";
+              const increase = event.key === "ArrowRight" || event.key === "ArrowDown";
+              if (!decrease && !increase) {
+                return;
+              }
+              event.preventDefault();
+              // 键盘每次移动 2%，兼顾精确控制和可达性。
+              onSplitterPositionChange(Math.min(0.98, Math.max(0.02, splitterPosition + (increase ? 0.02 : -0.02))));
+            }}
           />
         ) : null}
 
@@ -1187,19 +1300,15 @@ export function ComparePreviewPlayer({
         ) : null}
 
         <div
-          className={`absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-3 bg-gradient-to-b from-black/70 to-transparent px-4 py-4 transition ${
+          className={`absolute right-3 top-3 z-20 transition ${
             !isOverlayVisible && previewFullscreenActive ? "pointer-events-none opacity-0" : "opacity-100"
           }`}
         >
-          <div className="text-sm text-white/90">
-            <div className="font-medium">{t("preview.player.title")}</div>
-            <div className="text-xs text-white/70">
-              {previewSession.previewState} · {previewModeLabel}
-            </div>
-          </div>
           <Button
             size="sm"
             variant="secondary"
+            aria-label={fullscreenButtonIcon === "close" ? "关闭独立预览" : previewFullscreenActive ? "退出全屏预览" : "进入全屏预览"}
+            title={fullscreenButtonIcon === "close" ? "关闭独立预览" : previewFullscreenActive ? "退出全屏预览" : "进入全屏预览"}
             onClick={(event) => {
               event.stopPropagation();
               handleFullscreenButtonClick();
@@ -1216,14 +1325,14 @@ export function ComparePreviewPlayer({
         </div>
 
         <div
-          className={`absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/80 via-black/60 to-transparent px-4 pb-4 pt-16 transition ${
+          className={`absolute inset-x-0 bottom-0 z-10 border-t border-white/10 bg-black/75 px-3 py-2.5 transition ${
             !isOverlayVisible && previewFullscreenActive ? "pointer-events-none opacity-0" : "opacity-100"
           }`}
         >
           <div className="grid gap-3 md:grid-cols-[1fr_auto_auto_auto_auto] md:items-center">
             <Slider
               min={0}
-              max={durationSec || 0}
+              max={previewTimelineMaxSec}
               step={0.01}
               value={[timeline.currentTimeSec]}
               onPointerDown={timeline.beginTimelineScrub}
@@ -1238,6 +1347,7 @@ export function ComparePreviewPlayer({
               onKeyUp={() => timeline.commitDraftTime()}
               onValueChange={timeline.updateDraftTime}
               onValueCommit={timeline.commitDraftTime}
+              aria-label="选择预览帧时间点"
             />
             <div className="text-xs text-white/75">
               {timeline.currentTimeSec.toFixed(2)} / {durationSec.toFixed(2)}s
@@ -1245,6 +1355,7 @@ export function ComparePreviewPlayer({
             <Button
               size="sm"
               variant={splitMode === "vertical" ? "default" : "secondary"}
+              aria-pressed={splitMode === "vertical"}
               onClick={() => onSplitModeChange("vertical")}
             >
               {t("preview.splitVertical")}
@@ -1252,6 +1363,7 @@ export function ComparePreviewPlayer({
             <Button
               size="sm"
               variant={splitMode === "horizontal" ? "default" : "secondary"}
+              aria-pressed={splitMode === "horizontal"}
               onClick={() => onSplitModeChange("horizontal")}
             >
               {t("preview.splitHorizontal")}
@@ -1269,13 +1381,10 @@ export function ComparePreviewPlayer({
               />
             </label>
           </div>
-          <div className="mt-3 flex flex-wrap gap-3 text-xs text-white/75">
-            <span>预览速度：{previewSession.previewSpeed ? `${previewSession.previewSpeed.toFixed(2)}x` : "-"}</span>
-            <span>
-              预计转码速度：{previewSession.estimatedTranscodeSpeed ? `${previewSession.estimatedTranscodeSpeed.toFixed(2)}x` : "-"}
-            </span>
+          <div className="mt-2 flex flex-wrap gap-3 text-xs text-white/75">
+            {previewSession.previewSpeed ? <span>当前预览帧生成速度：{previewSession.previewSpeed.toFixed(2)}x</span> : null}
             {timeline.isScrubbingTimeline ? <span>{t("preview.scrubbing")}</span> : null}
-            {previewSession.previewError ? <span className="text-red-200">错误：{previewSession.previewError}</span> : null}
+            {previewSession.previewError ? <span className="text-red-200">预览失败，可在画面区域重试并查看技术详情。</span> : null}
           </div>
         </div>
       </div>

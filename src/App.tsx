@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -7,23 +7,20 @@ import { WorkbenchLayout } from "./components/workbench/WorkbenchLayout";
 import { TaskDraftProvider, useTaskDraft } from "./context/TaskDraftContext";
 import { JobsPage } from "./pages/JobsPage";
 import { DetachedPreviewPage } from "./pages/DetachedPreviewPage";
-import { PreviewPage } from "./pages/PreviewPage";
+import { ProfessionalWorkbenchPage } from "./pages/ProfessionalWorkbenchPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { SourceSelectPage } from "./pages/SourceSelectPage";
-import { TaskConfigPage } from "./pages/TaskConfigPage";
 import { TemplatesPage } from "./pages/TemplatesPage";
 import { useI18n } from "./i18n/I18nProvider";
 import { isTauriRuntime } from "./lib/tauriRuntime";
+import { buildWorkbenchValidationIssues } from "./lib/workbenchPolicy";
 import type {
   AppSettings,
-  CreateTaskResponse,
   EncoderCapabilityResult,
   EnqueueTranscodeJobResponse,
   FfmpegProbeResult,
   JobHistory,
   JobMetricsEvent,
   SaveTemplateResponse,
-  TaskConfig,
   TaskDraftSnapshot,
   Template,
 } from "./types/workbench";
@@ -42,11 +39,12 @@ function buildSeedPayload(suffix: string): TaskDraftSnapshot {
       bitrateMode: "CRF",
       crf: 23,
       preset: "medium",
-      pixelFormat: "yuv420p",
+      pixelFormat: "yuv420p10le",
       enableTwoPass: false,
     },
     audio: { mode: "copy" },
     container: { format: "mp4", faststart: true },
+    advancedArgs: "-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc",
     output: {
       dir: "",
       fileNamePattern: "{inputName}_{taskName}",
@@ -81,6 +79,8 @@ function buildBrowserPreviewState(): {
         inputFile: "/Users/encode-lab/Interview.mov",
         outputFile: "/Users/encode-lab/Encode Lab/Outputs/Interview_final.mp4",
         status: "completed",
+        inputSizeBytes: 12_884_901_888,
+        outputSizeBytes: 1_675_037_245,
         sizeChangePercent: -87,
         createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
         endedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
@@ -92,6 +92,8 @@ function buildBrowserPreviewState(): {
         inputFile: "/Users/encode-lab/Broll.mov",
         outputFile: "/Users/encode-lab/Encode Lab/Outputs/Broll_sequence.mp4",
         status: "completed",
+        inputSizeBytes: 9_663_676_416,
+        outputSizeBytes: 1_739_461_755,
         sizeChangePercent: -82,
         createdAt: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(),
         endedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
@@ -165,41 +167,30 @@ function buildBrowserPreviewState(): {
 
 function AppRoutes({
   settings,
-  tasks,
   jobs,
   jobMetrics,
   templates,
   ffmpegProbe,
   encoderCapabilities,
   loading,
-  seeding,
   error,
-  seedMessage,
   onRefresh,
-  onSeed,
   onJobsChanged,
 }: {
   settings: AppSettings | null;
-  tasks: TaskConfig[];
   jobs: JobHistory[];
   jobMetrics: Record<string, JobMetricsEvent>;
   templates: Template[];
   ffmpegProbe: FfmpegProbeResult | null;
   encoderCapabilities: EncoderCapabilityResult | null;
   loading: boolean;
-  seeding: boolean;
   error: string | null;
-  seedMessage: string | null;
   onRefresh: () => void;
-  onSeed: () => void;
   onJobsChanged: () => void;
 }) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
-  const [splitMode, setSplitMode] = useState<"vertical" | "horizontal">("vertical");
-  const [splitterPosition, setSplitterPosition] = useState(0.5);
-  const [compareOrder, setCompareOrder] = useState<"source-first" | "preview-first">("source-first");
   const {
     formCodec,
     formEncoder,
@@ -211,13 +202,15 @@ function AppRoutes({
     formTwoPass,
     setFormTwoPass,
     sourceFilePath,
+    videoMetadata,
     taskDraftSnapshot,
     applyTemplateSnapshot,
+    setActiveTemplateName,
   } = useTaskDraft();
 
   const navItems = useMemo(
     () => [
-      { label: t("nav.workbench"), to: "/source" },
+      { label: t("nav.workbench"), to: "/workbench" },
       { label: t("nav.presets"), to: "/templates" },
       { label: t("nav.jobs"), to: "/jobs" },
       { label: t("nav.settings"), to: "/settings" },
@@ -227,17 +220,7 @@ function AppRoutes({
 
   const pageMeta = useMemo(() => {
     switch (location.pathname) {
-      case "/source":
-        return {
-          title: t("app.workbench.title"),
-          description: t("app.workbench.sourceDescription"),
-        };
-      case "/task-config":
-        return {
-          title: t("app.workbench.title"),
-          description: t("app.workbench.configDescription"),
-        };
-      case "/preview":
+      case "/workbench":
         return {
           title: t("app.workbench.title"),
           description: t("app.workbench.previewDescription"),
@@ -265,8 +248,6 @@ function AppRoutes({
     }
   }, [location.pathname, t]);
 
-  const hasSourceFile = sourceFilePath.trim().length > 0;
-
   const filteredEncoders = useMemo(
     () => (encoderCapabilities?.items ?? []).filter((item) => item.codecFormat === formCodec),
     [encoderCapabilities, formCodec],
@@ -288,18 +269,24 @@ function AppRoutes({
       return;
     }
 
+    let disposed = false;
     let disposeNavigate: (() => void) | undefined;
     void listen<string>("app:navigate", (event) => {
       // 后端只下发内部路由目标，具体跳转保持在 React Router 边界内完成。
-      navigate(event.payload);
+      const target = ["/source", "/task-config", "/preview"].includes(event.payload)
+        ? "/workbench"
+        : event.payload;
+      navigate(target);
     }).then((unlisten) => {
-      disposeNavigate = unlisten;
+      if (disposed) unlisten();
+      else disposeNavigate = unlisten;
+    }).catch(() => {
+      // 托盘导航监听失败不阻断页面内导航；刷新应用后会重新注册。
     });
 
     return () => {
-      if (disposeNavigate) {
-        disposeNavigate();
-      }
+      disposed = true;
+      disposeNavigate?.();
     };
   }, [navigate]);
 
@@ -352,6 +339,18 @@ function AppRoutes({
       throw new Error("浏览器预览模式不会发送真实转码任务，请在桌面应用中执行。");
     }
 
+    const blockingIssue = buildWorkbenchValidationIssues({
+      sourceFilePath,
+      metadata: videoMetadata,
+      snapshot: taskDraftSnapshot,
+      selectedEncoderCapability,
+      ffmpegProbe,
+    }).find((issue) => issue.tone === "error");
+    if (blockingIssue) {
+      // CTA 的 disabled 只是交互提示；处理器必须独立复核，避免键盘或未来调用方绕过。
+      throw new Error(`入队被阻止：${blockingIssue.message}`);
+    }
+
     await invoke<EnqueueTranscodeJobResponse>("enqueue_transcode_job", {
       request: {
         payload: taskDraftSnapshot,
@@ -360,7 +359,38 @@ function AppRoutes({
     });
     onJobsChanged();
     navigate("/jobs");
-  }, [navigate, onJobsChanged, sourceFilePath, taskDraftSnapshot]);
+  }, [ffmpegProbe, navigate, onJobsChanged, selectedEncoderCapability, sourceFilePath, taskDraftSnapshot, videoMetadata]);
+
+  /**
+   * 把当前编码参数保存为可复用方案，同时剥离素材相关的任务级字段。
+   * @param input 方案名称与标签
+   */
+  const saveCurrentTemplate = useCallback(async ({ name, tags }: { name: string; tags: string[] }) => {
+    if (!isTauriRuntime()) {
+      throw new Error("浏览器预览模式不会写入本机方案库，请在桌面应用中保存。");
+    }
+
+    const templateSnapshot: TaskDraftSnapshot = {
+      ...taskDraftSnapshot,
+      name,
+      clipRange: undefined,
+      output: {
+        ...taskDraftSnapshot.output,
+        // 输出目录属于当前任务，不进入跨素材复用的方案资产。
+        dir: "",
+        location: null,
+      },
+    };
+    await invoke<SaveTemplateResponse>("save_template", {
+      payload: {
+        name,
+        tags,
+        taskConfigSnapshot: templateSnapshot,
+      },
+    });
+    setActiveTemplateName(name);
+    onRefresh();
+  }, [onRefresh, setActiveTemplateName, taskDraftSnapshot]);
 
   return (
     <WorkbenchLayout
@@ -370,10 +400,8 @@ function AppRoutes({
       ffmpegProbe={ffmpegProbe}
       concurrencyN={settings?.concurrencyN ?? "-"}
       onRefresh={onRefresh}
-      onSeed={onSeed}
       loading={loading}
-      seeding={seeding}
-      compactHeader={location.pathname === "/source" || location.pathname === "/task-config" || location.pathname === "/preview"}
+      compactHeader={location.pathname === "/workbench"}
     >
       <div className="space-y-4">
         {error ? (
@@ -383,54 +411,24 @@ function AppRoutes({
           </Alert>
         ) : null}
 
-        {seedMessage ? (
-          <Alert className="border-primary/30 bg-primary/5">
-            <AlertTitle>{t("app.seed.title")}</AlertTitle>
-            <AlertDescription>{seedMessage}</AlertDescription>
-          </Alert>
-        ) : null}
-
         <Routes>
           <Route
-            path="/source"
-            element={<SourceSelectPage onContinue={() => navigate("/task-config")} />}
-          />
-          <Route
-            path="/task-config"
-            element={hasSourceFile ? (
-              <TaskConfigPage
+            path="/workbench"
+            element={
+              <ProfessionalWorkbenchPage
                 filteredEncoders={filteredEncoders}
                 selectedEncoderCapability={selectedEncoderCapability}
                 ffmpegProbe={ffmpegProbe}
-                onBackSource={() => navigate("/source")}
-                onGoPreview={() => navigate("/preview")}
-                onTemplatesChanged={onRefresh}
-              />
-            ) : (
-              <Navigate to="/source" replace />
-            )}
-          />
-          <Route
-            path="/preview"
-            element={hasSourceFile ? (
-              <PreviewPage
-                jobs={jobs}
-                splitMode={splitMode}
-                setSplitMode={setSplitMode}
-                splitterPosition={splitterPosition}
-                setSplitterPosition={setSplitterPosition}
-                compareOrder={compareOrder}
-                setCompareOrder={setCompareOrder}
-                onBackConfig={() => navigate("/task-config")}
-                onBackSource={() => navigate("/source")}
                 onOpenTemplates={() => navigate("/templates")}
                 onOpenJobs={() => navigate("/jobs")}
                 onEnqueue={enqueueCurrentDraft}
+                onSaveTemplate={saveCurrentTemplate}
               />
-            ) : (
-              <Navigate to="/source" replace />
-            )}
+            }
           />
+          <Route path="/source" element={<Navigate to="/workbench" replace />} />
+          <Route path="/task-config" element={<Navigate to="/workbench" replace />} />
+          <Route path="/preview" element={<Navigate to="/workbench" replace />} />
           <Route
             path="/jobs"
             element={<JobsPage jobs={jobs} jobMetrics={jobMetrics} onJobsChanged={onJobsChanged} />}
@@ -439,19 +437,17 @@ function AppRoutes({
             path="/templates"
             element={
               <TemplatesPage
-                templateCount={templates.length}
-                taskCount={tasks.length}
                 templates={templates}
                 onTemplatesChanged={onRefresh}
                 onApplyTemplate={(template) => {
-                  applyTemplateSnapshot(template.taskConfigSnapshot);
-                  navigate(hasSourceFile ? "/task-config" : "/source");
+                  applyTemplateSnapshot(template.taskConfigSnapshot, template.name);
+                  navigate("/workbench");
                 }}
               />
             }
           />
           <Route path="/settings" element={<SettingsPage settings={settings} ffmpegProbe={ffmpegProbe} />} />
-          <Route path="*" element={<Navigate to="/source" replace />} />
+          <Route path="*" element={<Navigate to="/workbench" replace />} />
         </Routes>
       </div>
     </WorkbenchLayout>
@@ -459,27 +455,25 @@ function AppRoutes({
 }
 
 function WorkbenchApp() {
-  const { t } = useI18n();
   const [loading, setLoading] = useState(true);
-  const [seeding, setSeeding] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [seedMessage, setSeedMessage] = useState<string | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [tasks, setTasks] = useState<TaskConfig[]>([]);
   const [jobs, setJobs] = useState<JobHistory[]>([]);
   const [jobMetrics, setJobMetrics] = useState<Record<string, JobMetricsEvent>>({});
   const [templates, setTemplates] = useState<Template[]>([]);
   const [ffmpegProbe, setFfmpegProbe] = useState<FfmpegProbeResult | null>(null);
   const [encoderCapabilities, setEncoderCapabilities] = useState<EncoderCapabilityResult | null>(null);
+  const fetchRequestRef = useRef(0);
 
   const fetchAll = useCallback(async () => {
+    const requestId = ++fetchRequestRef.current;
     setLoading(true);
     setError(null);
     try {
       if (!isTauriRuntime()) {
         const browserPreviewState = buildBrowserPreviewState();
+        if (requestId !== fetchRequestRef.current) return;
         setSettings(browserPreviewState.settings);
-        setTasks([]);
         setJobs(browserPreviewState.jobs);
         setTemplates(browserPreviewState.templates);
         setFfmpegProbe(browserPreviewState.ffmpegProbe);
@@ -487,57 +481,32 @@ function WorkbenchApp() {
         return;
       }
 
-      const [settingsResult, tasksResult, jobsResult, templatesResult, ffmpegProbeResult, encoderCapabilitiesResult] =
+      const [settingsResult, jobsResult, templatesResult, ffmpegProbeResult, encoderCapabilitiesResult] =
         await Promise.all([
           invoke<AppSettings>("get_settings"),
-          invoke<TaskConfig[]>("list_tasks"),
           invoke<JobHistory[]>("list_jobs"),
           invoke<Template[]>("list_templates"),
           invoke<FfmpegProbeResult>("detect_ffmpeg"),
           invoke<EncoderCapabilityResult>("list_encoder_capabilities"),
         ]);
 
+      // 只允许最后一次全量读取落地，连续刷新时旧响应不能覆盖较新的队列状态。
+      if (requestId !== fetchRequestRef.current) return;
       setSettings(settingsResult);
-      setTasks(tasksResult);
       setJobs(jobsResult);
       setTemplates(templatesResult);
       setFfmpegProbe(ffmpegProbeResult);
       setEncoderCapabilities(encoderCapabilitiesResult);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (requestId === fetchRequestRef.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === fetchRequestRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
-
-  const seedDemoData = useCallback(async () => {
-    setSeeding(true);
-    setError(null);
-    setSeedMessage(null);
-    try {
-      if (!isTauriRuntime()) {
-        setSeedMessage("浏览器预览模式使用内置样例数据，不会写入桌面任务或方案。");
-        return;
-      }
-
-      const suffix = Date.now().toString();
-      const payload = buildSeedPayload(suffix);
-      const createResult = await invoke<CreateTaskResponse>("create_task", { payload });
-      const templateResult = await invoke<SaveTemplateResponse>("save_template", {
-        payload: {
-          name: `demo-template-${suffix}`,
-          tags: ["demo", "seed"],
-          taskConfigSnapshot: payload,
-        },
-      });
-      await fetchAll();
-      setSeedMessage(t("app.seed.message", { taskId: createResult.taskId, templateId: templateResult.templateId }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSeeding(false);
-    }
-  }, [fetchAll, t]);
 
   useEffect(() => {
     void fetchAll();
@@ -548,12 +517,23 @@ function WorkbenchApp() {
       return;
     }
 
+    let disposed = false;
     let disposeUpdated: (() => void) | undefined;
     let disposeMetrics: (() => void) | undefined;
-    void listen<JobHistory>("job:updated", () => {
-      void fetchAll();
+    void listen<JobHistory>("job:updated", (event) => {
+      // 事件已经携带最新事实，直接 upsert，避免每秒状态变化触发六路全量读取。
+      setJobs((current) => {
+        const index = current.findIndex((job) => job.id === event.payload.id);
+        if (index < 0) return [event.payload, ...current];
+        const next = [...current];
+        next[index] = event.payload;
+        return next;
+      });
     }).then((unlisten) => {
-      disposeUpdated = unlisten;
+      if (disposed) unlisten();
+      else disposeUpdated = unlisten;
+    }).catch((listenError) => {
+      if (!disposed) setError(`任务状态监听失败：${listenError instanceof Error ? listenError.message : String(listenError)}`);
     });
 
     void listen<JobMetricsEvent>("job:metrics", (event) => {
@@ -562,35 +542,31 @@ function WorkbenchApp() {
         [event.payload.jobId]: event.payload,
       }));
     }).then((unlisten) => {
-      disposeMetrics = unlisten;
+      if (disposed) unlisten();
+      else disposeMetrics = unlisten;
+    }).catch((listenError) => {
+      if (!disposed) setError(`任务指标监听失败：${listenError instanceof Error ? listenError.message : String(listenError)}`);
     });
 
     return () => {
-      if (disposeUpdated) {
-        disposeUpdated();
-      }
-      if (disposeMetrics) {
-        disposeMetrics();
-      }
+      disposed = true;
+      disposeUpdated?.();
+      disposeMetrics?.();
     };
-  }, [fetchAll]);
+  }, []);
 
   return (
-    <TaskDraftProvider>
+    <TaskDraftProvider defaultOutputDir={settings?.defaultOutputDir}>
       <AppRoutes
         settings={settings}
-        tasks={tasks}
         jobs={jobs}
         jobMetrics={jobMetrics}
         templates={templates}
         ffmpegProbe={ffmpegProbe}
         encoderCapabilities={encoderCapabilities}
         loading={loading}
-        seeding={seeding}
         error={error}
-        seedMessage={seedMessage}
         onRefresh={() => void fetchAll()}
-        onSeed={() => void seedDemoData()}
         onJobsChanged={() => void fetchAll()}
       />
     </TaskDraftProvider>

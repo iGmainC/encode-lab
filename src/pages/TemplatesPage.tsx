@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Archive, BadgeCheck, Copy, Search, Send, Trash2 } from "lucide-react";
+import { AlertCircle, Copy, Search, Send, Trash2, X } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
@@ -13,38 +14,37 @@ import type {
   TemplateMutationResponse,
 } from "../types/workbench";
 
+/** 方案库页面保持的外部数据和工作台衔接契约。 */
 type Props = {
-  templateCount: number;
-  taskCount: number;
+  /** 可检索和检查的参数方案。 */
   templates: Template[];
+  /** 写操作完成后刷新上层方案状态。 */
   onTemplatesChanged: () => void;
+  /** 将方案快照应用到工作台。 */
   onApplyTemplate: (template: Template) => void;
 };
 
-export function TemplatesPage({
-  templateCount,
-  taskCount,
-  templates,
-  onTemplatesChanged,
-  onApplyTemplate,
-}: Props) {
+/** 当前正在执行的方案写操作。 */
+type PendingAction = "apply" | "duplicate" | "delete" | null;
+
+/**
+ * 提供面向专业用户的参数方案列表和只读检查器。
+ * @param props 页面数据、刷新回调和工作台应用回调
+ */
+export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }: Props) {
   const { t } = useI18n();
+  const desktopRuntime = isTauriRuntime();
   const [keyword, setKeyword] = useState("");
-  const [selectedOutcome, setSelectedOutcome] = useState("all");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(templates[0]?.id ?? null);
-  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const filteredTemplates = useMemo(
-    () =>
-      sortTemplates(templates).filter((item) => {
-        const matchesKeyword = item.name.toLowerCase().includes(keyword.toLowerCase());
-        const matchesOutcome = selectedOutcome === "all" || inferTemplateOutcome(item) === selectedOutcome;
-        return matchesKeyword && matchesOutcome;
-      }),
-    [keyword, selectedOutcome, templates],
+    () => sortTemplates(templates).filter((template) => matchesTemplateKeyword(template, keyword)),
+    [keyword, templates],
   );
 
-  const selectedTemplate = filteredTemplates.find((item) => item.id === selectedTemplateId) ?? null;
+  const selectedTemplate = filteredTemplates.find((template) => template.id === selectedTemplateId) ?? null;
 
   useEffect(() => {
     if (!selectedTemplateId && filteredTemplates[0]) {
@@ -52,7 +52,8 @@ export function TemplatesPage({
       return;
     }
 
-    if (selectedTemplateId && !filteredTemplates.some((item) => item.id === selectedTemplateId)) {
+    // 搜索结果变化后保持一个有效选择，避免检查器展示已被筛除的方案。
+    if (selectedTemplateId && !filteredTemplates.some((template) => template.id === selectedTemplateId)) {
       setSelectedTemplateId(filteredTemplates[0]?.id ?? null);
     }
   }, [filteredTemplates, selectedTemplateId]);
@@ -62,19 +63,23 @@ export function TemplatesPage({
    * @param templateId 参数方案 id
    */
   async function applyTemplate(templateId: string) {
+    setActionError(null);
     setPendingAction("apply");
     try {
-      if (!isTauriRuntime()) {
+      if (!desktopRuntime) {
         const template = templates.find((item) => item.id === templateId);
-        if (template) {
-          onApplyTemplate(template);
+        if (!template) {
+          throw new Error("当前方案已不在列表中，请刷新后重试。");
         }
+        onApplyTemplate(template);
         return;
       }
 
       const result = await invoke<ApplyTemplateResponse>("apply_template", { templateId });
       onTemplatesChanged();
       onApplyTemplate(result.template);
+    } catch (error) {
+      setActionError(`应用方案失败：${formatActionError(error)}`);
     } finally {
       setPendingAction(null);
     }
@@ -85,15 +90,19 @@ export function TemplatesPage({
    * @param templateId 参数方案 id
    */
   async function duplicateTemplate(templateId: string) {
+    setActionError(null);
     setPendingAction("duplicate");
     try {
-      if (!isTauriRuntime()) {
+      // 浏览器预览不模拟持久化写入，避免把演示态误认为真实方案数据。
+      if (!desktopRuntime) {
+        setActionError("浏览器预览模式不会写入方案库，请在桌面应用中复制方案。");
         return;
       }
 
-      const result = await invoke<DuplicateTemplateResponse>("duplicate_template", { templateId });
-      setSelectedTemplateId(result.templateId);
+      await invoke<DuplicateTemplateResponse>("duplicate_template", { templateId });
       onTemplatesChanged();
+    } catch (error) {
+      setActionError(`复制方案失败：${formatActionError(error)}`);
     } finally {
       setPendingAction(null);
     }
@@ -108,263 +117,414 @@ export function TemplatesPage({
       return;
     }
 
+    setActionError(null);
     setPendingAction("delete");
     try {
-      if (!isTauriRuntime()) {
-        setSelectedTemplateId((current) => (current === templateId ? null : current));
+      // 浏览器预览不改写上层样例数据，删除必须由桌面端存储命令完成。
+      if (!desktopRuntime) {
+        setActionError("浏览器预览模式不会写入方案库，请在桌面应用中删除方案。");
         return;
       }
 
       await invoke<TemplateMutationResponse>("delete_template", { templateId });
       setSelectedTemplateId((current) => (current === templateId ? null : current));
       onTemplatesChanged();
+    } catch (error) {
+      setActionError(`删除方案失败：${formatActionError(error)}`);
     } finally {
       setPendingAction(null);
     }
   }
 
   return (
-    <div className="space-y-5">
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-        <Card className="shadow-sm">
-          <CardContent className="grid gap-4 p-5 md:grid-cols-[1fr_auto] md:items-center">
-            <div>
-              <div className="flex items-center gap-2 text-sm font-medium text-primary">
-                <Archive className="size-4" aria-hidden="true" />
-                方案资产库
+    <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_410px]">
+      <Card className="min-w-0 overflow-hidden shadow-sm">
+        <CardHeader className="border-b p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <CardTitle className="text-base">参数方案</CardTitle>
+                <Badge variant="secondary" className="font-mono font-medium">
+                  {filteredTemplates.length}/{templates.length}
+                </Badge>
               </div>
-              <h2 className="mt-2 text-2xl font-semibold tracking-tight">先选用途，再回到工作台验证</h2>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                方案库不只是模板列表，它负责沉淀可复用的编码决策：用途、取舍、兼容边界和最近使用情况。
-              </p>
+              <CardDescription className="mt-1">按最近使用排序；选择一行检查完整参数快照。</CardDescription>
             </div>
-            <div className="grid grid-cols-2 gap-3 md:w-[260px]">
-              <Metric label={t("presets.total")} value={String(templateCount)} />
-              <Metric label={t("presets.drafts")} value={String(taskCount)} />
-            </div>
-          </CardContent>
-        </Card>
 
-        <Card className="shadow-sm">
-          <CardHeader className="p-5">
-            <CardTitle className="text-base">当前闭环</CardTitle>
-            <CardDescription>方案必须回到工作台预览后再进入队列。</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 p-5 pt-0 text-sm">
-            <ChecklistRow done label="只保存参数，不绑定源文件" />
-            <ChecklistRow done label="应用后更新最近使用时间" />
-            <ChecklistRow done={Boolean(selectedTemplate)} label="已选中一个可验证方案" />
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <Card className="shadow-sm">
-          <CardHeader className="border-b p-5">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <CardTitle>{t("presets.title")}</CardTitle>
-                <CardDescription>{t("presets.description")}</CardDescription>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {[
-                  ["all", "全部"],
-                  ["web", "线上发布"],
-                  ["archive", "归档保留"],
-                  ["small", "小体积"],
-                ].map(([value, label]) => (
-                  <Button
-                    key={value}
-                    size="sm"
-                    variant={selectedOutcome === value ? "default" : "secondary"}
-                    onClick={() => setSelectedOutcome(value)}
-                  >
-                    {label}
-                  </Button>
-                ))}
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4 p-5">
-            <label className="relative block">
-              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <label className="relative block w-full lg:w-[320px]">
+              <span className="sr-only">搜索方案名称或标签</span>
+              <Search
+                className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                aria-hidden="true"
+              />
               <input
-                className="h-10 w-full rounded-lg border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                className="h-9 w-full rounded-lg border bg-background pl-9 pr-9 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
-                placeholder={t("presets.search")}
+                placeholder="搜索名称或标签"
+                autoComplete="off"
               />
-            </label>
-
-            <div className="divide-y rounded-lg border">
-              {filteredTemplates.map((tpl) => (
+              {keyword ? (
                 <button
-                  key={tpl.id}
                   type="button"
-                  className={`grid w-full gap-3 p-4 text-left transition lg:grid-cols-[minmax(0,1.3fr)_120px_120px_120px] lg:items-center ${
-                    tpl.id === selectedTemplateId ? "bg-primary/5" : "hover:bg-muted/50"
-                  }`}
-                  onClick={() => setSelectedTemplateId(tpl.id)}
+                  className="absolute right-1.5 top-1/2 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => setKeyword("")}
+                  aria-label="清除搜索"
                 >
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{tpl.name}</span>
-                      <OutcomeBadge value={inferTemplateOutcome(tpl)} />
-                    </div>
-                    <div className="mt-1 text-sm text-muted-foreground">
-                      {formatPlanSentence(tpl)}
-                    </div>
-                  </div>
-                  <PlanTradeoff label="质量" value={formatQuality(tpl)} />
-                  <PlanTradeoff label="速度" value={formatSpeed(tpl)} />
-                  <PlanTradeoff label="最近使用" value={formatDate(tpl.lastUsedAt ?? tpl.updatedAt)} />
+                  <X className="size-3.5" aria-hidden="true" />
                 </button>
-              ))}
+              ) : null}
+            </label>
+          </div>
+        </CardHeader>
+
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <div className="hidden min-w-[850px] grid-cols-[minmax(210px,1.5fr)_130px_128px_108px_112px_78px_102px] gap-3 border-b bg-muted/30 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground lg:grid">
+              <div>方案 / Tags</div>
+              <div>Codec / Encoder</div>
+              <div>Rate Control</div>
+              <div>Preset</div>
+              <div>Resolution</div>
+              <div>Container</div>
+              <div>最近使用</div>
+            </div>
+
+            <div className="min-w-0 divide-y lg:min-w-[850px]">
+              {filteredTemplates.map((template) => {
+                const isSelected = template.id === selectedTemplateId;
+                return (
+                  <button
+                    key={template.id}
+                    type="button"
+                    className={`grid w-full gap-3 border-l-2 px-4 py-3 text-left transition-colors focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring lg:grid-cols-[minmax(210px,1.5fr)_130px_128px_108px_112px_78px_102px] lg:items-center ${
+                      isSelected
+                        ? "border-l-primary bg-primary/5"
+                        : "border-l-transparent hover:bg-muted/40"
+                    }`}
+                    onClick={() => {
+                      setSelectedTemplateId(template.id);
+                      setActionError(null);
+                    }}
+                    aria-pressed={isSelected}
+                  >
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate text-sm font-medium">{template.name}</span>
+                        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">v{template.version}</span>
+                      </div>
+                      <div className="mt-1.5 flex min-h-5 flex-wrap gap-1">
+                        {template.tags.length ? (
+                          template.tags.map((tag, index) => (
+                            <Badge key={`${tag}-${index}`} variant="outline" className="px-1.5 py-0 font-normal">
+                              {tag}
+                            </Badge>
+                          ))
+                        ) : (
+                          <span className="text-xs text-muted-foreground">无标签</span>
+                        )}
+                      </div>
+                    </div>
+                    <TemplateListCell
+                      label="Codec / Encoder"
+                      value={formatCodec(template)}
+                      secondary={template.taskConfigSnapshot.video.encoder}
+                      mono
+                    />
+                    <TemplateListCell
+                      label="Rate Control"
+                      value={formatRateControl(template)}
+                      secondary={template.taskConfigSnapshot.video.enableTwoPass ? "2-pass" : "1-pass"}
+                      mono
+                    />
+                    <TemplateListCell label="Preset" value={formatPreset(template)} mono />
+                    <TemplateListCell label="Resolution" value={formatResolution(template)} mono />
+                    <TemplateListCell label="Container" value={formatContainer(template)} mono />
+                    <TemplateListCell
+                      label="最近使用"
+                      value={template.lastUsedAt ? formatCompactTimestamp(template.lastUsedAt, "-") : "从未使用"}
+                    />
+                  </button>
+                );
+              })}
+
               {filteredTemplates.length === 0 ? (
-                <div className="p-6 text-sm text-muted-foreground">
-                  {t("presets.empty")}
+                <div className="flex min-h-52 flex-col items-center justify-center px-6 py-10 text-center">
+                  <Search className="size-5 text-muted-foreground" aria-hidden="true" />
+                  <div className="mt-3 text-sm font-medium">没有匹配的参数方案</div>
+                  <div className="mt-1 text-xs text-muted-foreground">搜索范围仅包含方案名称和真实标签。</div>
                 </div>
               ) : null}
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </CardContent>
+      </Card>
 
-        <Card className="shadow-sm">
-          <CardHeader className="border-b p-5">
-            <CardTitle>当前方案决策</CardTitle>
-            <CardDescription>确认用途和取舍后，回到工作台预览。</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4 p-5 text-sm">
-            {selectedTemplate ? (
-              <>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <BadgeCheck className="size-4 text-primary" aria-hidden="true" />
-                    <div className="font-medium">{selectedTemplate.name}</div>
+      <Card className="min-w-0 overflow-hidden shadow-sm xl:sticky xl:top-4 xl:flex xl:max-h-[calc(100vh-2rem)] xl:flex-col xl:self-start">
+        <CardHeader className="shrink-0 border-b p-4">
+          <CardTitle className="text-base">参数检查器</CardTitle>
+          <CardDescription>只读检查方案快照；应用后可在工作台继续调整。</CardDescription>
+        </CardHeader>
+
+        <CardContent className="min-h-0 space-y-4 overflow-y-auto p-4">
+          {actionError ? (
+            <Alert className="border-destructive/40 bg-destructive/5 text-destructive">
+              <AlertCircle className="size-4" aria-hidden="true" />
+              <AlertTitle>方案操作未完成</AlertTitle>
+              <AlertDescription className="text-destructive/90">{actionError}</AlertDescription>
+            </Alert>
+          ) : null}
+
+          {selectedTemplate ? (
+            <>
+              <div className="space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-lg font-semibold tracking-tight">{selectedTemplate.name}</h3>
+                    <div className="mt-1 break-all font-mono text-xs text-muted-foreground">
+                      ID {selectedTemplate.id} · v{selectedTemplate.version}
+                    </div>
                   </div>
-                  <p className="mt-2 leading-6 text-muted-foreground">{formatPlanSentence(selectedTemplate)}</p>
+                  <Badge variant="secondary" className="shrink-0">
+                    {selectedTemplate.lastUsedAt ? "已使用" : "未使用"}
+                  </Badge>
                 </div>
-                <div className="divide-y rounded-lg border">
-                  <TemplateField label="编码器" value={selectedTemplate.taskConfigSnapshot.video.encoder} />
-                  <TemplateField label={t("presetDetail.rateMode")} value={formatRateControl(selectedTemplate)} />
-                  <TemplateField label={t("presetDetail.container")} value={selectedTemplate.taskConfigSnapshot.container.format.toUpperCase()} />
-                  <TemplateField label={t("presetDetail.updatedAt")} value={formatDate(selectedTemplate.updatedAt)} />
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedTemplate.tags.length ? (
+                    selectedTemplate.tags.map((tag, index) => (
+                      <Badge key={`${tag}-${index}`} variant="outline" className="font-normal">
+                        {tag}
+                      </Badge>
+                    ))
+                  ) : (
+                    <span className="text-xs text-muted-foreground">无标签</span>
+                  )}
                 </div>
-                <div className="grid gap-2">
-                  <Button disabled={pendingAction === "apply"} onClick={() => void applyTemplate(selectedTemplate.id)}>
-                    <Send data-icon="inline-start" aria-hidden="true" />
-                    {pendingAction === "apply" ? t("presetDetail.applying") : "应用并回到工作台"}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <CoreParameter label="Codec" value={formatCodec(selectedTemplate)} />
+                <CoreParameter label="Encoder" value={selectedTemplate.taskConfigSnapshot.video.encoder} />
+                <CoreParameter label="Rate Control" value={formatRateControl(selectedTemplate)} />
+                <CoreParameter label="Preset" value={formatPreset(selectedTemplate)} />
+                <CoreParameter label="Resolution" value={formatResolution(selectedTemplate)} />
+                <CoreParameter label="Container" value={formatContainer(selectedTemplate)} />
+              </div>
+
+              <InspectorSection title="视频细节">
+                <InspectorField label="Frame Rate" value={formatFrameRate(selectedTemplate)} mono />
+                <InspectorField
+                  label="Pixel Format"
+                  value={selectedTemplate.taskConfigSnapshot.video.pixelFormat ?? "默认"}
+                  mono
+                />
+                <InspectorField
+                  label="2-pass"
+                  value={selectedTemplate.taskConfigSnapshot.video.enableTwoPass ? "开启" : "关闭"}
+                />
+                <InspectorField
+                  label="Dolby Vision"
+                  value={
+                    selectedTemplate.taskConfigSnapshot.video.preserveDolbyVisionMetadata
+                      ? "保留元数据"
+                      : "关闭"
+                  }
+                />
+              </InspectorSection>
+
+              <InspectorSection title="封装与输出">
+                <InspectorField label="Audio" value={formatAudio(selectedTemplate)} mono />
+                <InspectorField
+                  label="Fast Start"
+                  value={selectedTemplate.taskConfigSnapshot.container.faststart ? "开启" : "关闭"}
+                />
+                <InspectorField
+                  label="File Pattern"
+                  value={selectedTemplate.taskConfigSnapshot.output.fileNamePattern || "-"}
+                  mono
+                />
+                <InspectorField
+                  label="最近使用"
+                  value={formatTimestamp(selectedTemplate.lastUsedAt, "从未使用")}
+                />
+                <InspectorField label="更新于" value={formatTimestamp(selectedTemplate.updatedAt, "-")} />
+              </InspectorSection>
+
+              {selectedTemplate.taskConfigSnapshot.advancedArgs ? (
+                <InspectorSection title="FFmpeg 参数">
+                  <code className="block break-all rounded-md bg-muted/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground">
+                    {selectedTemplate.taskConfigSnapshot.advancedArgs}
+                  </code>
+                </InspectorSection>
+              ) : null}
+
+              <div className="sticky bottom-0 -mx-4 -mb-4 space-y-2 border-t bg-card/95 p-4 backdrop-blur-sm">
+                <Button
+                  className="w-full"
+                  disabled={Boolean(pendingAction)}
+                  onClick={() => void applyTemplate(selectedTemplate.id)}
+                >
+                  <Send data-icon="inline-start" aria-hidden="true" />
+                  {pendingAction === "apply" ? t("presetDetail.applying") : "应用到工作台"}
+                </Button>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    variant="secondary"
+                    disabled={Boolean(pendingAction)}
+                    onClick={() => void duplicateTemplate(selectedTemplate.id)}
+                  >
+                    <Copy data-icon="inline-start" aria-hidden="true" />
+                    {pendingAction === "duplicate" ? t("presetDetail.duplicating") : t("presetDetail.duplicate")}
                   </Button>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button
-                      variant="secondary"
-                      disabled={pendingAction === "duplicate"}
-                      onClick={() => void duplicateTemplate(selectedTemplate.id)}
-                    >
-                      <Copy data-icon="inline-start" aria-hidden="true" />
-                      {pendingAction === "duplicate" ? t("presetDetail.duplicating") : t("presetDetail.duplicate")}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      disabled={pendingAction === "delete"}
-                      onClick={() => void deleteTemplate(selectedTemplate.id)}
-                    >
-                      <Trash2 data-icon="inline-start" aria-hidden="true" />
-                      {pendingAction === "delete" ? t("presetDetail.deleting") : t("presetDetail.delete")}
-                    </Button>
-                  </div>
+                  <Button
+                    variant="destructive"
+                    disabled={Boolean(pendingAction)}
+                    onClick={() => void deleteTemplate(selectedTemplate.id)}
+                  >
+                    <Trash2 data-icon="inline-start" aria-hidden="true" />
+                    {pendingAction === "delete" ? t("presetDetail.deleting") : t("presetDetail.delete")}
+                  </Button>
                 </div>
-              </>
-            ) : (
-              <div className="rounded-lg border border-dashed p-6 text-muted-foreground">{t("presetDetail.empty")}</div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+                {!desktopRuntime ? (
+                  <p className="text-center text-[11px] leading-4 text-muted-foreground">
+                    浏览器预览仅支持应用方案；复制和删除需要桌面应用。
+                  </p>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="flex min-h-52 flex-col items-center justify-center rounded-lg border border-dashed p-6 text-center">
+              <div className="text-sm font-medium">未选择参数方案</div>
+              <div className="mt-1 text-xs text-muted-foreground">从左侧列表选择一行查看完整快照。</div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
 
 /**
- * 参数方案列表排序：最近使用优先，其次按更新时间倒序。
+ * 参数方案列表排序：有使用记录的方案优先，再分别按最近使用或更新时间倒序。
  * @param templates 后端参数方案列表
+ * @returns 不修改原数组的排序结果
  */
 function sortTemplates(templates: Template[]) {
   return [...templates].sort((a, b) => {
+    if (Boolean(a.lastUsedAt) !== Boolean(b.lastUsedAt)) {
+      return a.lastUsedAt ? -1 : 1;
+    }
+
     const aTime = Date.parse(a.lastUsedAt ?? a.updatedAt) || 0;
     const bTime = Date.parse(b.lastUsedAt ?? b.updatedAt) || 0;
     return bTime - aTime;
   });
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+/**
+ * 只使用真实名称和标签匹配搜索词，不从名称推断业务用途。
+ * @param template 待检查的参数方案
+ * @param keyword 用户输入的搜索词；空白分隔的词需要全部命中
+ * @returns 是否保留在当前结果中
+ */
+function matchesTemplateKeyword(template: Template, keyword: string) {
+  const terms = keyword.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) {
+    return true;
+  }
+
+  const searchableText = `${template.name} ${template.tags.join(" ")}`.toLocaleLowerCase();
+  return terms.every((term) => searchableText.includes(term));
+}
+
+/** 方案列表中的紧凑参数单元格。 */
+function TemplateListCell({
+  label,
+  value,
+  secondary,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  secondary?: string;
+  mono?: boolean;
+}) {
   return (
-    <div className="rounded-lg border bg-background/70 p-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 text-2xl font-semibold">{value}</div>
+    <div className="min-w-0">
+      <div className="text-[11px] text-muted-foreground lg:hidden">{label}</div>
+      <div className={`truncate text-xs font-medium ${mono ? "font-mono" : ""}`}>{value}</div>
+      {secondary ? (
+        <div className={`mt-0.5 truncate text-[11px] text-muted-foreground ${mono ? "font-mono" : ""}`}>
+          {secondary}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function ChecklistRow({ done, label }: { done: boolean; label: string }) {
+/** 检查器顶部需要快速扫读的核心参数。 */
+function CoreParameter({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
-      <span className="text-muted-foreground">{label}</span>
-      <Badge className={done ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" : ""}>
-        {done ? "就绪" : "待处理"}
-      </Badge>
+    <div className="min-w-0 rounded-lg border bg-muted/20 px-3 py-2.5">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-1 truncate font-mono text-sm font-medium" title={value}>
+        {value}
+      </div>
     </div>
   );
 }
 
-function OutcomeBadge({ value }: { value: string }) {
-  const labelMap: Record<string, string> = {
-    web: "线上发布",
-    archive: "归档",
-    small: "小体积",
-  };
-  return <Badge variant="secondary">{labelMap[value] ?? "通用"}</Badge>;
-}
-
-function PlanTradeoff({ label, value }: { label: string; value: string }) {
+/** 检查器中的参数分组。 */
+function InspectorSection({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 font-medium">{value}</div>
-    </div>
+    <section>
+      <h4 className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">{title}</h4>
+      <div className="divide-y rounded-lg border">{children}</div>
+    </section>
   );
 }
 
-function TemplateField({ label, value }: { label: string; value: string }) {
+/** 检查器中的单行键值参数。 */
+function InspectorField({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
   return (
-    <div className="grid grid-cols-[96px_1fr] gap-3 px-3 py-2">
+    <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-3 px-3 py-2.5 text-sm">
       <div className="text-muted-foreground">{label}</div>
-      <div className="min-w-0 break-words font-medium">{value}</div>
+      <div className={`min-w-0 break-words text-right font-medium ${mono ? "font-mono text-xs" : ""}`}>
+        {value}
+      </div>
     </div>
   );
 }
 
 /**
- * 按方案名称和参数特征推断用户用途。
+ * 将 codec 内部枚举格式化为专业用户常用写法。
  * @param template 参数方案
+ * @returns 可读 codec 名称
  */
-function inferTemplateOutcome(template: Template) {
-  const haystack = `${template.name} ${template.tags.join(" ")}`.toLowerCase();
-  if (haystack.includes("archive") || haystack.includes("归档")) {
-    return "archive";
-  }
-  if (haystack.includes("small") || haystack.includes("tiny") || haystack.includes("小")) {
-    return "small";
-  }
-  return "web";
+function formatCodec(template: Template) {
+  const codecLabels: Record<Template["taskConfigSnapshot"]["video"]["codecFormat"], string> = {
+    h264: "H.264",
+    h265: "H.265",
+    av1: "AV1",
+    vp9: "VP9",
+    copy: "Copy",
+  };
+  return codecLabels[template.taskConfigSnapshot.video.codecFormat];
 }
 
-function formatPlanSentence(template: Template) {
-  const video = template.taskConfigSnapshot.video;
-  const container = template.taskConfigSnapshot.container.format.toUpperCase();
-  return `${video.codecFormat.toUpperCase()} / ${video.encoder} · ${formatRateControl(template)} · ${container}，适合先预览再确认任务。`;
-}
-
+/**
+ * 格式化码率控制模式，并在 CRF 模式显示数值。
+ * @param template 参数方案
+ * @returns 码率控制摘要
+ */
 function formatRateControl(template: Template) {
   const video = template.taskConfigSnapshot.video;
   if (video.bitrateMode === "CRF") {
@@ -373,32 +533,127 @@ function formatRateControl(template: Template) {
   return video.bitrateMode;
 }
 
-function formatQuality(template: Template) {
-  const crf = template.taskConfigSnapshot.video.crf;
-  if (typeof crf !== "number") {
-    return "稳定";
-  }
-  return crf <= 20 ? "高" : crf <= 26 ? "均衡" : "体积优先";
+/**
+ * 格式化编码 preset。
+ * @param template 参数方案
+ * @returns preset 或默认语义
+ */
+function formatPreset(template: Template) {
+  return template.taskConfigSnapshot.video.preset || "默认";
 }
 
-function formatSpeed(template: Template) {
-  const preset = template.taskConfigSnapshot.video.preset;
-  if (!preset) {
-    return "默认";
+/**
+ * 格式化输出分辨率；缺少 scale 配置时沿用跟随源文件语义。
+ * @param template 参数方案
+ * @returns 分辨率摘要
+ */
+function formatResolution(template: Template) {
+  const video = template.taskConfigSnapshot.video;
+  if (video.keepOriginalResolution || !video.resolution) {
+    return "跟随源文件";
   }
-  if (preset.includes("fast")) {
-    return "较快";
-  }
-  if (preset.includes("slow")) {
-    return "较慢";
-  }
-  return "均衡";
+  return `${video.resolution.width} × ${video.resolution.height}`;
 }
 
-function formatDate(value: string) {
+/**
+ * 格式化输出帧率；缺少帧率配置时沿用跟随源文件语义。
+ * @param template 参数方案
+ * @returns 帧率摘要
+ */
+function formatFrameRate(template: Template) {
+  const video = template.taskConfigSnapshot.video;
+  if (video.keepOriginalFps || typeof video.fps !== "number") {
+    return "跟随源文件";
+  }
+  return `${video.fps} fps`;
+}
+
+/**
+ * 格式化容器名称。
+ * @param template 参数方案
+ * @returns 大写容器格式
+ */
+function formatContainer(template: Template) {
+  return template.taskConfigSnapshot.container.format.toUpperCase();
+}
+
+/**
+ * 格式化音频处理方式。
+ * @param template 参数方案
+ * @returns 音频流处理摘要
+ */
+function formatAudio(template: Template) {
+  return template.taskConfigSnapshot.audio.mode === "copy" ? "Stream copy" : "Custom";
+}
+
+/**
+ * 格式化时间戳，保留分钟便于比较最近使用记录。
+ * @param value ISO 时间戳
+ * @param fallback 缺失或无效时的显示文本
+ * @returns 本地化日期时间
+ */
+function formatTimestamp(value: string | null | undefined, fallback: string) {
+  if (!value) {
+    return fallback;
+  }
+
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
-    return "-";
+    return fallback;
   }
-  return date.toLocaleDateString();
+
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * 为列表窄列格式化紧凑时间戳。
+ * @param value ISO 时间戳
+ * @param fallback 缺失或无效时的显示文本
+ * @returns 不含年份的本地化日期时间
+ */
+function formatCompactTimestamp(value: string | null | undefined, fallback: string) {
+  if (!value) {
+    return fallback;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return fallback;
+  }
+
+  return date.toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * 将 Tauri invoke 或浏览器回调异常转换为可展示信息。
+ * @param error 未知异常载荷
+ * @returns 尽可能具体的错误描述
+ */
+function formatActionError(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
 }

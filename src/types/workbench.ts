@@ -330,8 +330,6 @@ export type JobMetricsEvent = {
   updatedAt: string;
 };
 
-export type TaskDraftStep = "source" | "config" | "preview" | "confirm";
-
 export type TaskDraftSnapshot = {
   name: string;
   /** 可选转码截取范围，单位毫秒；缺省表示完整源视频。 */
