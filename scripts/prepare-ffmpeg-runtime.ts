@@ -2,14 +2,17 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
-/** 默认 FFmpeg runtime 版本，对应 encode-lab-ffmpeg 仓库的 release tag。 */
-const DEFAULT_FFMPEG_VERSION = "8.1.1";
+/** 默认专用 runtime 版本，对应 encode-lab-ffmpeg 仓库的 release tag。 */
+const DEFAULT_RUNTIME_VERSION = "8.1.1-rpu.1";
 
 /** GitHub Release 下载根地址；测试或镜像环境可通过环境变量覆盖。 */
 const DEFAULT_RELEASE_BASE_URL = "https://github.com/iGmainC/encode-lab-ffmpeg/releases/download";
 
 /** runtime 文件落点；Tauri 会把这个目录作为 resources 一起打包。 */
 const RUNTIME_ROOT = join(import.meta.dir, "..", "src-tauri", "ffmpeg-runtime");
+
+/** Cargo 开发/发布构建复制 runtime 资源的常见缓存目录。 */
+const TAURI_TARGET_ROOT = join(import.meta.dir, "..", "src-tauri", "target");
 
 /**
  * 获取当前构建平台对应的 runtime target。
@@ -45,6 +48,8 @@ function runtimeExists(target: string): boolean {
   return (
     existsSync(join(binDir, `ffmpeg${executableSuffix}`)) &&
     existsSync(join(binDir, `ffprobe${executableSuffix}`)) &&
+    existsSync(join(binDir, `x265${executableSuffix}`)) &&
+    existsSync(join(binDir, `dovi_tool${executableSuffix}`)) &&
     existsSync(join(RUNTIME_ROOT, target, "manifest.json"))
   );
 }
@@ -87,6 +92,26 @@ async function run(command: string, args: string[]): Promise<void> {
 }
 
 /**
+ * 恢复 runtime 文件的 owner 写权限。
+ * Tauri 增量构建会覆盖 target 中的资源；上游只读二进制会导致后续构建无法替换旧副本。
+ * @param targetDir 当前平台 runtime 目录
+ */
+async function normalizeRuntimePermissions(targetDir: string): Promise<void> {
+  if (!existsSync(targetDir)) {
+    return;
+  }
+
+  await run("chmod", ["-R", "u+w", targetDir]);
+}
+
+/** 修复旧构建缓存中继承的只读权限，避免 Tauri 无法覆盖同名资源。 */
+async function normalizeCachedRuntimePermissions(): Promise<void> {
+  for (const profile of ["debug", "release"]) {
+    await normalizeRuntimePermissions(join(TAURI_TARGET_ROOT, profile, "ffmpeg-runtime"));
+  }
+}
+
+/**
  * 对 macOS runtime 做 ad-hoc 签名。
  * Homebrew 依赖库在重新打包后可能带失效签名，arm64 macOS 会直接 kill 子进程。
  * @param targetDir 已解压的 runtime 目录
@@ -100,7 +125,10 @@ async function signDarwinRuntime(targetDir: string): Promise<void> {
   if (existsSync(libDir)) {
     const libFiles = await readdir(libDir);
     for (const file of libFiles.filter((name) => name.endsWith(".dylib")).sort()) {
-      await run("codesign", ["--force", "--sign", "-", join(libDir, file)]);
+      const libraryPath = join(libDir, file);
+      // 上游 MoltenVK 可能以只读权限发布，重签名前先恢复 owner 写权限。
+      await run("chmod", ["u+w", libraryPath]);
+      await run("codesign", ["--force", "--sign", "-", libraryPath]);
     }
   }
 
@@ -121,8 +149,12 @@ async function main(): Promise<void> {
   }
 
   const target = resolveRuntimeTarget();
-  const version = process.env.ENCODE_LAB_FFMPEG_VERSION ?? DEFAULT_FFMPEG_VERSION;
+  const version = process.env.ENCODE_LAB_FFMPEG_VERSION ?? DEFAULT_RUNTIME_VERSION;
+  const targetDir = join(RUNTIME_ROOT, target);
   if (runtimeExists(target) && process.env.ENCODE_LAB_FFMPEG_FORCE !== "1") {
+    // 即使不重新下载，也修复旧 runtime 留下的只读文件，保证 cargo 增量构建可覆盖资源。
+    await normalizeRuntimePermissions(targetDir);
+    await normalizeCachedRuntimePermissions();
     console.log(`FFmpeg runtime already exists: ${target}`);
     return;
   }
@@ -143,9 +175,11 @@ async function main(): Promise<void> {
 
   // 先解压到临时目录，确认完整后再替换目标目录，避免中途失败留下半成品。
   await run("tar", ["-xzf", archivePath, "-C", tempDir]);
-  await rm(join(RUNTIME_ROOT, target), { force: true, recursive: true });
-  await rename(join(tempDir, target), join(RUNTIME_ROOT, target));
-  await signDarwinRuntime(join(RUNTIME_ROOT, target));
+  await rm(targetDir, { force: true, recursive: true });
+  await rename(join(tempDir, target), targetDir);
+  await normalizeRuntimePermissions(targetDir);
+  await normalizeCachedRuntimePermissions();
+  await signDarwinRuntime(targetDir);
   await rm(tempDir, { force: true, recursive: true });
 
   console.log(`FFmpeg runtime ready: ${target}`);

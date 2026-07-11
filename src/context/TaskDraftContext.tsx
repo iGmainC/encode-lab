@@ -498,7 +498,8 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
         format: containerFormat,
         faststart: containerFormat === "mp4" ? containerFaststart : false,
       },
-      advancedArgs: buildAdvancedArgs(),
+      // DV 路径由后端按 Profile 构造色彩和 VBV 参数，避免普通高级参数污染专用链路。
+      advancedArgs: preserveDolbyVisionMetadata ? undefined : buildAdvancedArgs(),
       output: {
         dir: "",
         fileNamePattern: "{inputName}_{taskName}",

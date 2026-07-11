@@ -49,11 +49,19 @@ export type FfmpegProbeResult = {
   ffprobeFound: boolean;
   ffmpegPath?: string;
   ffprobePath?: string;
+  x265Path?: string;
+  doviToolPath?: string;
   version?: string;
+  x265Version?: string;
+  doviToolVersion?: string;
   dolbyVision: {
     supportsDoviRpu: boolean;
     supportsDolbyVisionEncode: boolean;
     supportsPreservePipeline: boolean;
+    supportsExternalRpuPipeline: boolean;
+    doviToolFound: boolean;
+    x265CliFound: boolean;
+    supportedProfiles: string[];
     supportedEncoders: string[];
     recommendedEncoder?: string;
   };
@@ -181,6 +189,9 @@ export type VideoStreamMetadata = {
   height?: number;
   pixFmt?: string;
   fps?: number;
+  fpsFraction?: string;
+  variableFrameRate?: boolean;
+  frameCount?: number | null;
   bitRateKbps?: number;
   /** 视频轨道大小，单位字节；可能来自容器 tag 或估算。 */
   sizeBytes?: number | null;
@@ -192,8 +203,13 @@ export type VideoStreamMetadata = {
   hdrType?: "Sdr" | "Hdr10" | "Hlg" | "DolbyVision" | "Unknown";
   /** Dolby Vision profile；缺失时不能判断当前保留链路是否支持。 */
   dolbyVisionProfile?: number | null;
+  /** Dolby Vision level。 */
+  dolbyVisionLevel?: number | null;
   /** Dolby Vision base-layer compatibility id；0 通常表示没有 HDR10/SDR 兼容层。 */
   dolbyVisionCompatibilityId?: number | null;
+  dolbyVisionRpuPresent?: boolean | null;
+  dolbyVisionElPresent?: boolean | null;
+  dolbyVisionBlPresent?: boolean | null;
   /** HDR10 MaxCLL，单位 nit */
   maxContentLightLevel?: number | null;
   /** HDR10 MaxFALL，单位 nit */
@@ -202,6 +218,8 @@ export type VideoStreamMetadata = {
   masteringDisplayMaxLuminance?: number | null;
   /** mastering display 最小亮度，单位 nit */
   masteringDisplayMinLuminance?: number | null;
+  /** x265 可直接使用的 ST.2086 mastering-display 表达式。 */
+  masteringDisplay?: string | null;
 };
 
 export type AudioStreamMetadata = {
@@ -294,6 +312,8 @@ export type JobMetricsEvent = {
   stepIndex: number;
   /** 总阶段数。 */
   stepCount: number;
+  /** 当前多工具执行阶段名称。 */
+  stepLabel: string;
   /** 当前已处理媒体时间，单位毫秒。 */
   timeMs?: number | null;
   /** 当前帧号。 */

@@ -40,6 +40,16 @@ pub fn ffprobe_command() -> Command {
     command_for_binary("ffprobe")
 }
 
+/** 创建 x265 CLI 命令；能力探测验证 runtime 与 libx265 wrapper 使用同一套工具链。 */
+pub fn x265_command() -> Command {
+    command_for_binary("x265")
+}
+
+/** 创建 dovi_tool 命令；用于 RPU 提取、转换与输出校验。 */
+pub fn dovi_tool_command() -> Command {
+    command_for_binary("dovi_tool")
+}
+
 /** 解析当前应使用的 FFmpeg 路径。 */
 pub fn resolve_ffmpeg_path() -> Option<PathBuf> {
     resolve_binary("ffmpeg").map(|binary| binary.path)
@@ -48,6 +58,16 @@ pub fn resolve_ffmpeg_path() -> Option<PathBuf> {
 /** 解析当前应使用的 FFprobe 路径。 */
 pub fn resolve_ffprobe_path() -> Option<PathBuf> {
     resolve_binary("ffprobe").map(|binary| binary.path)
+}
+
+/** 解析当前应使用的 x265 CLI 路径。 */
+pub fn resolve_x265_path() -> Option<PathBuf> {
+    resolve_binary("x265").map(|binary| binary.path)
+}
+
+/** 解析当前应使用的 dovi_tool 路径。 */
+pub fn resolve_dovi_tool_path() -> Option<PathBuf> {
+    resolve_binary("dovi_tool").map(|binary| binary.path)
 }
 
 /** 将路径转换成前端可展示的字符串。 */

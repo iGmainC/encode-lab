@@ -165,9 +165,14 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
             <CardContent className="space-y-3 p-5 text-sm">
               <ProbeRow label="ffmpeg" ready={Boolean(ffmpegProbe?.ffmpegFound)} value={ffmpegProbe?.ffmpegPath ?? t("top.notFound")} />
               <ProbeRow label="ffprobe" ready={Boolean(ffmpegProbe?.ffprobeFound)} value={ffmpegProbe?.ffprobePath ?? t("top.notFound")} />
+              <ProbeRow label="x265" ready={Boolean(ffmpegProbe?.dolbyVision.x265CliFound)} value={ffmpegProbe?.x265Path ?? t("top.notFound")} />
+              <ProbeRow label="dovi_tool" ready={Boolean(ffmpegProbe?.dolbyVision.doviToolFound)} value={ffmpegProbe?.doviToolPath ?? t("top.notFound")} />
               <div className="rounded-lg border p-4">
                 <div className="text-xs text-muted-foreground">版本</div>
                 <div className="mt-1 break-all font-medium">{ffmpegProbe?.version ?? t("settings.versionEmpty")}</div>
+                <div className="mt-2 break-all text-xs text-muted-foreground">
+                  x265: {ffmpegProbe?.x265Version ?? "-"} · dovi_tool: {ffmpegProbe?.doviToolVersion ?? "-"}
+                </div>
               </div>
             </CardContent>
           </Card>

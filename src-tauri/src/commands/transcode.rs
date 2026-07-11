@@ -13,7 +13,7 @@ use crate::{
     models::{FileLocation, JobHistory, TaskConfigPayload, Validate, LOCAL_NODE_ID},
     probe::video_metadata::read_video_metadata,
     refresh_tray_menu,
-    transcode::command_builder::{build_ffmpeg_command_args, build_ffmpeg_commands},
+    transcode::execution_plan::build_transcode_plan,
     transcode::job_manager::TranscodeJobRequest,
     AppState,
 };
@@ -92,18 +92,27 @@ pub struct DeleteJobResponse {
 }
 
 #[tauri::command]
-pub fn build_ffmpeg_command(request: BuildCommandRequest) -> CommandResult<BuildCommandResponse> {
+pub fn build_ffmpeg_command(
+    state: State<'_, AppState>,
+    request: BuildCommandRequest,
+) -> CommandResult<BuildCommandResponse> {
     request.payload.validate()?;
     // location 字段先进入命令契约，当前本机命令仍以字符串路径为事实输入。
     let _location_contract = (&request.input_location, &request.output_location);
 
-    let result = build_ffmpeg_commands(&request.payload, &request.input_file, &request.output_file)
-        .map_err(CommandError::from)?;
+    let plan = build_transcode_plan(
+        &request.payload,
+        &request.input_file,
+        &request.output_file,
+        "command-preview",
+        &state.runtime_dir,
+    )
+    .map_err(CommandError::from)?;
 
     Ok(BuildCommandResponse {
-        commands: result.commands,
-        warnings: result.warnings,
-        sanitized_advanced_args: result.sanitized_advanced_args,
+        commands: plan.display_commands(),
+        warnings: plan.warnings,
+        sanitized_advanced_args: plan.sanitized_advanced_args,
     })
 }
 
@@ -126,13 +135,15 @@ pub fn enqueue_transcode_job<R: Runtime>(
 
     let job_id = Uuid::new_v4().to_string();
     let output_file = resolve_output_file(&request.payload, &request.input_file, &job_id)?;
-    let command_args =
-        build_ffmpeg_command_args(&request.payload, &request.input_file, &output_file)
-            .map_err(CommandError::from)?;
-    let command_line = build_ffmpeg_commands(&request.payload, &request.input_file, &output_file)
-        .map_err(CommandError::from)?
-        .commands
-        .join(" && ");
+    let plan = build_transcode_plan(
+        &request.payload,
+        &request.input_file,
+        &output_file,
+        &job_id,
+        &state.runtime_dir,
+    )
+    .map_err(CommandError::from)?;
+    let command_line = plan.display_commands().join(" && ");
     let source_duration_sec = read_video_metadata(&request.input_file)
         .ok()
         .and_then(|metadata| metadata.duration_sec);
@@ -205,7 +216,7 @@ pub fn enqueue_transcode_job<R: Runtime>(
         state.storage.clone(),
         TranscodeJobRequest {
             job,
-            command_args,
+            plan,
             duration_sec,
         },
         concurrency_n,

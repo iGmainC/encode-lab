@@ -2,20 +2,30 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     io::{BufRead, BufReader, Read},
-    path::Path,
-    process::{Child, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
 
 use chrono::Utc;
+use serde_json::Value;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{
-    ffmpeg_runtime::ffmpeg_command, mark_open_jobs_on_notification_activate_if_hidden,
-    models::JobHistory, probe::video_metadata::read_video_track_size_bytes, refresh_tray_menu,
-    storage::AppStorage, transcode::command_builder::build_passlog_path,
+    ffmpeg_runtime::{dovi_tool_command, ffmpeg_command},
+    mark_open_jobs_on_notification_activate_if_hidden,
+    models::JobHistory,
+    probe::video_metadata::{read_video_metadata, read_video_track_size_bytes},
+    refresh_tray_menu,
+    storage::AppStorage,
+    transcode::{
+        command_builder::build_passlog_path,
+        execution_plan::{
+            DolbyVisionVerification, ProcessStep, RuntimeProgram, TranscodePlan, TranscodeStep,
+        },
+    },
 };
 
 /** FFmpeg 子进程共享槽位，用于退出时从主线程中断后台进程。 */
@@ -34,8 +44,8 @@ struct ChildState {
 pub struct TranscodeJobRequest {
     /** 入队时已经写入历史记录的任务对象。 */
     pub job: JobHistory,
-    /** 可能包含两段式编码的 FFmpeg 参数列表。 */
-    pub command_args: Vec<Vec<String>>,
+    /** 入队时已经解析完成的多阶段执行计划。 */
+    pub plan: TranscodePlan,
     /** 输入视频总时长，单位秒；未知时只上报瞬时指标。 */
     pub duration_sec: Option<f64>,
 }
@@ -50,6 +60,8 @@ pub struct JobMetricsEvent {
     pub step_index: usize,
     /** 总阶段数。 */
     pub step_count: usize,
+    /** 当前阶段的用户可读名称。 */
+    pub step_label: String,
     /** 当前已处理媒体时间，单位毫秒。 */
     pub time_ms: Option<u64>,
     /** 当前帧号。 */
@@ -279,7 +291,7 @@ impl TranscodeManager {
                 app.clone(),
                 storage.clone(),
                 request.job,
-                request.command_args,
+                request.plan,
                 request.duration_sec,
                 child,
             );
@@ -381,22 +393,31 @@ enum CancelTarget {
     },
 }
 
-/** 执行 FFmpeg 命令并返回最终任务状态。 */
+/** 执行类型化转码计划并返回最终任务状态。 */
 fn run_transcode_job<R: Runtime>(
     app: AppHandle<R>,
     storage: AppStorage,
     mut job: JobHistory,
-    command_args: Vec<Vec<String>>,
+    plan: TranscodePlan,
     duration_sec: Option<f64>,
     child: ChildSlot,
 ) -> JobHistory {
+    if let Some(workspace) = &plan.workspace {
+        if let Err(error) = fs::create_dir_all(workspace) {
+            job.status = "failed".to_string();
+            job.error = Some(format!("创建任务临时目录失败：{error}"));
+            job.ended_at = Some(Utc::now().to_rfc3339());
+            return job;
+        }
+    }
+
     {
         let guard = child.lock().expect("ffmpeg child lock poisoned");
         if guard.canceled {
             job.status = "canceled".to_string();
             job.error = Some("用户取消了任务。".to_string());
             job.ended_at = Some(Utc::now().to_rfc3339());
-            cleanup_job_artifacts(&job);
+            cleanup_plan_artifacts(&job, &plan.cleanup_paths);
             return job;
         }
 
@@ -408,32 +429,44 @@ fn run_transcode_job<R: Runtime>(
         refresh_tray_menu(&app);
     }
 
-    let step_count = command_args.len().max(1);
-    for (step_index, args) in command_args.into_iter().enumerate() {
-        match run_ffmpeg_step(
-            &app,
-            &job.id,
-            step_index + 1,
-            step_count,
-            duration_sec,
-            &args,
-            &child,
-        ) {
-            Ok(()) => {}
-            Err(FfmpegStepError::Interrupted) => {
+    let step_count = plan.steps.len().max(1);
+    for (step_index, step) in plan.steps.iter().enumerate() {
+        let result = match step {
+            TranscodeStep::Process(process) => run_process_step(
+                &app,
+                &job.id,
+                step_index + 1,
+                step_count,
+                step.label(),
+                duration_sec,
+                process,
+                &child,
+            ),
+            TranscodeStep::VerifyDolbyVision(verification) => {
+                verify_dolby_vision_output(verification).map_err(StepError::Failed)
+            }
+            TranscodeStep::FinalizeOutput { source, target } => {
+                finalize_output(source, target).map_err(StepError::Failed)
+            }
+        };
+
+        match result {
+            Ok(()) => emit_stage_completed(&app, &job.id, step_index + 1, step_count, step.label()),
+            Err(StepError::Interrupted) => {
                 if child_is_canceled(&child) {
                     job.status = "canceled".to_string();
                     job.error = Some("用户取消了任务。".to_string());
-                    cleanup_job_artifacts(&job);
+                    cleanup_plan_artifacts(&job, &plan.cleanup_paths);
                 } else {
                     job.status = "interrupted".to_string();
                     job.error = Some("转码任务已中断。".to_string());
                 }
                 break;
             }
-            Err(FfmpegStepError::Failed(message)) => {
+            Err(StepError::Failed(message)) => {
                 job.status = "failed".to_string();
                 job.error = Some(message);
+                cleanup_plan_artifacts(&job, &plan.cleanup_paths);
                 break;
             }
         }
@@ -443,6 +476,7 @@ fn run_transcode_job<R: Runtime>(
         job.status = "completed".to_string();
         job.error = None;
         attach_size_changes(&mut job);
+        cleanup_transient_paths(&plan.cleanup_paths);
     }
 
     job.ended_at = Some(Utc::now().to_rfc3339());
@@ -497,30 +531,193 @@ fn attach_video_track_size_change(job: &mut JobHistory) {
     }
 }
 
-/** 单段 FFmpeg 执行结果。 */
-enum FfmpegStepError {
+/** 校验输出容器、DOVI configuration record、RPU 帧数和逐帧语义内容。 */
+fn verify_dolby_vision_output(verification: &DolbyVisionVerification) -> Result<(), String> {
+    let output_path = verification.output_file.to_string_lossy();
+    let metadata = read_video_metadata(&output_path)
+        .map_err(|error| format!("读取 Dolby Vision 输出失败：{}", error.message))?;
+    let video = metadata
+        .video
+        .as_ref()
+        .ok_or_else(|| "Dolby Vision 输出缺少视频流".to_string())?;
+
+    if video.dolby_vision_profile != Some(verification.expected_profile)
+        || video.dolby_vision_compatibility_id != Some(verification.expected_compatibility_id)
+        || video.dolby_vision_rpu_present != Some(true)
+        || video.dolby_vision_bl_present != Some(true)
+        || video.dolby_vision_el_present == Some(true)
+    {
+        return Err(format!(
+            "输出 DOVI 配置不匹配：profile={:?}, compatibility={:?}, rpu={:?}, bl={:?}, el={:?}",
+            video.dolby_vision_profile,
+            video.dolby_vision_compatibility_id,
+            video.dolby_vision_rpu_present,
+            video.dolby_vision_bl_present,
+            video.dolby_vision_el_present
+        ));
+    }
+    if video.width != Some(verification.expected_width)
+        || video.height != Some(verification.expected_height)
+        || video.bit_depth.unwrap_or_default() < 10
+    {
+        return Err(format!(
+            "输出画面格式不匹配：{}x{}, bitDepth={:?}",
+            video.width.unwrap_or_default(),
+            video.height.unwrap_or_default(),
+            video.bit_depth
+        ));
+    }
+    if video
+        .fps
+        .is_none_or(|fps| (fps - verification.expected_fps).abs() > 0.001)
+    {
+        return Err(format!(
+            "输出帧率与源片不一致：source={}, output={:?}",
+            verification.expected_fps, video.fps
+        ));
+    }
+
+    let source_rpu_frames = read_rpu_frame_count(&verification.source_rpu_file)?;
+    let output_rpu_frames = read_rpu_frame_count(&verification.output_rpu_file)?;
+    if source_rpu_frames != output_rpu_frames {
+        return Err(format!(
+            "RPU 帧数不一致：source={source_rpu_frames}, output={output_rpu_frames}"
+        ));
+    }
+    if verification
+        .expected_frame_count
+        .is_some_and(|frames| frames != source_rpu_frames)
+    {
+        return Err(format!(
+            "源视频帧数与 RPU 帧数不一致：video={}, rpu={source_rpu_frames}",
+            verification.expected_frame_count.unwrap_or_default()
+        ));
+    }
+
+    verify_rpu_semantic_equality(
+        &verification.source_rpu_json_file,
+        &verification.output_rpu_json_file,
+    )?;
+
+    Ok(())
+}
+
+/** 比较 dovi_tool 导出的逐帧 RPU；忽略重封装时允许变化的 CRC 与扩展块排列。 */
+fn verify_rpu_semantic_equality(source_file: &Path, output_file: &Path) -> Result<(), String> {
+    let mut source = read_rpu_json(source_file, "源")?;
+    let mut output = read_rpu_json(output_file, "输出")?;
+    canonicalize_rpu_json(&mut source, None);
+    canonicalize_rpu_json(&mut output, None);
+
+    if source != output {
+        return Err("输出 RPU 的逐帧动态元数据与源片不一致".to_string());
+    }
+    Ok(())
+}
+
+/** 读取 dovi_tool 导出的完整 RPU JSON。 */
+fn read_rpu_json(path: &Path, label: &str) -> Result<Value, String> {
+    let contents =
+        fs::read_to_string(path).map_err(|error| format!("读取{label} RPU JSON 失败：{error}"))?;
+    serde_json::from_str(&contents).map_err(|error| format!("解析{label} RPU JSON 失败：{error}"))
+}
+
+/** 规范化不影响 RPU 语义、但可能在 libx265 重写时变化的序列化细节。 */
+fn canonicalize_rpu_json(value: &mut Value, parent_key: Option<&str>) {
+    match value {
+        Value::Object(object) => {
+            // CRC 会随扩展块序列化顺序重算，比较其余字段即可证明元数据语义一致。
+            object.remove("rpu_data_crc32");
+            for (key, child) in object.iter_mut() {
+                canonicalize_rpu_json(child, Some(key));
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                canonicalize_rpu_json(item, None);
+            }
+            if parent_key == Some("ext_metadata_blocks") {
+                items.sort_by_key(extension_block_sort_key);
+            }
+        }
+        _ => {}
+    }
+}
+
+/** 返回 Level1/Level2 等扩展块的稳定排序键。 */
+fn extension_block_sort_key(value: &Value) -> String {
+    value
+        .as_object()
+        .and_then(|object| object.keys().next())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/** 调用固定版本 dovi_tool 读取 RPU summary 中的帧数。 */
+fn read_rpu_frame_count(rpu_file: &Path) -> Result<u64, String> {
+    let output = dovi_tool_command()
+        .args(["info", "--input", &rpu_file.to_string_lossy(), "--summary"])
+        .output()
+        .map_err(|error| format!("启动 dovi_tool RPU 校验失败：{error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!("dovi_tool RPU 校验失败：{}", tail_text(&stderr)));
+    }
+
+    stdout
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("Frames:"))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .ok_or_else(|| "dovi_tool summary 缺少 Frames 字段".to_string())
+}
+
+/** 校验完成后在同一文件系统内原子发布最终输出。 */
+fn finalize_output(source: &Path, target: &Path) -> Result<(), String> {
+    if !source.is_file() {
+        return Err(format!("待发布输出不存在：{}", source.display()));
+    }
+    if target.exists() {
+        return Err(format!("最终输出已存在：{}", target.display()));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建输出目录失败：{error}"))?;
+    }
+    fs::rename(source, target).map_err(|error| format!("发布最终输出失败：{error}"))
+}
+
+/** 单个执行计划阶段的结果。 */
+enum StepError {
     /** 子进程被退出流程或后续取消逻辑中断。 */
     Interrupted,
-    /** FFmpeg 启动或执行失败。 */
+    /** 外部命令或内部校验执行失败。 */
     Failed(String),
 }
 
-/** 执行单段 FFmpeg，并允许其他线程通过 child slot 中断它。 */
-fn run_ffmpeg_step<R: Runtime>(
+/** 执行单个外部工具阶段，并允许其他线程通过 child slot 中断它。 */
+fn run_process_step<R: Runtime>(
     app: &AppHandle<R>,
     job_id: &str,
     step_index: usize,
     step_count: usize,
+    step_label: &str,
     duration_sec: Option<f64>,
-    args: &[String],
+    step: &ProcessStep,
     child_slot: &ChildSlot,
-) -> Result<(), FfmpegStepError> {
-    let mut child = ffmpeg_command()
-        .args(progress_args(args))
+) -> Result<(), StepError> {
+    let args = if step.program == RuntimeProgram::Ffmpeg && step.reports_media_progress {
+        progress_args(&step.args)
+    } else {
+        step.args.clone()
+    };
+    let mut child = runtime_command(step.program)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| FfmpegStepError::Failed(err.to_string()))?;
+        .map_err(|err| StepError::Failed(format!("{} 启动失败：{err}", step.label)))?;
+    let stdout_text = Arc::new(Mutex::new(String::new()));
     let stderr_text = Arc::new(Mutex::new(String::new()));
     let stderr_reader = child.stderr.take().map(|mut stderr| {
         let stderr_text = Arc::clone(&stderr_text);
@@ -533,12 +730,32 @@ fn run_ffmpeg_step<R: Runtime>(
             }
         })
     });
-    let progress_reader = child.stdout.take().map(|stdout| {
-        let app = app.clone();
-        let job_id = job_id.to_string();
-        thread::spawn(move || {
-            read_progress_output(app, job_id, step_index, step_count, duration_sec, stdout);
-        })
+    let stdout_reader = child.stdout.take().map(|mut stdout| {
+        if step.program == RuntimeProgram::Ffmpeg && step.reports_media_progress {
+            let app = app.clone();
+            let job_id = job_id.to_string();
+            let step_label = step_label.to_string();
+            thread::spawn(move || {
+                read_progress_output(
+                    app,
+                    job_id,
+                    step_index,
+                    step_count,
+                    step_label,
+                    duration_sec,
+                    stdout,
+                );
+            })
+        } else {
+            let stdout_text = Arc::clone(&stdout_text);
+            thread::spawn(move || {
+                let mut text = String::new();
+                let _ = stdout.read_to_string(&mut text);
+                if let Ok(mut guard) = stdout_text.lock() {
+                    *guard = text;
+                }
+            })
+        }
     });
 
     {
@@ -547,7 +764,7 @@ fn run_ffmpeg_step<R: Runtime>(
         if guard.canceled {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(FfmpegStepError::Interrupted);
+            return Err(StepError::Interrupted);
         }
         guard.child = Some(child);
     }
@@ -556,7 +773,7 @@ fn run_ffmpeg_step<R: Runtime>(
         let maybe_result = {
             let mut guard = child_slot.lock().expect("ffmpeg child lock poisoned");
             let Some(child) = guard.child.as_mut() else {
-                return Err(FfmpegStepError::Interrupted);
+                return Err(StepError::Interrupted);
             };
 
             match child.try_wait() {
@@ -567,13 +784,13 @@ fn run_ffmpeg_step<R: Runtime>(
                 Ok(None) => None,
                 Err(err) => {
                     guard.child.take();
-                    return Err(FfmpegStepError::Failed(err.to_string()));
+                    return Err(StepError::Failed(err.to_string()));
                 }
             }
         };
 
         if let Some(success) = maybe_result {
-            if let Some(reader) = progress_reader {
+            if let Some(reader) = stdout_reader {
                 let _ = reader.join();
             }
             if let Some(reader) = stderr_reader {
@@ -583,14 +800,31 @@ fn run_ffmpeg_step<R: Runtime>(
                 .lock()
                 .map(|text| text.clone())
                 .unwrap_or_default();
+            let stdout = stdout_text
+                .lock()
+                .map(|text| text.clone())
+                .unwrap_or_default();
             return if success {
                 Ok(())
             } else {
-                Err(FfmpegStepError::Failed(tail_text(&stderr)))
+                let details = if stderr.trim().is_empty() {
+                    tail_text(&stdout)
+                } else {
+                    tail_text(&stderr)
+                };
+                Err(StepError::Failed(format!("{}失败：{details}", step.label)))
             };
         }
 
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/** 为执行计划选择 bundled runtime 程序。 */
+fn runtime_command(program: RuntimeProgram) -> Command {
+    match program {
+        RuntimeProgram::Ffmpeg => ffmpeg_command(),
+        RuntimeProgram::DoviTool => dovi_tool_command(),
     }
 }
 
@@ -611,6 +845,7 @@ fn read_progress_output<R: Runtime>(
     job_id: String,
     step_index: usize,
     step_count: usize,
+    step_label: String,
     duration_sec: Option<f64>,
     stdout: impl Read,
 ) {
@@ -630,6 +865,7 @@ fn read_progress_output<R: Runtime>(
                 &job_id,
                 step_index,
                 step_count,
+                &step_label,
                 duration_sec,
                 &snapshot,
             );
@@ -689,6 +925,7 @@ fn emit_metrics<R: Runtime>(
     job_id: &str,
     step_index: usize,
     step_count: usize,
+    step_label: &str,
     duration_sec: Option<f64>,
     snapshot: &FfmpegProgressSnapshot,
 ) {
@@ -700,12 +937,39 @@ fn emit_metrics<R: Runtime>(
             job_id: job_id.to_string(),
             step_index,
             step_count,
+            step_label: step_label.to_string(),
             time_ms: snapshot.out_time_ms,
             frame: snapshot.frame,
             fps: snapshot.fps,
             speed: snapshot.speed,
             progress,
             eta_sec,
+            updated_at: Utc::now().to_rfc3339(),
+        },
+    );
+}
+
+/** 非媒体阶段完成后也推进总体进度，避免 RPU/校验阶段看起来停住。 */
+fn emit_stage_completed<R: Runtime>(
+    app: &AppHandle<R>,
+    job_id: &str,
+    step_index: usize,
+    step_count: usize,
+    step_label: &str,
+) {
+    let _ = app.emit(
+        "job:metrics",
+        JobMetricsEvent {
+            job_id: job_id.to_string(),
+            step_index,
+            step_count,
+            step_label: step_label.to_string(),
+            time_ms: None,
+            frame: None,
+            fps: None,
+            speed: None,
+            progress: Some((step_index as f64 / step_count.max(1) as f64) * 100.0),
+            eta_sec: None,
             updated_at: Utc::now().to_rfc3339(),
         },
     );
@@ -780,6 +1044,23 @@ fn cleanup_job_artifacts(job: &JobHistory) {
     cleanup_passlog_files(&build_passlog_path(&job.input_file, &job.output_file));
 }
 
+/** 清理普通任务产物和执行计划声明的 workspace/partial 文件。 */
+fn cleanup_plan_artifacts(job: &JobHistory, cleanup_paths: &[PathBuf]) {
+    cleanup_job_artifacts(job);
+    cleanup_transient_paths(cleanup_paths);
+}
+
+/** 清理计划临时路径；目录递归删除，普通文件按存在性删除。 */
+fn cleanup_transient_paths(cleanup_paths: &[PathBuf]) {
+    for path in cleanup_paths {
+        if path.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        } else {
+            remove_file_if_exists(path);
+        }
+    }
+}
+
 /** 删除存在的普通文件；不存在或目录路径不视为错误。 */
 fn remove_file_if_exists(path: &Path) {
     if path.is_file() {
@@ -820,4 +1101,34 @@ fn cleanup_passlog_files(passlog_path: &str) {
 fn tail_text(value: &str) -> String {
     let lines: Vec<&str> = value.lines().rev().take(20).collect();
     lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonicalize_rpu_json;
+    use serde_json::json;
+
+    #[test]
+    fn rpu_canonicalization_should_ignore_crc_and_extension_block_order() {
+        let mut source = json!([{
+            "rpu_data_crc32": 1,
+            "vdr_dm_data": {
+                "cmv29_metadata": {
+                    "ext_metadata_blocks": [{"Level5": {"top": 0}}, {"Level1": {"max": 10}}]
+                }
+            }
+        }]);
+        let mut output = json!([{
+            "rpu_data_crc32": 2,
+            "vdr_dm_data": {
+                "cmv29_metadata": {
+                    "ext_metadata_blocks": [{"Level1": {"max": 10}}, {"Level5": {"top": 0}}]
+                }
+            }
+        }]);
+
+        canonicalize_rpu_json(&mut source, None);
+        canonicalize_rpu_json(&mut output, None);
+        assert_eq!(source, output);
+    }
 }

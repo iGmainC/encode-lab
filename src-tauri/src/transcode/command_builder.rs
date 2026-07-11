@@ -12,12 +12,13 @@ use crate::{
         },
         TaskConfigPayload,
     },
-    probe::video_metadata::{read_video_metadata, HdrType, VideoStreamMetadata},
     storage::errors::{StorageError, StorageResult},
 };
 
 #[derive(Debug, Clone)]
 pub struct CommandBuildOutput {
+    pub command_args: Vec<Vec<String>>,
+    #[cfg(test)]
     pub commands: Vec<String>,
     pub warnings: Vec<String>,
     pub sanitized_advanced_args: Option<String>,
@@ -83,10 +84,12 @@ pub fn build_ffmpeg_commands(
         sanitize_advanced_args(payload.advanced_args.as_deref(), &mut warnings);
 
     Ok(CommandBuildOutput {
+        #[cfg(test)]
         commands: command_args
             .iter()
             .map(|args| format!("ffmpeg {}", shell_join(args)))
             .collect(),
+        command_args,
         warnings,
         sanitized_advanced_args: sanitized_advanced,
     })
@@ -104,7 +107,15 @@ pub fn build_ffmpeg_command_args(
     }
 
     guard_advanced_args(payload.advanced_args.as_deref())?;
-    ensure_dolby_vision_preserve_source_supported(payload, input_file)?;
+    if payload
+        .video
+        .preserve_dolby_vision_metadata
+        .unwrap_or(false)
+    {
+        return Err(StorageError::InvalidPayload(
+            "Dolby Vision preservation must use the profile-aware transcode plan".to_string(),
+        ));
+    }
 
     let mut warnings = codec_strategy_warnings(payload);
     let sanitized_advanced =
@@ -149,62 +160,6 @@ pub fn build_ffmpeg_command_args(
             sanitized_advanced.as_deref(),
         )?])
     }
-}
-
-fn ensure_dolby_vision_preserve_source_supported(
-    payload: &TaskConfigPayload,
-    input_file: &str,
-) -> StorageResult<()> {
-    if !payload
-        .video
-        .preserve_dolby_vision_metadata
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-
-    let metadata = read_video_metadata(input_file).map_err(|err| {
-        StorageError::InvalidPayload(format!(
-            "cannot verify Dolby Vision source metadata: {}",
-            err.message
-        ))
-    })?;
-
-    validate_dolby_vision_preserve_source(metadata.video.as_ref())
-}
-
-/// 校验源片是否适配当前 libx265 Dolby Vision 元数据保留链路。
-fn validate_dolby_vision_preserve_source(video: Option<&VideoStreamMetadata>) -> StorageResult<()> {
-    let Some(video) = video else {
-        return Err(StorageError::InvalidPayload(
-            "Dolby Vision metadata preservation requires a readable video stream".to_string(),
-        ));
-    };
-
-    if video.hdr_type.as_ref() != Some(&HdrType::DolbyVision) {
-        return Err(StorageError::InvalidPayload(
-            "Dolby Vision metadata preservation requires a Dolby Vision source".to_string(),
-        ));
-    }
-
-    let profile = video.dolby_vision_profile;
-    let compatibility_id = video.dolby_vision_compatibility_id;
-    if profile.is_none() || compatibility_id.is_none() {
-        return Err(StorageError::InvalidPayload(
-            "Dolby Vision metadata preservation requires source profile and compatibility id"
-                .to_string(),
-        ));
-    }
-
-    if profile == Some(5) || compatibility_id == Some(0) {
-        return Err(StorageError::InvalidPayload(format!(
-            "Dolby Vision metadata preservation does not support source profile {} compatibility {}; disable preservation and transcode as ordinary H.265",
-            profile.unwrap_or_default(),
-            compatibility_id.unwrap_or_default()
-        )));
-    }
-
-    Ok(())
 }
 
 pub fn build_preview_encoded_frame_command_args(
@@ -678,16 +633,6 @@ fn append_video_args(payload: &TaskConfigPayload, args: &mut Vec<String>) -> Sto
         args.push(pixel_format.to_string());
     }
 
-    if payload
-        .video
-        .preserve_dolby_vision_metadata
-        .unwrap_or(false)
-    {
-        // V1 仅在 libx265 路径上显式表达 Dolby Vision 保留意图。
-        args.push("-dolbyvision".to_string());
-        args.push("1".to_string());
-    }
-
     if let Some(gop) = payload.video.gop {
         args.push("-g".to_string());
         args.push(gop.to_string());
@@ -963,6 +908,7 @@ fn container_name(format: &ContainerFormat) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn shell_join(args: &[String]) -> String {
     args.iter()
         .map(|item| shell_quote(item))
@@ -970,6 +916,7 @@ fn shell_join(args: &[String]) -> String {
         .join(" ")
 }
 
+#[cfg(test)]
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -992,12 +939,11 @@ mod tests {
         AudioConfig, AudioMode, ClipRange, ContainerConfig, ContainerFormat, OutputConfig,
         TaskConfigPayload, VideoBitrateMode, VideoCodecFormat, VideoConfig, VideoEncoder,
     };
-    use crate::probe::video_metadata::{HdrType, VideoStreamMetadata};
 
     use super::{
         build_ffmpeg_command_args, build_ffmpeg_commands, build_preview_encoded_frame_command_args,
-        build_source_frame_command_args, validate_dolby_vision_preserve_source,
-        PreviewCommandOptions, PreviewSdrTonemapMode, PreviewSourceColor,
+        build_source_frame_command_args, PreviewCommandOptions, PreviewSdrTonemapMode,
+        PreviewSourceColor,
     };
 
     fn payload() -> TaskConfigPayload {
@@ -1035,38 +981,6 @@ mod tests {
                 location: None,
             },
         }
-    }
-
-    #[test]
-    fn dolby_vision_preserve_source_validation_should_reject_profile_5_compat_0() {
-        let video = VideoStreamMetadata {
-            codec_name: Some("hevc".to_string()),
-            codec_long_name: None,
-            profile: Some("Main 10".to_string()),
-            width: Some(3840),
-            height: Some(1616),
-            pix_fmt: Some("yuv420p10le".to_string()),
-            fps: Some(24.0),
-            bit_rate_kbps: None,
-            size_bytes: None,
-            color_primaries: None,
-            color_transfer: None,
-            color_space: None,
-            color_range: Some("pc".to_string()),
-            bit_depth: Some(10),
-            hdr_type: Some(HdrType::DolbyVision),
-            dolby_vision_profile: Some(5),
-            dolby_vision_compatibility_id: Some(0),
-            max_content_light_level: None,
-            max_frame_average_light_level: None,
-            mastering_display_max_luminance: None,
-            mastering_display_min_luminance: None,
-        };
-
-        let err = validate_dolby_vision_preserve_source(Some(&video))
-            .expect_err("profile 5 compatibility 0 should be rejected");
-
-        assert!(err.to_string().contains("source profile 5 compatibility 0"));
     }
 
     #[test]

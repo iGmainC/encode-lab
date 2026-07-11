@@ -39,15 +39,11 @@ type Props = {
  */
 function buildDolbyVisionPreserveCopy({
   isDolbyVisionSource,
-  formCodec,
-  formEncoder,
   sourceVideo,
   ffmpegProbe,
   t,
 }: {
   isDolbyVisionSource: boolean;
-  formCodec: string;
-  formEncoder: string;
   sourceVideo?: VideoMetadataResult["video"] | null;
   ffmpegProbe: FfmpegProbeResult | null;
   t: ReturnType<typeof useI18n>["t"];
@@ -87,10 +83,10 @@ function buildDolbyVisionPreserveCopy({
     };
   }
 
-  if (formCodec !== "h265" || formEncoder !== "libx265") {
+  if (!ffmpegProbe.dolbyVision.doviToolFound || !ffmpegProbe.dolbyVision.x265CliFound) {
     return {
-      hint: t("config.dv.onlyLibx265.hint"),
-      disabledReason: t("config.dv.onlyLibx265.disabled", { codec: formCodec, encoder: formEncoder }),
+      hint: t("config.dv.noTools.hint"),
+      disabledReason: t("config.dv.noTools.disabled"),
     };
   }
 
@@ -116,14 +112,23 @@ function buildDolbyVisionPreserveCopy({
 /**
  * 判断当前源片是否适合走 libx265 的 Dolby Vision 元数据保留实验链路。
  * @param sourceVideo ffprobe 返回的源视频元数据
- * @returns true 表示 profile 与 compatibility id 足够明确且不是无兼容基础层源片
+ * @returns true 表示源片可走单层 Profile 5 或 Profile 8.1 的逐帧 RPU 保留链路
  */
 function isDolbyVisionPreserveSourceSupported(sourceVideo?: VideoMetadataResult["video"] | null) {
   const profile = sourceVideo?.dolbyVisionProfile;
   const compatibilityId = sourceVideo?.dolbyVisionCompatibilityId;
+  const supportedProfile =
+    (profile === 5 && compatibilityId === 0) ||
+    (profile === 8 && compatibilityId === 1);
 
-  // 当前 libx265 实验链路不能重编码 Profile 5 / compatibility 0 这种无兼容基础层源片。
-  return profile != null && compatibilityId != null && profile !== 5 && compatibilityId !== 0;
+  // 当前闭环只处理 BL + RPU 单层源，避免误把 Profile 7 的 EL/FEL 当作可完整保留。
+  return (
+    supportedProfile &&
+    sourceVideo?.dolbyVisionRpuPresent === true &&
+    sourceVideo.dolbyVisionBlPresent === true &&
+    sourceVideo.dolbyVisionElPresent !== true &&
+    sourceVideo.variableFrameRate !== true
+  );
 }
 
 export function TaskConfigPage({
@@ -205,16 +210,12 @@ export function TaskConfigPage({
   const hasSource = sourceFilePath.trim().length > 0;
   const dolbyVisionCopy = buildDolbyVisionPreserveCopy({
     isDolbyVisionSource,
-    formCodec,
-    formEncoder,
     sourceVideo: videoMetadata?.video,
     ffmpegProbe,
     t,
   });
   const canPreserveDolbyVision =
     isDolbyVisionSource &&
-    formCodec === "h265" &&
-    formEncoder === "libx265" &&
     Boolean(ffmpegProbe?.dolbyVision.supportsPreservePipeline) &&
     isDolbyVisionPreserveSourceSupported(videoMetadata?.video);
 
@@ -223,6 +224,38 @@ export function TaskConfigPage({
       setPreserveDolbyVisionMetadata(false);
     }
   }, [canPreserveDolbyVision, preserveDolbyVisionMetadata, setPreserveDolbyVisionMetadata]);
+
+  /**
+   * 开启 RPU 保留时一次性切换到经过验证的参数组合。
+   * @param checked 是否保留 Dolby Vision 动态元数据
+   */
+  function toggleDolbyVisionPreservation(checked: boolean) {
+    if (!checked) {
+      setPreserveDolbyVisionMetadata(false);
+      return;
+    }
+
+    const profile = videoMetadata?.video?.dolbyVisionProfile;
+    const durationSec = videoMetadata?.durationSec ?? 0;
+
+    // 逐帧 RPU 必须保持帧数与顺序，因此同时锁定完整时长、尺寸和帧率。
+    setFormCodec("h265");
+    setFormEncoder("libx265");
+    setFormMode("CRF");
+    setFormTwoPass(false);
+    setFormPreset("medium");
+    setKeepOriginalResolution(true);
+    setKeepOriginalFps(true);
+    setFormPixelFormat("yuv420p10le");
+    setContainerFormat("mkv");
+    setContainerFaststart(false);
+    setClipStartSec(0);
+    setClipEndSec(durationSec);
+    setFormColorPrimaries("bt2020");
+    setFormColorTrc("smpte2084");
+    setFormColorspace(profile === 5 ? "ipt-c2" : "bt2020nc");
+    setPreserveDolbyVisionMetadata(true);
+  }
 
   const presetHint =
     formPreset === ""
@@ -312,6 +345,7 @@ export function TaskConfigPage({
               unavailable: t("trim.unavailable"),
             }}
             compact
+            disabled={preserveDolbyVisionMetadata}
           />
         </div>
 
@@ -324,7 +358,7 @@ export function TaskConfigPage({
             <div className="grid gap-3 md:grid-cols-2">
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Codec</span>
-                <Select value={formCodec} onValueChange={setFormCodec}>
+                <Select value={formCodec} onValueChange={setFormCodec} disabled={preserveDolbyVisionMetadata}>
                   <SelectTrigger>
                     <SelectValue placeholder={t("config.selectCodec")} />
                   </SelectTrigger>
@@ -339,7 +373,7 @@ export function TaskConfigPage({
 
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Encoder</span>
-                <Select value={formEncoder} onValueChange={setFormEncoder}>
+                <Select value={formEncoder} onValueChange={setFormEncoder} disabled={preserveDolbyVisionMetadata}>
                   <SelectTrigger>
                     <SelectValue placeholder={t("config.selectEncoder")} />
                   </SelectTrigger>
@@ -363,6 +397,7 @@ export function TaskConfigPage({
                     setFormMode(value as "CRF" | "CBR" | "ABR");
                     setStep("config");
                   }}
+                  disabled={preserveDolbyVisionMetadata}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder={t("config.selectRateMode")} />
@@ -380,7 +415,7 @@ export function TaskConfigPage({
                 <Select
                   value={formTwoPass ? "yes" : "no"}
                   onValueChange={(value) => setFormTwoPass(value === "yes")}
-                  disabled={!selectedEncoderCapability?.supportsTwoPass}
+                  disabled={preserveDolbyVisionMetadata || !selectedEncoderCapability?.supportsTwoPass}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder={t("config.selectTwoPass")} />
@@ -593,7 +628,11 @@ export function TaskConfigPage({
                       {t("config.keepResolutionHint")}
                     </p>
                   </div>
-                  <Switch checked={keepOriginalResolution} onCheckedChange={setKeepOriginalResolution} />
+                  <Switch
+                    checked={keepOriginalResolution}
+                    onCheckedChange={setKeepOriginalResolution}
+                    disabled={preserveDolbyVisionMetadata}
+                  />
                 </div>
                 <div className="mt-3 text-xs text-muted-foreground">
                   {t("config.sourceSize", { width: videoMetadata?.video?.width ?? "-", height: videoMetadata?.video?.height ?? "-" })}
@@ -639,7 +678,7 @@ export function TaskConfigPage({
                   </div>
                   <Switch
                     checked={preserveDolbyVisionMetadata}
-                    onCheckedChange={setPreserveDolbyVisionMetadata}
+                    onCheckedChange={toggleDolbyVisionPreservation}
                     disabled={!canPreserveDolbyVision}
                   />
                 </div>
@@ -647,6 +686,8 @@ export function TaskConfigPage({
                   <span>{t("config.sourceHdr", { value: videoMetadata?.video?.hdrType ?? "-" })}</span>
                   <span>{t("config.recommendedEncoder", { value: ffmpegProbe?.dolbyVision.recommendedEncoder ?? "-" })}</span>
                   <span>dovi_rpu: {ffmpegProbe?.dolbyVision.supportsDoviRpu ? "yes" : "no"}</span>
+                  <span>dovi_tool: {ffmpegProbe?.dolbyVision.doviToolFound ? "yes" : "no"}</span>
+                  <span>x265 CLI: {ffmpegProbe?.dolbyVision.x265CliFound ? "yes" : "no"}</span>
                   <span>
                     libx265 DV encode: {ffmpegProbe?.dolbyVision.supportsDolbyVisionEncode ? "yes" : "no"}
                   </span>
@@ -657,7 +698,11 @@ export function TaskConfigPage({
             <div className="grid gap-3 md:grid-cols-4">
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">{t("config.outputContainer")}</span>
-                <Select value={containerFormat} onValueChange={(value) => setContainerFormat(value as "mp4" | "mkv" | "mov")}>
+                <Select
+                  value={containerFormat}
+                  onValueChange={(value) => setContainerFormat(value as "mp4" | "mkv" | "mov")}
+                  disabled={preserveDolbyVisionMetadata}
+                >
                   <SelectTrigger>
                     <SelectValue placeholder={t("config.selectOutputContainer")} />
                   </SelectTrigger>
@@ -677,7 +722,7 @@ export function TaskConfigPage({
                   <Switch
                     checked={containerFaststart}
                     onCheckedChange={setContainerFaststart}
-                    disabled={containerFormat !== "mp4"}
+                    disabled={preserveDolbyVisionMetadata || containerFormat !== "mp4"}
                   />
                 </div>
               </div>
@@ -689,7 +734,11 @@ export function TaskConfigPage({
                       {t("config.keepFpsHint")}
                     </p>
                   </div>
-                  <Switch checked={keepOriginalFps} onCheckedChange={setKeepOriginalFps} />
+                  <Switch
+                    checked={keepOriginalFps}
+                    onCheckedChange={setKeepOriginalFps}
+                    disabled={preserveDolbyVisionMetadata}
+                  />
                 </div>
                 <div className="mt-3 text-xs text-muted-foreground">
                   {t("config.sourceFps", { value: videoMetadata?.video?.fps?.toFixed(3).replace(/\.?0+$/, "") ?? "-" })}
@@ -709,7 +758,7 @@ export function TaskConfigPage({
               </label>
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Pixel Format</span>
-                <Select value={formPixelFormat} onValueChange={setFormPixelFormat}>
+                <Select value={formPixelFormat} onValueChange={setFormPixelFormat} disabled={preserveDolbyVisionMetadata}>
                   <SelectTrigger>
                     <SelectValue placeholder={t("config.selectPixelFormat")} />
                   </SelectTrigger>
@@ -723,7 +772,7 @@ export function TaskConfigPage({
               </label>
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Primaries</span>
-                <Select value={formColorPrimaries} onValueChange={setFormColorPrimaries}>
+                <Select value={formColorPrimaries} onValueChange={setFormColorPrimaries} disabled={preserveDolbyVisionMetadata}>
                   <SelectTrigger>
                     <SelectValue placeholder={t("config.selectPrimaries")} />
                   </SelectTrigger>
@@ -737,7 +786,7 @@ export function TaskConfigPage({
               <label className="space-y-1 text-sm">
                 <span className="text-muted-foreground">Transfer / Matrix</span>
                 <div className="grid gap-3">
-                  <Select value={formColorTrc} onValueChange={setFormColorTrc}>
+                  <Select value={formColorTrc} onValueChange={setFormColorTrc} disabled={preserveDolbyVisionMetadata}>
                     <SelectTrigger>
                       <SelectValue placeholder={t("config.selectTrc")} />
                     </SelectTrigger>
@@ -747,13 +796,14 @@ export function TaskConfigPage({
                       <SelectItem value="arib-std-b67">HLG</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Select value={formColorspace} onValueChange={setFormColorspace}>
+                  <Select value={formColorspace} onValueChange={setFormColorspace} disabled={preserveDolbyVisionMetadata}>
                     <SelectTrigger>
                       <SelectValue placeholder={t("config.selectColorspace")} />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="bt709">bt709</SelectItem>
                       <SelectItem value="bt2020nc">bt2020nc</SelectItem>
+                      <SelectItem value="ipt-c2">ipt-pq-c2</SelectItem>
                       <SelectItem value="smpte170m">smpte170m</SelectItem>
                     </SelectContent>
                   </Select>
@@ -802,6 +852,7 @@ function TrimRangeControl({
   onChange,
   labels,
   compact = false,
+  disabled = false,
 }: {
   durationSec: number;
   fps?: number;
@@ -818,6 +869,7 @@ function TrimRangeControl({
     unavailable: string;
   };
   compact?: boolean;
+  disabled?: boolean;
 }) {
   const frameStepSec = fps && fps > 0 ? 1 / fps : 1 / 30;
   const hasDuration = durationSec > 0;
@@ -879,6 +931,7 @@ function TrimRangeControl({
               step={frameStepSec}
               value={[safeStartSec, safeEndSec]}
               onValueChange={updateRange}
+              disabled={disabled}
             />
             <div className="grid min-w-0 gap-3">
               <label className="grid min-w-0 gap-1 text-sm">
@@ -891,6 +944,7 @@ function TrimRangeControl({
                   value={startText}
                   onChange={(event) => setStartText(event.target.value)}
                   onBlur={() => commitTextValue("start")}
+                  disabled={disabled}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
                       commitTextValue("start");
@@ -908,6 +962,7 @@ function TrimRangeControl({
                   value={endText}
                   onChange={(event) => setEndText(event.target.value)}
                   onBlur={() => commitTextValue("end")}
+                  disabled={disabled}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
                       commitTextValue("end");

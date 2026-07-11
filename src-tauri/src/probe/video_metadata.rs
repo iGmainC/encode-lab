@@ -32,6 +32,9 @@ pub struct VideoStreamMetadata {
     pub height: Option<u32>,
     pub pix_fmt: Option<String>,
     pub fps: Option<f64>,
+    pub fps_fraction: Option<String>,
+    pub variable_frame_rate: bool,
+    pub frame_count: Option<u64>,
     pub bit_rate_kbps: Option<u64>,
     pub size_bytes: Option<u64>,
     pub color_primaries: Option<String>,
@@ -41,11 +44,16 @@ pub struct VideoStreamMetadata {
     pub bit_depth: Option<u8>,
     pub hdr_type: Option<HdrType>,
     pub dolby_vision_profile: Option<u8>,
+    pub dolby_vision_level: Option<u8>,
     pub dolby_vision_compatibility_id: Option<u8>,
+    pub dolby_vision_rpu_present: Option<bool>,
+    pub dolby_vision_el_present: Option<bool>,
+    pub dolby_vision_bl_present: Option<bool>,
     pub max_content_light_level: Option<u32>,
     pub max_frame_average_light_level: Option<u32>,
     pub mastering_display_max_luminance: Option<f64>,
     pub mastering_display_min_luminance: Option<f64>,
+    pub mastering_display: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +101,7 @@ struct FfprobeStream {
     pix_fmt: Option<String>,
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
+    nb_frames: Option<String>,
     bit_rate: Option<String>,
     bits_per_raw_sample: Option<String>,
     color_primaries: Option<String>,
@@ -252,6 +261,7 @@ fn convert_probe_output(input_file: &str, parsed: FfprobeOutput) -> VideoMetadat
 }
 
 fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
+    let fps_fraction = preferred_frame_rate(stream);
     let fps = stream
         .avg_frame_rate
         .as_deref()
@@ -271,11 +281,12 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         });
 
     let hdr_type = detect_hdr_type(stream);
-    let (dolby_vision_profile, dolby_vision_compatibility_id) = extract_dolby_vision_config(stream);
+    let dolby_vision = extract_dolby_vision_config(stream);
     let (max_content_light_level, max_frame_average_light_level) =
         extract_content_light_level(stream);
     let (mastering_display_max_luminance, mastering_display_min_luminance) =
         extract_mastering_luminance(stream);
+    let mastering_display = extract_x265_mastering_display(stream);
 
     VideoStreamMetadata {
         codec_name: stream.codec_name.clone(),
@@ -285,6 +296,9 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         height: stream.height,
         pix_fmt: stream.pix_fmt.clone(),
         fps,
+        fps_fraction,
+        variable_frame_rate: is_variable_frame_rate(stream),
+        frame_count: stream.nb_frames.as_deref().and_then(parse_u64),
         bit_rate_kbps: stream
             .bit_rate
             .as_deref()
@@ -297,13 +311,45 @@ fn map_video_stream(stream: &FfprobeStream) -> VideoStreamMetadata {
         color_range: stream.color_range.clone(),
         bit_depth,
         hdr_type: Some(hdr_type),
-        dolby_vision_profile,
-        dolby_vision_compatibility_id,
+        dolby_vision_profile: dolby_vision.profile,
+        dolby_vision_level: dolby_vision.level,
+        dolby_vision_compatibility_id: dolby_vision.compatibility_id,
+        dolby_vision_rpu_present: dolby_vision.rpu_present,
+        dolby_vision_el_present: dolby_vision.el_present,
+        dolby_vision_bl_present: dolby_vision.bl_present,
         max_content_light_level,
         max_frame_average_light_level,
         mastering_display_max_luminance,
         mastering_display_min_luminance,
+        mastering_display,
     }
+}
+
+/** 选择 FFmpeg/Y4M 可复用的精确帧率字符串。 */
+fn preferred_frame_rate(stream: &FfprobeStream) -> Option<String> {
+    stream
+        .avg_frame_rate
+        .as_deref()
+        .filter(|value| parse_fraction(value).is_some_and(|fps| fps > 0.0))
+        .or_else(|| {
+            stream
+                .r_frame_rate
+                .as_deref()
+                .filter(|value| parse_fraction(value).is_some_and(|fps| fps > 0.0))
+        })
+        .map(ToString::to_string)
+}
+
+/** 使用平均帧率与基础帧率的差异识别明显 VFR 源片。 */
+fn is_variable_frame_rate(stream: &FfprobeStream) -> bool {
+    let Some(avg) = stream.avg_frame_rate.as_deref().and_then(parse_fraction) else {
+        return false;
+    };
+    let Some(raw) = stream.r_frame_rate.as_deref().and_then(parse_fraction) else {
+        return false;
+    };
+
+    (avg - raw).abs() > 0.001
 }
 
 /** 从 ffprobe stream tags 中读取数字字段。 */
@@ -458,10 +504,21 @@ fn contains_dolby_vision_hint(stream: &FfprobeStream) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
-/// 从 ffprobe side data 中读取 Dolby Vision profile 与兼容层标识。
-fn extract_dolby_vision_config(stream: &FfprobeStream) -> (Option<u8>, Option<u8>) {
+/// Dolby Vision configuration record 中与执行计划相关的字段。
+#[derive(Debug, Default)]
+struct DolbyVisionConfig {
+    profile: Option<u8>,
+    level: Option<u8>,
+    compatibility_id: Option<u8>,
+    rpu_present: Option<bool>,
+    el_present: Option<bool>,
+    bl_present: Option<bool>,
+}
+
+/// 从 ffprobe side data 中读取 Dolby Vision profile、层和 RPU 标识。
+fn extract_dolby_vision_config(stream: &FfprobeStream) -> DolbyVisionConfig {
     let Some(side_data_list) = &stream.side_data_list else {
-        return (None, None);
+        return DolbyVisionConfig::default();
     };
 
     for side_data in side_data_list {
@@ -476,13 +533,17 @@ fn extract_dolby_vision_config(stream: &FfprobeStream) -> (Option<u8>, Option<u8
         }
 
         // ffprobe 的 DOVI 字段用于判断当前 libx265 保留链路是否适配源片。
-        return (
-            read_u8_side_data(side_data, "dv_profile"),
-            read_u8_side_data(side_data, "dv_bl_signal_compatibility_id"),
-        );
+        return DolbyVisionConfig {
+            profile: read_u8_side_data(side_data, "dv_profile"),
+            level: read_u8_side_data(side_data, "dv_level"),
+            compatibility_id: read_u8_side_data(side_data, "dv_bl_signal_compatibility_id"),
+            rpu_present: read_bool_side_data(side_data, "rpu_present_flag"),
+            el_present: read_bool_side_data(side_data, "el_present_flag"),
+            bl_present: read_bool_side_data(side_data, "bl_present_flag"),
+        };
     }
 
-    (None, None)
+    DolbyVisionConfig::default()
 }
 
 fn extract_content_light_level(stream: &FfprobeStream) -> (Option<u32>, Option<u32>) {
@@ -541,6 +602,35 @@ fn extract_mastering_luminance(stream: &FfprobeStream) -> (Option<f64>, Option<f
     (max_luminance, min_luminance)
 }
 
+/** 将 ffprobe mastering display rationals 转换为 x265 CLI 的 ST.2086 表达式。 */
+fn extract_x265_mastering_display(stream: &FfprobeStream) -> Option<String> {
+    let side_data = stream.side_data_list.as_ref()?.iter().find(|value| {
+        value
+            .get("side_data_type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.to_lowercase().contains("mastering display"))
+    })?;
+
+    let coordinate =
+        |key| read_f64_side_data(side_data, key).map(|value| (value * 50_000.0).round() as u64);
+    let luminance =
+        |key| read_f64_side_data(side_data, key).map(|value| (value * 10_000.0).round() as u64);
+
+    Some(format!(
+        "G({},{})B({},{})R({},{})WP({},{})L({},{})",
+        coordinate("green_x")?,
+        coordinate("green_y")?,
+        coordinate("blue_x")?,
+        coordinate("blue_y")?,
+        coordinate("red_x")?,
+        coordinate("red_y")?,
+        coordinate("white_point_x")?,
+        coordinate("white_point_y")?,
+        luminance("max_luminance")?,
+        luminance("min_luminance")?,
+    ))
+}
+
 fn read_u32_side_data(side_data: &Value, key: &str) -> Option<u32> {
     let value = side_data.get(key)?;
     value
@@ -551,6 +641,19 @@ fn read_u32_side_data(side_data: &Value, key: &str) -> Option<u32> {
 
 fn read_u8_side_data(side_data: &Value, key: &str) -> Option<u8> {
     read_u32_side_data(side_data, key).and_then(|value| u8::try_from(value).ok())
+}
+
+fn read_bool_side_data(side_data: &Value, key: &str) -> Option<bool> {
+    let value = side_data.get(key)?;
+    value
+        .as_bool()
+        .or_else(|| value.as_u64().map(|number| number != 0))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.parse::<u8>().ok())
+                .map(|number| number != 0)
+        })
 }
 
 fn read_f64_side_data(side_data: &Value, key: &str) -> Option<f64> {
@@ -705,6 +808,7 @@ mod tests {
             pix_fmt: None,
             avg_frame_rate: None,
             r_frame_rate: None,
+            nb_frames: None,
             bit_rate: None,
             bits_per_raw_sample: None,
             color_primaries: Some("bt2020".to_string()),
@@ -740,6 +844,7 @@ mod tests {
             pix_fmt: Some("yuv420p".to_string()),
             avg_frame_rate: None,
             r_frame_rate: None,
+            nb_frames: None,
             bit_rate: None,
             bits_per_raw_sample: Some("8".to_string()),
             color_primaries: None,
@@ -769,6 +874,7 @@ mod tests {
             pix_fmt: None,
             avg_frame_rate: None,
             r_frame_rate: None,
+            nb_frames: None,
             bit_rate: None,
             bits_per_raw_sample: None,
             color_primaries: None,
@@ -795,6 +901,9 @@ mod tests {
             height: Some(2160),
             pix_fmt: Some("yuv420p10le".to_string()),
             fps: Some(23.976),
+            fps_fraction: Some("24000/1001".to_string()),
+            variable_frame_rate: false,
+            frame_count: Some(240),
             bit_rate_kbps: Some(9000),
             size_bytes: Some(123_456),
             color_primaries: Some("bt2020".to_string()),
@@ -804,11 +913,16 @@ mod tests {
             bit_depth: Some(10),
             hdr_type: Some(HdrType::Hdr10),
             dolby_vision_profile: None,
+            dolby_vision_level: None,
             dolby_vision_compatibility_id: None,
+            dolby_vision_rpu_present: None,
+            dolby_vision_el_present: None,
+            dolby_vision_bl_present: None,
             max_content_light_level: Some(1000),
             max_frame_average_light_level: Some(400),
             mastering_display_max_luminance: Some(1000.0),
             mastering_display_min_luminance: Some(0.005),
+            mastering_display: None,
         };
 
         let tags = build_tags(&Some("mov,mp4,m4a,3gp,3g2,mj2".to_string()), Some(&video));
@@ -832,6 +946,7 @@ mod tests {
             pix_fmt: Some("yuv420p10le".to_string()),
             avg_frame_rate: None,
             r_frame_rate: None,
+            nb_frames: None,
             bit_rate: None,
             bits_per_raw_sample: None,
             color_primaries: None,
@@ -844,7 +959,11 @@ mod tests {
             side_data_list: Some(vec![serde_json::json!({
                 "side_data_type": "DOVI configuration record",
                 "dv_profile": 5,
-                "dv_bl_signal_compatibility_id": 0
+                "dv_level": 6,
+                "dv_bl_signal_compatibility_id": 0,
+                "rpu_present_flag": 1,
+                "el_present_flag": 0,
+                "bl_present_flag": 1
             })]),
             tags: None,
         };
@@ -852,7 +971,11 @@ mod tests {
         let video = map_video_stream(&stream);
 
         assert_eq!(video.dolby_vision_profile, Some(5));
+        assert_eq!(video.dolby_vision_level, Some(6));
         assert_eq!(video.dolby_vision_compatibility_id, Some(0));
+        assert_eq!(video.dolby_vision_rpu_present, Some(true));
+        assert_eq!(video.dolby_vision_el_present, Some(false));
+        assert_eq!(video.dolby_vision_bl_present, Some(true));
     }
 
     #[test]
@@ -868,6 +991,7 @@ mod tests {
             pix_fmt: Some("yuv420p10le".to_string()),
             avg_frame_rate: None,
             r_frame_rate: None,
+            nb_frames: None,
             bit_rate: None,
             bits_per_raw_sample: Some("10".to_string()),
             color_primaries: Some("bt2020".to_string()),

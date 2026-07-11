@@ -8,7 +8,7 @@ mod storage;
 mod transcode;
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -30,6 +30,8 @@ pub struct AppState {
     pub(crate) storage: storage::AppStorage,
     pub(crate) preview_manager: PreviewManager,
     pub(crate) transcode_manager: TranscodeManager,
+    /** 应用运行期目录；正式转码的多阶段临时产物按 job id 隔离。 */
+    pub(crate) runtime_dir: PathBuf,
     pub(crate) allow_exit: Arc<AtomicBool>,
     pub(crate) open_jobs_on_next_activate: Arc<AtomicBool>,
 }
@@ -43,14 +45,15 @@ fn build_state<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<AppState, Stora
 
     Ok(AppState {
         storage: storage::AppStorage::new(app_data_dir),
-        preview_manager: PreviewManager::new(runtime_dir),
+        preview_manager: PreviewManager::new(runtime_dir.clone()),
         transcode_manager: TranscodeManager::new(),
+        runtime_dir,
         allow_exit: Arc::new(AtomicBool::new(false)),
         open_jobs_on_next_activate: Arc::new(AtomicBool::new(false)),
     })
 }
 
-fn build_runtime_dir(app_data_dir: &PathBuf) -> PathBuf {
+fn build_runtime_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("runtime")
 }
 
