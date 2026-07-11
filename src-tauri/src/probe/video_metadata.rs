@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap},
+    io::{BufRead, BufReader, Read},
     path::Path,
+    process::Stdio,
+    thread,
 };
 
 use crate::commands::error::CommandError;
@@ -182,6 +185,134 @@ pub fn read_video_track_size_bytes(input_file: &str) -> Result<u64, CommandError
     }
 
     Ok(sum_packet_sizes(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/**
+ * 逐 packet 校验视频展示时间戳是否为严格 CFR。
+ * @param input_file 输入视频路径
+ * @param fps_fraction ffprobe 返回的精确帧率分数
+ * @returns 实际视频 packet 数；时间戳未知或间隔变化时返回错误
+ */
+pub(crate) fn read_constant_frame_count(
+    input_file: &str,
+    fps_fraction: &str,
+) -> Result<u64, CommandError> {
+    let fps = parse_fraction(fps_fraction)
+        .filter(|value| *value > 0.0)
+        .ok_or_else(|| {
+            CommandError::new("invalid_frame_rate", "video frame rate is not readable")
+        })?;
+    let mut child = ffprobe_command()
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time",
+            "-of",
+            "csv=p=0",
+            input_file,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| CommandError::new("probe_failed", error.to_string()))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(CommandError::new(
+            "probe_failed",
+            "ffprobe packet output is unavailable",
+        ));
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(CommandError::new(
+            "probe_failed",
+            "ffprobe error output is unavailable",
+        ));
+    };
+    let stderr_reader = thread::spawn(move || {
+        let mut text = String::new();
+        stderr.read_to_string(&mut text).map(|_| text)
+    });
+    let timestamps_result = (|| -> Result<Vec<f64>, CommandError> {
+        let mut timestamps = Vec::new();
+        for line in BufReader::new(stdout).lines() {
+            let line =
+                line.map_err(|error| CommandError::new("probe_failed", error.to_string()))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value = line
+                .split(',')
+                .next()
+                .and_then(parse_f64)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    CommandError::new(
+                        "variable_frame_rate",
+                        "video packet has no readable presentation timestamp",
+                    )
+                })?;
+            timestamps.push(value);
+        }
+        Ok(timestamps)
+    })();
+
+    // 解析一旦失败就终止 ffprobe；stderr 仍由独立线程持续排空，避免损坏素材填满 pipe。
+    if timestamps_result.is_err() {
+        let _ = child.kill();
+    }
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_reader.join();
+            return Err(CommandError::new("probe_failed", error.to_string()));
+        }
+    };
+    let stderr_text = stderr_reader
+        .join()
+        .map_err(|_| CommandError::new("probe_failed", "ffprobe stderr reader panicked"))?
+        .map_err(|error| CommandError::new("probe_failed", error.to_string()))?;
+    let mut timestamps = timestamps_result?;
+    if !status.success() {
+        return Err(CommandError::new("probe_failed", stderr_text));
+    }
+
+    validate_constant_timestamps(&mut timestamps, 1.0 / fps)
+        .map_err(|message| CommandError::new("variable_frame_rate", message))
+}
+
+/** 检查排序后的 PTS 是否始终落在理想 CFR 时间轴的相位容差内。 */
+fn validate_constant_timestamps(
+    timestamps: &mut [f64],
+    expected_interval: f64,
+) -> Result<u64, String> {
+    if timestamps.len() < 2 || !expected_interval.is_finite() || expected_interval <= 0.0 {
+        return Err("video packet timestamps are insufficient for CFR verification".to_string());
+    }
+
+    timestamps.sort_by(f64::total_cmp);
+    let first_timestamp = timestamps[0];
+    // Matroska 常见 1ms timebase 会把 23.976fps 量化为 41/42ms 交替；相位误差仍应始终有界。
+    let tolerance = (expected_interval * 0.001).max(0.001_1);
+    for (index, timestamp) in timestamps.iter().enumerate() {
+        let expected_timestamp = first_timestamp + index as f64 * expected_interval;
+        let phase_error = timestamp - expected_timestamp;
+        if !timestamp.is_finite() || phase_error.abs() > tolerance {
+            return Err(format!(
+                "video packet timestamps are variable at frame {index}: expected={expected_timestamp:.9}s, actual={timestamp:.9}s"
+            ));
+        }
+    }
+
+    u64::try_from(timestamps.len())
+        .map_err(|_| "video packet count exceeds supported range".to_string())
 }
 
 fn ffprobe_exists() -> bool {
@@ -786,6 +917,26 @@ mod tests {
         );
         assert_eq!(parse_fraction("25/1"), Some(25.0));
         assert_eq!(parse_fraction("0/0"), None);
+    }
+
+    #[test]
+    fn constant_timestamp_validation_should_allow_timebase_rounding() {
+        // Matroska 的 1ms timebase 会把理想 23.976fps PTS 四舍五入到这些值。
+        let mut timestamps = vec![0.0, 0.042, 0.083, 0.125];
+        let count = validate_constant_timestamps(&mut timestamps, 1001.0 / 24_000.0)
+            .expect("constant timing");
+
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn constant_timestamp_validation_should_reject_hidden_vfr() {
+        // 汇总帧率可以仍是 24000/1001，但实际展示间隔已经交替变化。
+        let mut timestamps = vec![0.0, 0.061, 0.083, 0.144];
+        let error = validate_constant_timestamps(&mut timestamps, 1001.0 / 24_000.0)
+            .expect_err("must reject VFR timestamps");
+
+        assert!(error.contains("variable"));
     }
 
     #[test]

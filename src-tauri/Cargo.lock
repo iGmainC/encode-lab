@@ -821,8 +821,10 @@ version = "0.0.3-beta"
 dependencies = [
  "chrono",
  "notify-rust",
+ "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

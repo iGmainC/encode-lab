@@ -124,10 +124,16 @@ function isDolbyVisionPreserveSourceSupported(sourceVideo?: VideoMetadataResult[
   // 当前闭环只处理 BL + RPU 单层源，避免误把 Profile 7 的 EL/FEL 当作可完整保留。
   return (
     supportedProfile &&
+    sourceVideo?.codecName?.toLowerCase() === "hevc" &&
+    (sourceVideo.bitDepth ?? 0) >= 10 &&
+    (sourceVideo.width ?? 0) > 0 &&
+    (sourceVideo.height ?? 0) > 0 &&
+    (sourceVideo.fps ?? 0) > 0 &&
+    Boolean(sourceVideo.fpsFraction) &&
     sourceVideo?.dolbyVisionRpuPresent === true &&
     sourceVideo.dolbyVisionBlPresent === true &&
     sourceVideo.dolbyVisionElPresent !== true &&
-    sourceVideo.variableFrameRate !== true
+    sourceVideo.variableFrameRate === false
   );
 }
 
@@ -225,25 +231,19 @@ export function TaskConfigPage({
     }
   }, [canPreserveDolbyVision, preserveDolbyVisionMetadata, setPreserveDolbyVisionMetadata]);
 
-  /**
-   * 开启 RPU 保留时一次性切换到经过验证的参数组合。
-   * @param checked 是否保留 Dolby Vision 动态元数据
-   */
-  function toggleDolbyVisionPreservation(checked: boolean) {
-    if (!checked) {
-      setPreserveDolbyVisionMetadata(false);
+  useEffect(() => {
+    if (!canPreserveDolbyVision || !preserveDolbyVisionMetadata) {
       return;
     }
 
-    const profile = videoMetadata?.video?.dolbyVisionProfile;
     const durationSec = videoMetadata?.durationSec ?? 0;
+    const profile = videoMetadata?.video?.dolbyVisionProfile;
 
-    // 逐帧 RPU 必须保持帧数与顺序，因此同时锁定完整时长、尺寸和帧率。
+    // 模板恢复和更换源文件也必须持续满足后端约束，不能只依赖开关点击时的一次赋值。
     setFormCodec("h265");
     setFormEncoder("libx265");
     setFormMode("CRF");
     setFormTwoPass(false);
-    setFormPreset("medium");
     setKeepOriginalResolution(true);
     setKeepOriginalFps(true);
     setFormPixelFormat("yuv420p10le");
@@ -254,6 +254,53 @@ export function TaskConfigPage({
     setFormColorPrimaries("bt2020");
     setFormColorTrc("smpte2084");
     setFormColorspace(profile === 5 ? "ipt-c2" : "bt2020nc");
+  }, [
+    canPreserveDolbyVision,
+    clipEndSec,
+    clipStartSec,
+    containerFaststart,
+    containerFormat,
+    formCodec,
+    formColorPrimaries,
+    formColorTrc,
+    formColorspace,
+    formEncoder,
+    formMode,
+    formPixelFormat,
+    formTwoPass,
+    keepOriginalFps,
+    keepOriginalResolution,
+    preserveDolbyVisionMetadata,
+    setClipEndSec,
+    setClipStartSec,
+    setContainerFaststart,
+    setContainerFormat,
+    setFormCodec,
+    setFormColorPrimaries,
+    setFormColorTrc,
+    setFormColorspace,
+    setFormEncoder,
+    setFormMode,
+    setFormPixelFormat,
+    setFormTwoPass,
+    setKeepOriginalFps,
+    setKeepOriginalResolution,
+    videoMetadata?.durationSec,
+    videoMetadata?.video?.dolbyVisionProfile,
+  ]);
+
+  /**
+   * 开启 RPU 保留并选择默认质量档；硬约束由上方 effect 持续归一化。
+   * @param checked 是否保留 Dolby Vision 动态元数据
+   */
+  function toggleDolbyVisionPreservation(checked: boolean) {
+    if (!checked) {
+      setPreserveDolbyVisionMetadata(false);
+      return;
+    }
+
+    // medium 是首次开启时的平衡默认值，之后仍允许用户选择其他 libx265 preset。
+    setFormPreset("medium");
     setPreserveDolbyVisionMetadata(true);
   }
 

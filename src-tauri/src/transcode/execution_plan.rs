@@ -6,9 +6,11 @@ use crate::{
         task::{AudioMode, ContainerFormat, VideoBitrateMode, VideoCodecFormat, VideoEncoder},
         TaskConfigPayload,
     },
-    probe::video_metadata::{read_video_metadata, HdrType, VideoStreamMetadata},
+    probe::video_metadata::{
+        read_constant_frame_count, read_video_metadata, HdrType, VideoStreamMetadata,
+    },
     storage::errors::{StorageError, StorageResult},
-    transcode::command_builder::build_ffmpeg_commands,
+    transcode::command_builder::{build_ffmpeg_commands, build_passlog_path},
 };
 
 /// 外部命令类型；执行器根据类型选择 bundled runtime 中的二进制。
@@ -54,6 +56,7 @@ pub struct DolbyVisionVerification {
     pub expected_width: u32,
     pub expected_height: u32,
     pub expected_fps: f64,
+    pub expected_fps_fraction: String,
     pub expected_frame_count: Option<u64>,
 }
 
@@ -132,8 +135,10 @@ pub fn build_transcode_plan(
         return build_dolby_vision_plan(payload, input_file, output_file, job_id, runtime_dir);
     }
 
-    let ordinary = build_ffmpeg_commands(payload, input_file, output_file)?;
-    let steps = ordinary
+    let partial_output = partial_output_path(output_file, job_id)?;
+    let partial_output_text = partial_output.to_string_lossy().to_string();
+    let ordinary = build_ffmpeg_commands(payload, input_file, &partial_output_text)?;
+    let mut steps = ordinary
         .command_args
         .into_iter()
         .enumerate()
@@ -145,11 +150,24 @@ pub fn build_transcode_plan(
                 reports_media_progress: true,
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+    steps.push(TranscodeStep::FinalizeOutput {
+        source: partial_output.clone(),
+        target: PathBuf::from(output_file),
+    });
+
+    let mut cleanup_paths = vec![partial_output];
+    if payload.video.enable_two_pass {
+        // passlog 会生成若干带后缀的文件，清理器把该路径视为 prefix 处理。
+        cleanup_paths.push(PathBuf::from(build_passlog_path(
+            input_file,
+            &partial_output_text,
+        )));
+    }
 
     Ok(TranscodePlan {
         steps,
-        cleanup_paths: Vec::new(),
+        cleanup_paths,
         workspace: None,
         warnings: ordinary.warnings,
         sanitized_advanced_args: ordinary.sanitized_advanced_args,
@@ -180,6 +198,18 @@ fn build_dolby_vision_plan(
     })?;
     let route = resolve_dolby_vision_route(video)?;
     validate_dolby_vision_source(video)?;
+    let fps_fraction = video.fps_fraction.as_deref().ok_or_else(|| {
+        StorageError::InvalidPayload(
+            "Dolby Vision RPU preservation requires an exact source frame rate".to_string(),
+        )
+    })?;
+    let source_frame_count =
+        read_constant_frame_count(input_file, fps_fraction).map_err(|error| {
+            StorageError::InvalidPayload(format!(
+                "Dolby Vision source timing is not constant: {}",
+                error.message
+            ))
+        })?;
 
     let workspace = runtime_dir.join("transcode").join(job_id);
     let source_hevc = workspace.join("source.hevc");
@@ -257,7 +287,8 @@ fn build_dolby_vision_plan(
                 expected_width: video.width.unwrap_or_default(),
                 expected_height: video.height.unwrap_or_default(),
                 expected_fps: video.fps.unwrap_or_default(),
-                expected_frame_count: video.frame_count,
+                expected_fps_fraction: fps_fraction.to_string(),
+                expected_frame_count: Some(source_frame_count),
             }),
             TranscodeStep::FinalizeOutput {
                 source: partial_output.clone(),
@@ -401,13 +432,6 @@ fn validate_dolby_vision_source(video: &VideoStreamMetadata) -> StorageResult<()
                 .to_string(),
         ));
     }
-    if video.variable_frame_rate {
-        return Err(StorageError::InvalidPayload(
-            "variable-frame-rate Dolby Vision sources are not supported by the current RPU pipeline"
-                .to_string(),
-        ));
-    }
-
     Ok(())
 }
 
@@ -546,7 +570,13 @@ fn partial_output_path(output_file: &str, job_id: &str) -> StorageResult<PathBuf
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| StorageError::InvalidPayload("output file name is invalid".to_string()))?;
-    Ok(parent.join(format!(".{name}.{job_id}.partial.mkv")))
+    let extension = output
+        .extension()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            StorageError::InvalidPayload("output file extension is invalid".to_string())
+        })?;
+    Ok(parent.join(format!(".{name}.{job_id}.partial.{extension}")))
 }
 
 fn shell_join(args: &[String]) -> String {
@@ -570,7 +600,8 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        dolby_vision_encode_args, resolve_dolby_vision_route, validate_dolby_vision_source,
+        build_transcode_plan, dolby_vision_encode_args, resolve_dolby_vision_route,
+        validate_dolby_vision_source, TranscodeStep,
     };
     use crate::{
         models::{
@@ -723,5 +754,29 @@ mod tests {
         assert!(joined.contains("hdr10=1"));
         assert!(joined.contains("max-cll=1000,400"));
         assert!(joined.contains("master-display="));
+    }
+
+    #[test]
+    fn ordinary_plan_should_publish_from_same_container_partial_file() {
+        let mut ordinary = payload();
+        ordinary.video.preserve_dolby_vision_metadata = Some(false);
+        ordinary.container.format = ContainerFormat::Mp4;
+        let plan = build_transcode_plan(
+            &ordinary,
+            "/tmp/input.mkv",
+            "/tmp/output.mp4",
+            "job-1",
+            Path::new("/tmp/runtime"),
+        )
+        .expect("ordinary plan");
+
+        let TranscodeStep::FinalizeOutput { source, target } =
+            plan.steps.last().expect("finalize step")
+        else {
+            panic!("ordinary output must use finalize step");
+        };
+        assert_eq!(source, Path::new("/tmp/.output.mp4.job-1.partial.mp4"));
+        assert_eq!(target, Path::new("/tmp/output.mp4"));
+        assert!(plan.cleanup_paths.contains(source));
     }
 }

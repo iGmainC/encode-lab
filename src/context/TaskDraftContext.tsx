@@ -457,6 +457,7 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
     () => {
       const durationSec = videoMetadata?.durationSec ?? 0;
       const hasClipRange =
+        !preserveDolbyVisionMetadata &&
         durationSec > 0 &&
         clipEndSec > clipStartSec &&
         (clipStartSec > 0 || clipEndSec < durationSec);
@@ -470,41 +471,47 @@ export function TaskDraftProvider({ children }: { children: ReactNode }) {
             }
           : undefined,
         video: {
-        codecFormat: formCodec as TaskDraftSnapshot["video"]["codecFormat"],
-        encoder: formEncoder,
-        bitrateMode: formMode,
-        crf: formMode === "CRF" ? formCrf : undefined,
-        preset: formPreset || undefined,
-        keepOriginalResolution,
-        keepOriginalFps,
-        preserveDolbyVisionMetadata,
-        // 保持原始尺寸时不传 resolution，让后端跳过 scale 参数并保留源尺寸语义。
-        resolution:
-          !keepOriginalResolution && formWidth && formHeight
-            ? {
-                width: Number(formWidth),
-                height: Number(formHeight),
-              }
-            : undefined,
-        // 跟随源视频帧率时不传 fps，让后端跳过 -r 参数并保留源帧率语义。
-        fps: !keepOriginalFps && formFps ? Number(formFps) : undefined,
-        pixelFormat: formPixelFormat || undefined,
-        enableTwoPass: formTwoPass,
-      },
-      audio: {
-        mode: "copy",
-      },
-      container: {
-        format: containerFormat,
-        faststart: containerFormat === "mp4" ? containerFaststart : false,
-      },
-      // DV 路径由后端按 Profile 构造色彩和 VBV 参数，避免普通高级参数污染专用链路。
-      advancedArgs: preserveDolbyVisionMetadata ? undefined : buildAdvancedArgs(),
-      output: {
-        dir: "",
-        fileNamePattern: "{inputName}_{taskName}",
-        overwrite: "autoRename",
-      },
+          codecFormat: preserveDolbyVisionMetadata
+            ? "h265"
+            : (formCodec as TaskDraftSnapshot["video"]["codecFormat"]),
+          encoder: preserveDolbyVisionMetadata ? "libx265" : formEncoder,
+          bitrateMode: preserveDolbyVisionMetadata ? "CRF" : formMode,
+          crf: preserveDolbyVisionMetadata || formMode === "CRF" ? formCrf : undefined,
+          preset: formPreset || undefined,
+          keepOriginalResolution: preserveDolbyVisionMetadata || keepOriginalResolution,
+          keepOriginalFps: preserveDolbyVisionMetadata || keepOriginalFps,
+          preserveDolbyVisionMetadata,
+          // 保持原始尺寸时不传 resolution，让后端跳过 scale 参数并保留源尺寸语义。
+          resolution:
+            !preserveDolbyVisionMetadata && !keepOriginalResolution && formWidth && formHeight
+              ? {
+                  width: Number(formWidth),
+                  height: Number(formHeight),
+                }
+              : undefined,
+          // 跟随源视频帧率时不传 fps，让后端跳过 -r 参数并保留源帧率语义。
+          fps:
+            !preserveDolbyVisionMetadata && !keepOriginalFps && formFps
+              ? Number(formFps)
+              : undefined,
+          pixelFormat: preserveDolbyVisionMetadata ? "yuv420p10le" : formPixelFormat || undefined,
+          enableTwoPass: preserveDolbyVisionMetadata ? false : formTwoPass,
+        },
+        audio: {
+          mode: "copy",
+        },
+        container: {
+          format: preserveDolbyVisionMetadata ? "mkv" : containerFormat,
+          faststart:
+            !preserveDolbyVisionMetadata && containerFormat === "mp4" ? containerFaststart : false,
+        },
+        // DV 路径由后端按 Profile 构造色彩和 VBV 参数，避免普通高级参数污染专用链路。
+        advancedArgs: preserveDolbyVisionMetadata ? undefined : buildAdvancedArgs(),
+        output: {
+          dir: "",
+          fileNamePattern: "{inputName}_{taskName}",
+          overwrite: "autoRename",
+        },
       };
     },
     [

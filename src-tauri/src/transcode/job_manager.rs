@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
-    fs,
-    io::{BufRead, BufReader, Read},
+    fmt, fs,
+    io::{self, BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -10,21 +10,22 @@ use std::{
 };
 
 use chrono::Utc;
+use serde::de::{DeserializeSeed, SeqAccess, Visitor};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::{
     ffmpeg_runtime::{dovi_tool_command, ffmpeg_command},
     mark_open_jobs_on_notification_activate_if_hidden,
     models::JobHistory,
-    probe::video_metadata::{read_video_metadata, read_video_track_size_bytes},
+    probe::video_metadata::{
+        read_constant_frame_count, read_video_metadata, read_video_track_size_bytes,
+    },
     refresh_tray_menu,
     storage::AppStorage,
-    transcode::{
-        command_builder::build_passlog_path,
-        execution_plan::{
-            DolbyVisionVerification, ProcessStep, RuntimeProgram, TranscodePlan, TranscodeStep,
-        },
+    transcode::execution_plan::{
+        DolbyVisionVerification, ProcessStep, RuntimeProgram, TranscodePlan, TranscodeStep,
     },
 };
 
@@ -37,6 +38,10 @@ struct ChildState {
     child: Option<Child>,
     /** 退出流程早于 child 创建时，后续 spawn 后要立即中断。 */
     canceled: bool,
+    /** 执行线程已经认领终态；此后取消请求不能再覆盖完成或失败状态。 */
+    finished: bool,
+    /** 已认领的完整终态快照，供 shutdown 与执行线程竞争时恢复一致状态。 */
+    terminal_job: Option<JobHistory>,
 }
 
 /** 转码任务执行请求。 */
@@ -84,6 +89,8 @@ struct RunningJob {
     job: JobHistory,
     /** 当前正在等待的 FFmpeg child；两段式任务每段执行时会替换。 */
     child: ChildSlot,
+    /** 当前计划明确拥有的 workspace 与 partial 路径。 */
+    cleanup_paths: Vec<PathBuf>,
 }
 
 /** 转码队列内部状态。 */
@@ -175,14 +182,26 @@ impl TranscodeManager {
 
         for mut running in running_jobs {
             // 先终止 FFmpeg child，再回写任务状态，避免退出后留下孤儿进程。
-            {
+            let terminal_job = {
                 let mut guard = running.child.lock().expect("ffmpeg child lock poisoned");
-                guard.canceled = true;
-                if let Some(mut child) = guard.child.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if let Some(job) = guard.terminal_job.clone() {
+                    Some(job)
+                } else {
+                    guard.canceled = true;
+                    if let Some(mut child) = guard.child.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    None
                 }
+            };
+            if let Some(job) = terminal_job {
+                // 终态临界区已经完成时不得再降级为 interrupted。
+                let _ = storage.jobs_history.update(&job);
+                let _ = app.emit("job:updated", &job);
+                continue;
             }
+            cleanup_plan_artifacts(&running.cleanup_paths);
             mark_interrupted(
                 app,
                 storage,
@@ -215,6 +234,7 @@ impl TranscodeManager {
                     CancelTarget::Running {
                         job: running.job.clone(),
                         child: Arc::clone(&running.child),
+                        cleanup_paths: running.cleanup_paths.clone(),
                     }
                 })
             }
@@ -224,22 +244,50 @@ impl TranscodeManager {
             return false;
         };
 
-        match cancel_target {
+        let applied = match cancel_target {
             CancelTarget::Queued(request) => {
                 let mut job = request.job;
-                mark_canceled(&app, &storage, &mut job, "用户取消了排队中的任务。");
+                mark_canceled(
+                    &app,
+                    &storage,
+                    &mut job,
+                    "用户取消了排队中的任务。",
+                    &request.plan.cleanup_paths,
+                );
+                true
             }
-            CancelTarget::Running { mut job, child } => {
-                {
+            CancelTarget::Running {
+                mut job,
+                child,
+                cleanup_paths,
+            } => {
+                const MESSAGE: &str = "用户取消了运行中的任务。";
+                let applied = {
                     let mut guard = child.lock().expect("ffmpeg child lock poisoned");
-                    guard.canceled = true;
-                    if let Some(mut child) = guard.child.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                    if guard.finished {
+                        false
+                    } else {
+                        guard.canceled = true;
+                        if let Some(mut child) = guard.child.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        // 取消命令先认领终态，应用紧接着退出时 shutdown 也会保留 canceled。
+                        set_canceled_job_fields(&mut job, MESSAGE);
+                        guard.finished = true;
+                        guard.terminal_job = Some(job.clone());
+                        true
                     }
+                };
+                if applied {
+                    persist_canceled_job(&app, &storage, &job, &cleanup_paths);
                 }
-                mark_canceled(&app, &storage, &mut job, "用户取消了运行中的任务。");
+                applied
             }
+        };
+
+        if !applied {
+            return false;
         }
 
         self.start_available_jobs(app, storage);
@@ -262,12 +310,15 @@ impl TranscodeManager {
                 let child = Arc::new(Mutex::new(ChildState {
                     child: None,
                     canceled: false,
+                    finished: false,
+                    terminal_job: None,
                 }));
                 inner.running.insert(
                     request.job.id.clone(),
                     RunningJob {
                         job: request.job.clone(),
                         child: Arc::clone(&child),
+                        cleanup_paths: request.plan.cleanup_paths.clone(),
                     },
                 );
                 (request, child)
@@ -390,6 +441,8 @@ enum CancelTarget {
         job: JobHistory,
         /** 正在运行的 FFmpeg child slot。 */
         child: ChildSlot,
+        /** 当前任务明确拥有的临时路径。 */
+        cleanup_paths: Vec<PathBuf>,
     },
 }
 
@@ -404,20 +457,22 @@ fn run_transcode_job<R: Runtime>(
 ) -> JobHistory {
     if let Some(workspace) = &plan.workspace {
         if let Err(error) = fs::create_dir_all(workspace) {
-            job.status = "failed".to_string();
-            job.error = Some(format!("创建任务临时目录失败：{error}"));
-            job.ended_at = Some(Utc::now().to_rfc3339());
+            claim_terminal_outcome(&child, &mut job, |job| {
+                job.status = "failed".to_string();
+                job.error = Some(format!("创建任务临时目录失败：{error}"));
+            });
+            cleanup_plan_artifacts(&plan.cleanup_paths);
             return job;
         }
     }
 
     {
-        let guard = child.lock().expect("ffmpeg child lock poisoned");
+        let mut guard = child.lock().expect("ffmpeg child lock poisoned");
         if guard.canceled {
-            job.status = "canceled".to_string();
-            job.error = Some("用户取消了任务。".to_string());
-            job.ended_at = Some(Utc::now().to_rfc3339());
-            cleanup_plan_artifacts(&job, &plan.cleanup_paths);
+            set_canceled_job_fields(&mut job, "用户取消了任务。");
+            guard.finished = true;
+            guard.terminal_job = Some(job.clone());
+            cleanup_plan_artifacts(&plan.cleanup_paths);
             return job;
         }
 
@@ -429,13 +484,26 @@ fn run_transcode_job<R: Runtime>(
         refresh_tray_menu(&app);
     }
 
-    let step_count = plan.steps.len().max(1);
-    for (step_index, step) in plan.steps.iter().enumerate() {
+    // 最终 rename 是瞬时发布动作，不应把单遍编码进度从 100% 压缩到 50%。
+    let step_count = plan
+        .steps
+        .iter()
+        .filter(|step| !matches!(step, TranscodeStep::FinalizeOutput { .. }))
+        .count()
+        .max(1);
+    for (raw_step_index, step) in plan.steps.iter().enumerate() {
+        let step_index = (raw_step_index + 1).min(step_count);
+        // 校验和原子发布没有子进程可 kill，每个阶段前仍必须响应取消。
+        if claim_pending_cancellation(&child, &mut job) {
+            cleanup_plan_artifacts(&plan.cleanup_paths);
+            break;
+        }
+
         let result = match step {
             TranscodeStep::Process(process) => run_process_step(
                 &app,
                 &job.id,
-                step_index + 1,
+                step_index,
                 step_count,
                 step.label(),
                 duration_sec,
@@ -446,40 +514,57 @@ fn run_transcode_job<R: Runtime>(
                 verify_dolby_vision_output(verification).map_err(StepError::Failed)
             }
             TranscodeStep::FinalizeOutput { source, target } => {
-                finalize_output(source, target).map_err(StepError::Failed)
+                finalize_output_with_terminal_claim(
+                    source,
+                    target,
+                    &child,
+                    &mut job,
+                    &plan.cleanup_paths,
+                )
             }
         };
 
         match result {
-            Ok(()) => emit_stage_completed(&app, &job.id, step_index + 1, step_count, step.label()),
+            Ok(()) => {
+                // 取消可能发生在耗时的 RPU JSON 校验期间，发布下一阶段前再次检查。
+                if claim_pending_cancellation(&child, &mut job) {
+                    cleanup_plan_artifacts(&plan.cleanup_paths);
+                    break;
+                }
+                emit_stage_completed(&app, &job.id, step_index, step_count, step.label());
+            }
             Err(StepError::Interrupted) => {
-                if child_is_canceled(&child) {
-                    job.status = "canceled".to_string();
-                    job.error = Some("用户取消了任务。".to_string());
-                    cleanup_plan_artifacts(&job, &plan.cleanup_paths);
-                } else {
+                claim_terminal_outcome(&child, &mut job, |job| {
                     job.status = "interrupted".to_string();
                     job.error = Some("转码任务已中断。".to_string());
-                }
+                });
+                cleanup_plan_artifacts(&plan.cleanup_paths);
                 break;
             }
             Err(StepError::Failed(message)) => {
-                job.status = "failed".to_string();
-                job.error = Some(message);
-                cleanup_plan_artifacts(&job, &plan.cleanup_paths);
+                claim_terminal_outcome(&child, &mut job, |job| {
+                    job.status = "failed".to_string();
+                    job.error = Some(message);
+                });
+                cleanup_plan_artifacts(&plan.cleanup_paths);
                 break;
             }
         }
     }
 
     if job.status == "running" {
-        job.status = "completed".to_string();
-        job.error = None;
-        attach_size_changes(&mut job);
+        // 与 cancel_job 在同一把锁下认领终态，关闭“取消后又完成”的竞态窗口。
+        claim_terminal_outcome(&child, &mut job, |job| {
+            job.status = "completed".to_string();
+            job.error = None;
+            attach_size_changes(job);
+        });
         cleanup_transient_paths(&plan.cleanup_paths);
     }
 
-    job.ended_at = Some(Utc::now().to_rfc3339());
+    if job.ended_at.is_none() {
+        job.ended_at = Some(Utc::now().to_rfc3339());
+    }
     job
 }
 
@@ -577,6 +662,19 @@ fn verify_dolby_vision_output(verification: &DolbyVisionVerification) -> Result<
         ));
     }
 
+    let output_frame_count =
+        read_constant_frame_count(&output_path, &verification.expected_fps_fraction)
+            .map_err(|error| format!("输出视频不是恒定帧率：{}", error.message))?;
+    if verification
+        .expected_frame_count
+        .is_some_and(|frames| frames != output_frame_count)
+    {
+        return Err(format!(
+            "输出视频帧数与源片不一致：source={}, output={output_frame_count}",
+            verification.expected_frame_count.unwrap_or_default()
+        ));
+    }
+
     let source_rpu_frames = read_rpu_frame_count(&verification.source_rpu_file)?;
     let output_rpu_frames = read_rpu_frame_count(&verification.output_rpu_file)?;
     if source_rpu_frames != output_rpu_frames {
@@ -602,12 +700,10 @@ fn verify_dolby_vision_output(verification: &DolbyVisionVerification) -> Result<
     Ok(())
 }
 
-/** 比较 dovi_tool 导出的逐帧 RPU；忽略重封装时允许变化的 CRC 与扩展块排列。 */
+/** 比较 dovi_tool 导出的逐帧 RPU；流式处理避免长片 JSON 整体进入内存。 */
 fn verify_rpu_semantic_equality(source_file: &Path, output_file: &Path) -> Result<(), String> {
-    let mut source = read_rpu_json(source_file, "源")?;
-    let mut output = read_rpu_json(output_file, "输出")?;
-    canonicalize_rpu_json(&mut source, None);
-    canonicalize_rpu_json(&mut output, None);
+    let source = read_rpu_semantic_digest(source_file, "源")?;
+    let output = read_rpu_semantic_digest(output_file, "输出")?;
 
     if source != output {
         return Err("输出 RPU 的逐帧动态元数据与源片不一致".to_string());
@@ -615,11 +711,76 @@ fn verify_rpu_semantic_equality(source_file: &Path, output_file: &Path) -> Resul
     Ok(())
 }
 
-/** 读取 dovi_tool 导出的完整 RPU JSON。 */
-fn read_rpu_json(path: &Path, label: &str) -> Result<Value, String> {
-    let contents =
-        fs::read_to_string(path).map_err(|error| format!("读取{label} RPU JSON 失败：{error}"))?;
-    serde_json::from_str(&contents).map_err(|error| format!("解析{label} RPU JSON 失败：{error}"))
+/** 规范化后逐帧计算的 RPU 摘要。 */
+#[derive(Debug, PartialEq, Eq)]
+struct RpuSemanticDigest {
+    /** JSON 数组中的 RPU 帧数。 */
+    frame_count: u64,
+    /** 每帧规范化 JSON 按顺序写入后的 SHA-256。 */
+    sha256: [u8; 32],
+}
+
+/** serde 顶层数组 seed，使解析器可以逐帧消费而不构建完整 Vec。 */
+struct RpuDigestSeed;
+
+impl<'de> DeserializeSeed<'de> for RpuDigestSeed {
+    type Value = RpuSemanticDigest;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(RpuDigestVisitor)
+    }
+}
+
+/** 逐帧规范化 RPU JSON 并累计稳定摘要。 */
+struct RpuDigestVisitor;
+
+impl<'de> Visitor<'de> for RpuDigestVisitor {
+    type Value = RpuSemanticDigest;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a top-level array of Dolby Vision RPU frames")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut hasher = Sha256::new();
+        let mut frame_count = 0_u64;
+
+        while let Some(mut frame) = sequence.next_element::<Value>()? {
+            canonicalize_rpu_json(&mut frame, None);
+            let encoded = serde_json::to_vec(&frame).map_err(serde::de::Error::custom)?;
+            // 长度前缀避免不同帧边界产生相同的串接字节序列。
+            hasher.update((encoded.len() as u64).to_le_bytes());
+            hasher.update(encoded);
+            frame_count += 1;
+        }
+
+        Ok(RpuSemanticDigest {
+            frame_count,
+            sha256: hasher.finalize().into(),
+        })
+    }
+}
+
+/** 从文件流计算 RPU 语义摘要，并拒绝顶层数组后的多余数据。 */
+fn read_rpu_semantic_digest(path: &Path, label: &str) -> Result<RpuSemanticDigest, String> {
+    let file =
+        fs::File::open(path).map_err(|error| format!("读取{label} RPU JSON 失败：{error}"))?;
+    digest_rpu_json(BufReader::new(file))
+        .map_err(|error| format!("解析{label} RPU JSON 失败：{error}"))
+}
+
+/** 对任意 reader 中的 dovi_tool 顶层数组执行流式摘要，供文件路径和单元测试复用。 */
+fn digest_rpu_json(reader: impl Read) -> Result<RpuSemanticDigest, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let digest = RpuDigestSeed.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(digest)
 }
 
 /** 规范化不影响 RPU 语义、但可能在 libx265 重写时变化的序列化细节。 */
@@ -673,21 +834,90 @@ fn read_rpu_frame_count(rpu_file: &Path) -> Result<u64, String> {
         .ok_or_else(|| "dovi_tool summary 缺少 Frames 字段".to_string())
 }
 
-/** 校验完成后在同一文件系统内原子发布最终输出。 */
+/** 校验完成后以 no-clobber 语义发布最终输出。 */
 fn finalize_output(source: &Path, target: &Path) -> Result<(), String> {
     if !source.is_file() {
         return Err(format!("待发布输出不存在：{}", source.display()));
     }
-    if target.exists() {
-        return Err(format!("最终输出已存在：{}", target.display()));
-    }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建输出目录失败：{error}"))?;
     }
-    fs::rename(source, target).map_err(|error| format!("发布最终输出失败：{error}"))
+
+    // partial 与目标位于同一目录；系统级 NOREPLACE rename 同时保证原子发布和禁止覆盖。
+    rename_noreplace(source, target).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("最终输出已存在：{}", target.display())
+        } else {
+            format!("发布最终输出失败：{error}")
+        }
+    })?;
+    Ok(())
+}
+
+/** 使用操作系统的 no-replace rename；Unix 由 rustix 统一映射 Linux 与 Apple API。 */
+#[cfg(unix)]
+fn rename_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+
+    renameat_with(CWD, source, CWD, target, RenameFlags::NOREPLACE).map_err(io::Error::from)
+}
+
+/** Windows 的 std::fs::rename 在目标存在时会失败，不会覆盖已有文件。 */
+#[cfg(windows)]
+fn rename_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(source, target)
+}
+
+/** 其他桌面目标保留安全失败语义，不使用会覆盖目标的 rename。 */
+#[cfg(not(any(unix, windows)))]
+fn rename_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    fs::hard_link(source, target)?;
+    fs::remove_file(source)
+}
+
+/**
+ * 在取消命令使用的同一把锁内发布最终文件并认领终态。
+ * 这样取消要么先发生且不会生成目标文件，要么在发布后被明确拒绝。
+ */
+fn finalize_output_with_terminal_claim(
+    source: &Path,
+    target: &Path,
+    child: &ChildSlot,
+    job: &mut JobHistory,
+    cleanup_paths: &[PathBuf],
+) -> Result<(), StepError> {
+    let mut guard = child
+        .lock()
+        .map_err(|_| StepError::Failed("转码任务状态锁已损坏".to_string()))?;
+    if guard.canceled {
+        set_canceled_job_fields(job, "用户取消了任务。");
+        guard.finished = true;
+        guard.terminal_job = Some(job.clone());
+        return Err(StepError::Interrupted);
+    }
+
+    // no-replace rename 发布很短，但必须持锁到 finished 写入，关闭“发布成功后取消仍生效”的窗口。
+    let result = finalize_output(source, target).map_err(StepError::Failed);
+    if result.is_ok() {
+        job.status = "completed".to_string();
+        job.error = None;
+        job.ended_at = Some(Utc::now().to_rfc3339());
+        attach_size_changes(job);
+        cleanup_transient_paths(cleanup_paths);
+        guard.terminal_job = Some(job.clone());
+    } else if let Err(StepError::Failed(message)) = &result {
+        // 发布失败本身也是确定终态，shutdown 不得把实际错误改写为 interrupted。
+        job.status = "failed".to_string();
+        job.error = Some(message.clone());
+        job.ended_at = Some(Utc::now().to_rfc3339());
+        guard.terminal_job = Some(job.clone());
+    }
+    guard.finished = true;
+    result
 }
 
 /** 单个执行计划阶段的结果。 */
+#[derive(Debug)]
 enum StepError {
     /** 子进程被退出流程或后续取消逻辑中断。 */
     Interrupted,
@@ -1023,42 +1253,102 @@ fn mark_canceled<R: Runtime>(
     storage: &AppStorage,
     job: &mut JobHistory,
     message: &str,
+    cleanup_paths: &[PathBuf],
 ) {
-    job.status = "canceled".to_string();
-    job.error = Some(message.to_string());
-    job.ended_at = Some(Utc::now().to_rfc3339());
-    cleanup_job_artifacts(job);
+    set_canceled_job_fields(job, message);
+    persist_canceled_job(app, storage, job, cleanup_paths);
+}
+
+/** 持久化已经在终态锁内生成的 canceled 快照。 */
+fn persist_canceled_job<R: Runtime>(
+    app: &AppHandle<R>,
+    storage: &AppStorage,
+    job: &JobHistory,
+    cleanup_paths: &[PathBuf],
+) {
+    cleanup_plan_artifacts(cleanup_paths);
     let _ = storage.jobs_history.update(job);
-    let _ = app.emit("job:updated", &*job);
+    let _ = app.emit("job:updated", job);
     refresh_tray_menu(app);
 }
 
-/** 判断当前任务是否由用户取消触发中断。 */
-fn child_is_canceled(child: &ChildSlot) -> bool {
-    child.lock().map(|guard| guard.canceled).unwrap_or(false)
+/** 写入 canceled 任务字段；调用方负责持锁认领终态和持久化。 */
+fn set_canceled_job_fields(job: &mut JobHistory, message: &str) {
+    job.status = "canceled".to_string();
+    job.error = Some(message.to_string());
+    job.ended_at = Some(Utc::now().to_rfc3339());
 }
 
-/** 清理取消任务留下的部分输出和 2-pass passlog 文件。 */
-fn cleanup_job_artifacts(job: &JobHistory) {
-    remove_file_if_exists(Path::new(&job.output_file));
-    cleanup_passlog_files(&build_passlog_path(&job.input_file, &job.output_file));
+/** 在任务尚未进入终态时认领取消；用于无子进程的校验和发布阶段。 */
+fn claim_pending_cancellation(child: &ChildSlot, job: &mut JobHistory) -> bool {
+    let mut guard = child.lock().expect("ffmpeg child lock poisoned");
+    if !guard.canceled {
+        return false;
+    }
+
+    set_canceled_job_fields(job, "用户取消了任务。");
+    guard.finished = true;
+    guard.terminal_job = Some(job.clone());
+    true
 }
 
-/** 清理普通任务产物和执行计划声明的 workspace/partial 文件。 */
-fn cleanup_plan_artifacts(job: &JobHistory, cleanup_paths: &[PathBuf]) {
-    cleanup_job_artifacts(job);
+/** 在取消命令使用的同一把锁内写入任意终态及完整快照。 */
+fn claim_terminal_outcome(
+    child: &ChildSlot,
+    job: &mut JobHistory,
+    apply_non_canceled: impl FnOnce(&mut JobHistory),
+) -> bool {
+    let mut guard = child.lock().expect("ffmpeg child lock poisoned");
+    let canceled = guard.canceled;
+    if canceled {
+        set_canceled_job_fields(job, "用户取消了任务。");
+    } else {
+        apply_non_canceled(job);
+        if job.ended_at.is_none() {
+            job.ended_at = Some(Utc::now().to_rfc3339());
+        }
+    }
+    guard.finished = true;
+    guard.terminal_job = Some(job.clone());
+    canceled
+}
+
+/** 清理执行计划声明拥有的 workspace、partial 与 passlog 文件。 */
+fn cleanup_plan_artifacts(cleanup_paths: &[PathBuf]) {
     cleanup_transient_paths(cleanup_paths);
 }
 
 /** 清理计划临时路径；目录递归删除，普通文件按存在性删除。 */
 fn cleanup_transient_paths(cleanup_paths: &[PathBuf]) {
     for path in cleanup_paths {
+        if is_passlog_prefix(path) {
+            cleanup_passlog_files(&path.to_string_lossy());
+            continue;
+        }
         if path.is_dir() {
             let _ = fs::remove_dir_all(path);
         } else {
             remove_file_if_exists(path);
         }
     }
+}
+
+/** 识别 build_passlog_path 生成的受控 prefix，避免把任意临时路径按前缀删除。 */
+fn is_passlog_prefix(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.starts_with("passlog-"))
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("passlog")
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("encode-lab")
 }
 
 /** 删除存在的普通文件；不存在或目录路径不视为错误。 */
@@ -1105,30 +1395,192 @@ fn tail_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_rpu_json;
-    use serde_json::json;
+    use super::{
+        claim_terminal_outcome, cleanup_transient_paths, digest_rpu_json, finalize_output,
+        finalize_output_with_terminal_claim, ChildState, StepError,
+    };
+    use crate::models::JobHistory;
+    use std::{
+        fs,
+        path::Path,
+        sync::{Arc, Mutex},
+    };
+    use uuid::Uuid;
+
+    /** 构造最终发布测试所需的最小任务快照。 */
+    fn job(input: &Path, output: &Path) -> JobHistory {
+        JobHistory {
+            id: "job".to_string(),
+            task_id: "task".to_string(),
+            name: None,
+            input_file: input.to_string_lossy().to_string(),
+            output_file: output.to_string_lossy().to_string(),
+            input_location: None,
+            output_location: None,
+            execution_node_id: None,
+            transfer_ids: Vec::new(),
+            input_size_bytes: None,
+            output_size_bytes: None,
+            size_change_percent: None,
+            input_video_size_bytes: None,
+            output_video_size_bytes: None,
+            video_size_change_percent: None,
+            status: "running".to_string(),
+            command_line: None,
+            error: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: None,
+            ended_at: None,
+        }
+    }
 
     #[test]
-    fn rpu_canonicalization_should_ignore_crc_and_extension_block_order() {
-        let mut source = json!([{
-            "rpu_data_crc32": 1,
-            "vdr_dm_data": {
-                "cmv29_metadata": {
-                    "ext_metadata_blocks": [{"Level5": {"top": 0}}, {"Level1": {"max": 10}}]
-                }
-            }
-        }]);
-        let mut output = json!([{
-            "rpu_data_crc32": 2,
-            "vdr_dm_data": {
-                "cmv29_metadata": {
-                    "ext_metadata_blocks": [{"Level1": {"max": 10}}, {"Level5": {"top": 0}}]
-                }
-            }
-        }]);
+    fn streaming_rpu_digest_should_ignore_crc_and_extension_block_order() {
+        let source = br#"[{"rpu_data_crc32":1,"vdr_dm_data":{"cmv29_metadata":{"ext_metadata_blocks":[{"Level5":{"top":0}},{"Level1":{"max":10}}]}}},{"scene_refresh_flag":0}]"#;
+        let output = br#"[{"rpu_data_crc32":2,"vdr_dm_data":{"cmv29_metadata":{"ext_metadata_blocks":[{"Level1":{"max":10}},{"Level5":{"top":0}}]}}},{"scene_refresh_flag":0}]"#;
 
-        canonicalize_rpu_json(&mut source, None);
-        canonicalize_rpu_json(&mut output, None);
-        assert_eq!(source, output);
+        let source_digest = digest_rpu_json(source.as_slice()).expect("source digest");
+        let output_digest = digest_rpu_json(output.as_slice()).expect("output digest");
+
+        assert_eq!(source_digest, output_digest);
+        assert_eq!(source_digest.frame_count, 2);
+    }
+
+    #[test]
+    fn streaming_rpu_digest_should_detect_frame_changes() {
+        let source = br#"[{"scene_refresh_flag":1},{"scene_refresh_flag":0}]"#;
+        let output = br#"[{"scene_refresh_flag":1},{"scene_refresh_flag":1}]"#;
+
+        assert_ne!(
+            digest_rpu_json(source.as_slice()).expect("source digest"),
+            digest_rpu_json(output.as_slice()).expect("output digest")
+        );
+    }
+
+    #[test]
+    fn finalize_output_should_never_replace_an_existing_target() {
+        let dir = std::env::temp_dir().join(format!("encode-lab-finalize-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let source = dir.join("partial.mkv");
+        let target = dir.join("output.mkv");
+        fs::write(&source, b"new output").expect("write source");
+        fs::write(&target, b"existing output").expect("write target");
+
+        let error = finalize_output(&source, &target).expect_err("must reject existing target");
+
+        assert!(error.contains("已存在"));
+        assert_eq!(fs::read(&target).expect("read target"), b"existing output");
+        assert_eq!(fs::read(&source).expect("read source"), b"new output");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn canceled_job_should_not_publish_final_output() {
+        let dir = std::env::temp_dir().join(format!("encode-lab-canceled-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let source = dir.join("partial.mkv");
+        let target = dir.join("output.mkv");
+        let input = dir.join("input.mkv");
+        fs::write(&source, b"new output").expect("write source");
+        let child = Arc::new(Mutex::new(ChildState {
+            child: None,
+            canceled: true,
+            finished: false,
+            terminal_job: None,
+        }));
+        let mut job = job(&input, &target);
+
+        let result = finalize_output_with_terminal_claim(&source, &target, &child, &mut job, &[]);
+
+        assert!(matches!(result, Err(StepError::Interrupted)));
+        assert!(!target.exists());
+        assert!(child.lock().expect("child state").finished);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn successful_publish_should_claim_terminal_state() {
+        let dir = std::env::temp_dir().join(format!("encode-lab-completed-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let source = dir.join("partial.mkv");
+        let target = dir.join("output.mkv");
+        let input = dir.join("input.mkv");
+        fs::write(&input, b"input").expect("write input");
+        fs::write(&source, b"new output").expect("write source");
+        let child = Arc::new(Mutex::new(ChildState {
+            child: None,
+            canceled: false,
+            finished: false,
+            terminal_job: None,
+        }));
+        let mut job = job(&input, &target);
+
+        finalize_output_with_terminal_claim(&source, &target, &child, &mut job, &[])
+            .expect("publish output");
+
+        assert_eq!(fs::read(&target).expect("read target"), b"new output");
+        let guard = child.lock().expect("child state");
+        assert!(guard.finished);
+        assert_eq!(
+            guard.terminal_job.as_ref().map(|job| job.status.as_str()),
+            Some("completed")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_terminal_claim_should_store_failure_snapshot() {
+        let dir = std::env::temp_dir().join(format!("encode-lab-failed-{}", Uuid::new_v4()));
+        let child = Arc::new(Mutex::new(ChildState {
+            child: None,
+            canceled: false,
+            finished: false,
+            terminal_job: None,
+        }));
+        let mut job = job(&dir.join("input.mkv"), &dir.join("output.mkv"));
+
+        let canceled = claim_terminal_outcome(&child, &mut job, |job| {
+            job.status = "failed".to_string();
+            job.error = Some("broken encoder".to_string());
+        });
+
+        assert!(!canceled);
+        let guard = child.lock().expect("child state");
+        assert!(guard.finished);
+        assert_eq!(
+            guard.terminal_job.as_ref().map(|job| job.status.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            guard
+                .terminal_job
+                .as_ref()
+                .and_then(|job| job.error.as_deref()),
+            Some("broken encoder")
+        );
+    }
+
+    #[test]
+    fn cleanup_should_remove_all_files_for_owned_passlog_prefix() {
+        let dir = std::env::temp_dir()
+            .join(format!("encode-lab-cleanup-{}", Uuid::new_v4()))
+            .join("encode-lab")
+            .join("passlog");
+        fs::create_dir_all(&dir).expect("create passlog dir");
+        let prefix = dir.join("passlog-job");
+        let log = dir.join("passlog-job-0.log");
+        let tree = dir.join("passlog-job-0.log.mbtree");
+        fs::write(&log, b"log").expect("write passlog");
+        fs::write(&tree, b"tree").expect("write passlog tree");
+
+        cleanup_transient_paths(&[prefix]);
+
+        assert!(!log.exists());
+        assert!(!tree.exists());
+        let _ = fs::remove_dir_all(
+            dir.parent()
+                .and_then(|path| path.parent())
+                .expect("cleanup root"),
+        );
     }
 }
