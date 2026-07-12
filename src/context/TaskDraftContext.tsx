@@ -145,6 +145,24 @@ export function resolveDolbyVisionAudioMode(
 }
 
 /**
+ * 收敛 Dolby Vision 保留链路允许的容器。
+ * @param preservesDolbyVision 是否启用 RPU 保留链路
+ * @param requestedFormat 表单或模板请求的输出容器
+ * @returns DV 路径只接受 MKV/MP4；旧 MOV 模板回退到 MKV，保留用户可选 MP4 的能力
+ */
+export function resolveDolbyVisionContainerFormat(
+  preservesDolbyVision: boolean,
+  requestedFormat: "mp4" | "mkv" | "mov",
+): "mp4" | "mkv" | "mov" {
+  if (!preservesDolbyVision || requestedFormat !== "mov") {
+    return requestedFormat;
+  }
+
+  // 旧模板可能存有 MOV；回退到无损轨道承载更完整的 MKV，而不是提交后由后端失败。
+  return "mkv";
+}
+
+/**
  * 新元数据到达时收敛 Dolby Vision 保留意图。
  * @param current 当前是否已启用保留
  * @param metadata 已确认属于当前源文件的元数据
@@ -607,6 +625,10 @@ export function TaskDraftProvider({
         (clipStartSec !== 0 || clipEndSec !== durationSec);
       const isVideoStreamCopy = !preserveDolbyVisionMetadata && formCodec === "copy";
       const resolvedAudioMode = resolveDolbyVisionAudioMode(preserveDolbyVisionMetadata, audioMode);
+      const resolvedContainerFormat = resolveDolbyVisionContainerFormat(
+        preserveDolbyVisionMetadata,
+        containerFormat,
+      );
 
       return {
         name: draftName.trim() || "preview-draft",
@@ -648,9 +670,9 @@ export function TaskDraftProvider({
           customArgs: resolvedAudioMode === "custom" ? audioCustomArgs.trim() || undefined : undefined,
         },
         container: {
-          format: preserveDolbyVisionMetadata ? "mkv" : containerFormat,
+          format: resolvedContainerFormat,
           faststart:
-            !preserveDolbyVisionMetadata && containerFormat === "mp4" ? containerFaststart : false,
+            resolvedContainerFormat === "mp4" ? containerFaststart : false,
         },
         // DV 路径由后端按 Profile 构造色彩和 VBV 参数，避免普通高级参数污染专用链路。
         advancedArgs: preserveDolbyVisionMetadata || isVideoStreamCopy ? undefined : buildAdvancedArgs(),

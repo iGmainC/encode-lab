@@ -223,11 +223,18 @@ export type VideoStreamMetadata = {
 };
 
 export type AudioStreamMetadata = {
+  /** FFprobe 识别的音频编码；E-AC-3 JOC Atmos 也会显示为 eac3。 */
   codecName?: string;
   channels?: number;
   sampleRate?: number;
   bitRateKbps?: number;
   channelLayout?: string;
+};
+
+/** 字幕、附件与数据轨等非主视频/音频容器载荷。 */
+export type AuxiliaryStreamMetadata = {
+  streamType: string;
+  codecName?: string;
 };
 
 export type VideoMetadataResult = {
@@ -237,7 +244,12 @@ export type VideoMetadataResult = {
   sizeBytes?: number;
   bitRateKbps?: number;
   video?: VideoStreamMetadata;
+  /** 首条音轨，兼容现有素材摘要。 */
   audio?: AudioStreamMetadata;
+  /** 全部音轨，供 Dolby Vision MP4 等容器策略预检。 */
+  audioTracks?: AudioStreamMetadata[];
+  /** 不能被 MP4 Dolby Vision 兼容路线静默丢弃的辅助流。 */
+  auxiliaryStreams?: AuxiliaryStreamMetadata[];
   tags: string[];
   rawProbeVersion?: string;
 };

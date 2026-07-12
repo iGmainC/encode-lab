@@ -7,13 +7,18 @@ use crate::{
         TaskConfigPayload,
     },
     probe::video_metadata::{
-        read_constant_frame_count, read_video_metadata, HdrType, VideoStreamMetadata,
+        read_constant_frame_count, read_video_metadata, AudioStreamMetadata,
+        AuxiliaryStreamMetadata, HdrType, VideoMetadataResult, VideoStreamMetadata,
     },
     storage::errors::{StorageError, StorageResult},
     transcode::command_builder::{
         append_reencoded_video_metadata_cleanup, build_ffmpeg_commands, build_passlog_path,
     },
 };
+
+/// 首版 Dolby Vision MP4 兼容路线允许无损复制的音频编码。
+/// E-AC-3 JOC Atmos 仍显示为 eac3；Copy 模式不会解码或降级其对象元数据。
+const DOLBY_VISION_MP4_COPY_AUDIO_CODECS: [&str; 3] = ["aac", "ac3", "eac3"];
 
 /// 外部命令类型；执行器根据类型选择 bundled runtime 中的二进制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +217,7 @@ fn build_dolby_vision_plan(
     })?;
     let route = resolve_dolby_vision_route(video)?;
     validate_dolby_vision_source(video)?;
+    validate_dolby_vision_container(payload, &metadata, route)?;
     let fps_fraction = video.fps_fraction.as_deref().ok_or_else(|| {
         StorageError::InvalidPayload(
             "Dolby Vision RPU preservation requires an exact source frame rate".to_string(),
@@ -398,9 +404,12 @@ fn validate_dolby_vision_payload(payload: &TaskConfigPayload) -> StorageResult<(
             "Dolby Vision RPU preservation requires H.265 + libx265 + CRF".to_string(),
         ));
     }
-    if !matches!(payload.container.format, ContainerFormat::Mkv) {
+    if !matches!(
+        payload.container.format,
+        ContainerFormat::Mkv | ContainerFormat::Mp4
+    ) {
         return Err(StorageError::InvalidPayload(
-            "Dolby Vision RPU preservation currently requires MKV output".to_string(),
+            "Dolby Vision RPU preservation requires MKV or MP4 output".to_string(),
         ));
     }
     if !matches!(payload.audio.mode, AudioMode::Copy) {
@@ -434,6 +443,78 @@ fn validate_dolby_vision_payload(payload: &TaskConfigPayload) -> StorageResult<(
     }
 
     Ok(())
+}
+
+/**
+ * 校验 Dolby Vision 目标容器的实际可复制载荷。
+ *
+ * MKV 保留现有的全流归档语义；MP4 是设备兼容路线，必须限制为已验证的视频封装、
+ * 常见可复制音频与无辅助流，避免在任务结束后才发现 TrueHD Atmos、PGS 或附件无法安全保留。
+ */
+fn validate_dolby_vision_container(
+    payload: &TaskConfigPayload,
+    metadata: &VideoMetadataResult,
+    route: DolbyVisionRoute,
+) -> StorageResult<()> {
+    if matches!(payload.container.format, ContainerFormat::Mkv) {
+        return Ok(());
+    }
+
+    // MP4 的 DOVI 路线已对 Profile 8.1 BL+RPU 做过封装和语义校验；P5 保持 MKV 归档路线。
+    if route.profile != 8 || route.compatibility_id != 1 {
+        return Err(StorageError::InvalidPayload(
+            "Dolby Vision MP4 output currently supports Profile 8.1 only; use MKV for Profile 5"
+                .to_string(),
+        ));
+    }
+
+    validate_dolby_vision_mp4_audio(&metadata.audio_tracks)?;
+    validate_dolby_vision_mp4_auxiliary_streams(&metadata.auxiliary_streams)
+}
+
+/// 阻止把未验证的 Copy 音轨写入 Dolby Vision MP4；TrueHD Atmos 必须走 MKV。
+fn validate_dolby_vision_mp4_audio(audio_tracks: &[AudioStreamMetadata]) -> StorageResult<()> {
+    let unsupported = audio_tracks
+        .iter()
+        .filter_map(|track| {
+            let codec = track.codec_name.as_deref()?.to_ascii_lowercase();
+            (!DOLBY_VISION_MP4_COPY_AUDIO_CODECS.contains(&codec.as_str())).then_some(codec)
+        })
+        .collect::<Vec<_>>();
+
+    if unsupported.is_empty() && audio_tracks.iter().all(|track| track.codec_name.is_some()) {
+        return Ok(());
+    }
+
+    let labels = if unsupported.is_empty() {
+        "unknown".to_string()
+    } else {
+        unsupported.join(", ")
+    };
+    Err(StorageError::InvalidPayload(format!(
+        "Dolby Vision MP4 output only supports AAC, AC-3 and E-AC-3 audio copy; found {labels}. Use MKV to preserve TrueHD Atmos or other audio tracks"
+    )))
+}
+
+/// MP4 专用路径不映射字幕、附件或 data 流，必须在执行前拒绝而不是静默丢弃。
+fn validate_dolby_vision_mp4_auxiliary_streams(
+    auxiliary_streams: &[AuxiliaryStreamMetadata],
+) -> StorageResult<()> {
+    if auxiliary_streams.is_empty() {
+        return Ok(());
+    }
+
+    let labels = auxiliary_streams
+        .iter()
+        .map(|stream| match stream.codec_name.as_deref() {
+            Some(codec) => format!("{}:{codec}", stream.stream_type),
+            None => stream.stream_type.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(StorageError::InvalidPayload(format!(
+        "Dolby Vision MP4 output does not copy subtitle, attachment or data streams ({labels}); use MKV to retain every source track"
+    )))
 }
 
 /// 校验源视频的帧结构和 DOVI 层信息满足首版约束。
@@ -546,10 +627,6 @@ fn dolby_vision_encode_args(
         "0:v:0".to_string(),
         "-map".to_string(),
         "0:a?".to_string(),
-        "-map".to_string(),
-        "0:s?".to_string(),
-        "-map".to_string(),
-        "0:t?".to_string(),
         "-map_metadata".to_string(),
         "0".to_string(),
         "-map_chapters".to_string(),
@@ -571,13 +648,43 @@ fn dolby_vision_encode_args(
         "-x265-params".to_string(),
         x265_params.join(":"),
     ];
+    if matches!(payload.container.format, ContainerFormat::Mkv) {
+        // MKV 继续承载字幕和附件，满足 TrueHD Atmos 等家庭影院归档场景。
+        args.splice(
+            7..7,
+            [
+                "-map".to_string(),
+                "0:s?".to_string(),
+                "-map".to_string(),
+                "0:t?".to_string(),
+            ],
+        );
+    }
     if let Some(gop) = payload.video.gop {
         args.push("-g".to_string());
         args.push(gop.to_string());
     }
     append_reencoded_video_metadata_cleanup(&mut args);
-    args.push("-f".to_string());
-    args.push("matroska".to_string());
+    match payload.container.format {
+        ContainerFormat::Mkv => {
+            args.push("-f".to_string());
+            args.push("matroska".to_string());
+        }
+        ContainerFormat::Mp4 => {
+            // hvc1 + strict 输出选项会让 FFmpeg 写入 MP4 所需的 DOVI configuration box（dvvC/dvcC）。
+            args.push("-tag:v".to_string());
+            args.push("hvc1".to_string());
+            args.push("-strict".to_string());
+            args.push("-2".to_string());
+            if payload.container.faststart.unwrap_or(false) {
+                args.push("-movflags".to_string());
+                args.push("+faststart".to_string());
+            }
+            args.push("-f".to_string());
+            args.push("mp4".to_string());
+        }
+        ContainerFormat::Mov => unreachable!("payload validation rejects MOV for Dolby Vision"),
+    }
     args.push(output_file.to_string_lossy().to_string());
     Ok(args)
 }
@@ -635,7 +742,8 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::{
         build_transcode_plan, dolby_vision_encode_args, resolve_dolby_vision_route,
-        validate_dolby_vision_source, TranscodeStep,
+        validate_dolby_vision_container, validate_dolby_vision_mp4_audio,
+        validate_dolby_vision_mp4_auxiliary_streams, validate_dolby_vision_source, TranscodeStep,
     };
     use crate::{
         models::{
@@ -645,7 +753,10 @@ mod tests {
             },
             TaskConfigPayload,
         },
-        probe::video_metadata::{HdrType, VideoStreamMetadata},
+        probe::video_metadata::{
+            AudioStreamMetadata, AuxiliaryStreamMetadata, HdrType, VideoMetadataResult,
+            VideoStreamMetadata,
+        },
     };
     use std::path::Path;
 
@@ -721,6 +832,34 @@ mod tests {
         }
     }
 
+    /** 构造 MP4 Dolby Vision 输出用任务；仅 Profile 8.1 路线可通过容器预检。 */
+    fn mp4_payload() -> TaskConfigPayload {
+        let mut value = payload();
+        value.container.format = ContainerFormat::Mp4;
+        value.container.faststart = Some(true);
+        value
+    }
+
+    /** 构造容器预检所需的最小元数据，避免单测依赖真实媒体文件。 */
+    fn metadata(
+        audio_tracks: Vec<AudioStreamMetadata>,
+        auxiliary_streams: Vec<AuxiliaryStreamMetadata>,
+    ) -> VideoMetadataResult {
+        VideoMetadataResult {
+            input_file: "/tmp/source.mkv".to_string(),
+            container_format: Some("matroska".to_string()),
+            duration_sec: None,
+            size_bytes: None,
+            bit_rate_kbps: None,
+            video: None,
+            audio: audio_tracks.first().cloned(),
+            audio_tracks,
+            auxiliary_streams,
+            tags: Vec::new(),
+            raw_probe_version: None,
+        }
+    }
+
     #[test]
     fn profile_5_compatibility_0_should_use_profile_5_route() {
         let route = resolve_dolby_vision_route(&video(5, 0)).expect("route");
@@ -790,6 +929,79 @@ mod tests {
         assert!(joined.contains("hdr10=1"));
         assert!(joined.contains("max-cll=1000,400"));
         assert!(joined.contains("master-display="));
+    }
+
+    #[test]
+    fn profile_81_mp4_encode_should_write_dolby_vision_mp4_signaling() {
+        let source = video(8, 1);
+        let route = resolve_dolby_vision_route(&source).expect("route");
+        let args = dolby_vision_encode_args(
+            &mp4_payload(),
+            "input.mkv",
+            Path::new("output.mp4"),
+            &source,
+            route,
+        )
+        .expect("encode args");
+        let joined = args.join(" ");
+
+        assert!(joined.contains("-tag:v hvc1"));
+        assert!(joined.contains("-strict -2"));
+        assert!(joined.contains("-movflags +faststart"));
+        assert!(joined.contains("-f mp4"));
+        assert!(!joined.contains("0:s?"));
+        assert!(!joined.contains("0:t?"));
+    }
+
+    #[test]
+    fn mp4_dolby_vision_should_reject_profile_5_and_truehd_atmos() {
+        let payload = mp4_payload();
+        let profile_error = validate_dolby_vision_container(
+            &payload,
+            &metadata(Vec::new(), Vec::new()),
+            resolve_dolby_vision_route(&video(5, 0)).expect("route"),
+        )
+        .expect_err("Profile 5 MP4 must be rejected");
+        assert!(profile_error.to_string().contains("Profile 8.1"));
+
+        let truehd_error = validate_dolby_vision_mp4_audio(&[AudioStreamMetadata {
+            codec_name: Some("truehd".to_string()),
+            channels: Some(8),
+            sample_rate: Some(48_000),
+            bit_rate_kbps: None,
+            channel_layout: Some("7.1".to_string()),
+        }])
+        .expect_err("TrueHD Atmos must require MKV");
+        assert!(truehd_error.to_string().contains("TrueHD Atmos"));
+    }
+
+    #[test]
+    fn mp4_dolby_vision_should_allow_eac3_and_reject_auxiliary_streams() {
+        validate_dolby_vision_mp4_audio(&[
+            AudioStreamMetadata {
+                codec_name: Some("aac".to_string()),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                bit_rate_kbps: None,
+                channel_layout: Some("stereo".to_string()),
+            },
+            AudioStreamMetadata {
+                // E-AC-3 JOC Atmos 在 ffprobe 中同样以 eac3 编码名出现，Copy 不会修改对象元数据。
+                codec_name: Some("eac3".to_string()),
+                channels: Some(6),
+                sample_rate: Some(48_000),
+                bit_rate_kbps: None,
+                channel_layout: Some("5.1(side)".to_string()),
+            },
+        ])
+        .expect("AAC and E-AC-3 are supported");
+
+        let error = validate_dolby_vision_mp4_auxiliary_streams(&[AuxiliaryStreamMetadata {
+            stream_type: "subtitle".to_string(),
+            codec_name: Some("hdmv_pgs_subtitle".to_string()),
+        }])
+        .expect_err("MP4 path must not silently drop PGS subtitles");
+        assert!(error.to_string().contains("subtitle:hdmv_pgs_subtitle"));
     }
 
     #[test]

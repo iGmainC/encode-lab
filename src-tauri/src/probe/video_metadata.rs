@@ -20,7 +20,12 @@ pub struct VideoMetadataResult {
     pub size_bytes: Option<u64>,
     pub bit_rate_kbps: Option<u64>,
     pub video: Option<VideoStreamMetadata>,
+    /// 首条音轨，兼容现有摘要界面；完整音轨列表见 audio_tracks。
     pub audio: Option<AudioStreamMetadata>,
+    /// 源文件中的全部音轨，用于容器兼容性预检，不能只根据首条音轨做决定。
+    pub audio_tracks: Vec<AudioStreamMetadata>,
+    /// 除主视频和音轨外的容器载荷，例如字幕、附件与数据轨。
+    pub auxiliary_streams: Vec<AuxiliaryStreamMetadata>,
     pub tags: Vec<String>,
     pub raw_probe_version: Option<String>,
 }
@@ -67,6 +72,16 @@ pub struct AudioStreamMetadata {
     pub sample_rate: Option<u32>,
     pub bit_rate_kbps: Option<u64>,
     pub channel_layout: Option<String>,
+}
+
+/// 不会进入主视频/音频摘要的容器轨道，用于在封装前阻止静默丢失数据。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuxiliaryStreamMetadata {
+    /// ffprobe 返回的流类型，例如 subtitle、attachment 或 data。
+    pub stream_type: String,
+    /// 流编码名；附件等无编码名的流保留为空。
+    pub codec_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -351,12 +366,25 @@ fn convert_probe_output(input_file: &str, parsed: FfprobeOutput) -> VideoMetadat
     let video_stream = streams
         .iter()
         .find(|stream| stream.codec_type.as_deref() == Some("video"));
-    let audio_stream = streams
+    let audio_tracks = streams
         .iter()
-        .find(|stream| stream.codec_type.as_deref() == Some("audio"));
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .map(map_audio_stream)
+        .collect::<Vec<_>>();
+    let auxiliary_streams = streams
+        .iter()
+        .filter(|stream| {
+            !matches!(
+                stream.codec_type.as_deref(),
+                Some("video") | Some("audio") | None
+            )
+        })
+        .map(map_auxiliary_stream)
+        .collect::<Vec<_>>();
 
     let video = video_stream.map(map_video_stream);
-    let audio = audio_stream.map(map_audio_stream);
+    // 旧 UI 只展示首条音轨；保留该字段以避免改变既有接口，同时暴露完整清单供策略使用。
+    let audio = audio_tracks.first().cloned();
 
     let container_format = format
         .as_ref()
@@ -386,6 +414,8 @@ fn convert_probe_output(input_file: &str, parsed: FfprobeOutput) -> VideoMetadat
         bit_rate_kbps,
         video,
         audio,
+        audio_tracks,
+        auxiliary_streams,
         tags,
         raw_probe_version: None,
     }
@@ -517,6 +547,18 @@ fn map_audio_stream(stream: &FfprobeStream) -> AudioStreamMetadata {
             .and_then(parse_u64)
             .map(|value| value / 1000),
         channel_layout: stream.channel_layout.clone(),
+    }
+}
+
+/// 提取需要在 MP4 兼容策略中显式处理的非视频/音频流。
+fn map_auxiliary_stream(stream: &FfprobeStream) -> AuxiliaryStreamMetadata {
+    AuxiliaryStreamMetadata {
+        // 过滤条件已经排除了 None；保留兜底字符串以防 ffprobe 返回异常值。
+        stream_type: stream
+            .codec_type
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        codec_name: stream.codec_name.clone(),
     }
 }
 
@@ -908,6 +950,34 @@ fn infer_bit_depth_from_pix_fmt(pix_fmt: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_conversion_should_keep_all_audio_and_auxiliary_streams() {
+        let parsed: FfprobeOutput = serde_json::from_str(
+            r#"{
+                "streams": [
+                    {"codec_type":"video","codec_name":"hevc","width":3840,"height":2160,"pix_fmt":"yuv420p10le","avg_frame_rate":"24/1","r_frame_rate":"24/1"},
+                    {"codec_type":"audio","codec_name":"eac3","channels":6,"sample_rate":"48000","channel_layout":"5.1(side)"},
+                    {"codec_type":"audio","codec_name":"truehd","channels":8,"sample_rate":"48000","channel_layout":"7.1"},
+                    {"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle"},
+                    {"codec_type":"attachment","codec_name":"ttf"}
+                ]
+            }"#,
+        )
+        .expect("probe fixture");
+
+        let metadata = convert_probe_output("/tmp/source.mkv", parsed);
+
+        // MP4 预检必须看到所有音轨，不能只看到首条 E-AC-3 后漏掉 TrueHD Atmos。
+        assert_eq!(metadata.audio_tracks.len(), 2);
+        assert_eq!(
+            metadata.audio_tracks[1].codec_name.as_deref(),
+            Some("truehd")
+        );
+        assert_eq!(metadata.auxiliary_streams.len(), 2);
+        assert_eq!(metadata.auxiliary_streams[0].stream_type, "subtitle");
+        assert_eq!(metadata.auxiliary_streams[1].stream_type, "attachment");
+    }
 
     #[test]
     fn parse_fraction_should_work() {

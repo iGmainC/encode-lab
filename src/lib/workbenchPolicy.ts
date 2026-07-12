@@ -6,6 +6,9 @@ import type {
 } from "../types/workbench";
 import type { TranslationKey } from "../i18n/translations";
 
+/** Dolby Vision MP4 兼容路线允许直接 Copy 的音频编码；E-AC-3 JOC Atmos 识别为 eac3。 */
+const DOLBY_VISION_MP4_COPY_AUDIO_CODECS = new Set(["aac", "ac3", "eac3"]);
+
 /** 专业参数检查器的固定分组。 */
 export type InspectorTab = "video" | "audio" | "color" | "output";
 
@@ -171,6 +174,7 @@ export function buildWorkbenchValidationIssues({
   appendClipRangeIssues(issues, metadata, snapshot);
   appendStreamCopyIssues(issues, snapshot);
   appendHdrOutputIssues(issues, metadata, snapshot);
+  appendDolbyVisionContainerIssues(issues, metadata, snapshot);
   if (snapshot.video.preserveDolbyVisionMetadata && snapshot.audio.mode !== "copy") {
     issues.push({
       id: "dolby-vision-audio-mode",
@@ -188,6 +192,76 @@ export function buildWorkbenchValidationIssues({
     issues.push({ id: "faststart", tab: "output", tone: "warning", messageKey: "parameterInspector.validation.faststart" });
   }
   return issues;
+}
+
+/**
+ * 在入队前展示 Dolby Vision 容器与源轨道的兼容性边界。
+ * 后端仍会重复校验，防止历史模板或外部调用绕过工作台。
+ */
+function appendDolbyVisionContainerIssues(
+  issues: WorkbenchValidationIssue[],
+  metadata: VideoMetadataResult | null,
+  snapshot: TaskDraftSnapshot,
+) {
+  if (!snapshot.video.preserveDolbyVisionMetadata) {
+    return;
+  }
+
+  if (snapshot.container.format !== "mkv" && snapshot.container.format !== "mp4") {
+    issues.push({
+      id: "dolby-vision-container",
+      tab: "output",
+      tone: "error",
+      messageKey: "parameterInspector.validation.dolbyVisionContainer",
+    });
+    return;
+  }
+  if (snapshot.container.format !== "mp4") {
+    return;
+  }
+
+  const sourceVideo = metadata?.video;
+  if (sourceVideo && (sourceVideo.dolbyVisionProfile !== 8 || sourceVideo.dolbyVisionCompatibilityId !== 1)) {
+    issues.push({
+      id: "dolby-vision-mp4-profile",
+      tab: "output",
+      tone: "error",
+      messageKey: "parameterInspector.validation.dolbyVisionMp4Profile",
+    });
+  }
+
+  // 旧后端返回只含 audio；新接口返回所有音轨，不能让第二条 TrueHD Atmos 被遗漏。
+  const audioTracks = metadata?.audioTracks?.length
+    ? metadata.audioTracks
+    : metadata?.audio
+      ? [metadata.audio]
+      : [];
+  const unsupportedAudio = audioTracks
+    .map((track) => track.codecName?.toLowerCase() ?? "unknown")
+    .filter((codec) => !DOLBY_VISION_MP4_COPY_AUDIO_CODECS.has(codec));
+  if (unsupportedAudio.length > 0) {
+    issues.push({
+      id: "dolby-vision-mp4-audio",
+      tab: "audio",
+      tone: "error",
+      messageKey: "parameterInspector.validation.dolbyVisionMp4Audio",
+      messageParams: { codecs: [...new Set(unsupportedAudio)].join(", ") },
+    });
+  }
+
+  const auxiliaryStreams = metadata?.auxiliaryStreams ?? [];
+  if (auxiliaryStreams.length > 0) {
+    const streams = auxiliaryStreams
+      .map((stream) => stream.codecName ? `${stream.streamType}:${stream.codecName}` : stream.streamType)
+      .join(", ");
+    issues.push({
+      id: "dolby-vision-mp4-auxiliary",
+      tab: "output",
+      tone: "error",
+      messageKey: "parameterInspector.validation.dolbyVisionMp4Auxiliary",
+      messageParams: { streams },
+    });
+  }
 }
 
 /**

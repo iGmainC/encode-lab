@@ -109,6 +109,37 @@ describe("workbench HDR output policy", () => {
     expect(getIssueIds(metadata, snapshot)).toContain("dolby-vision-audio-mode");
   });
 
+  test("allows Profile 8.1 MP4 with copied E-AC-3 while preserving the Atmos bitstream", () => {
+    const metadata = buildMetadata("DolbyVision");
+    if (!metadata.video) throw new Error("video fixture missing");
+    metadata.video.dolbyVisionProfile = 8;
+    metadata.video.dolbyVisionCompatibilityId = 1;
+    metadata.audioTracks = [{ codecName: "eac3", channels: 6 }];
+    const snapshot = buildSnapshot();
+    snapshot.video.preserveDolbyVisionMetadata = true;
+    snapshot.container = { format: "mp4", faststart: true };
+
+    expect(getIssueIds(metadata, snapshot)).not.toContain("dolby-vision-mp4-audio");
+    expect(getIssueIds(metadata, snapshot)).not.toContain("dolby-vision-mp4-profile");
+  });
+
+  test("blocks MP4 when another source track is TrueHD Atmos or PGS", () => {
+    const metadata = buildMetadata("DolbyVision");
+    if (!metadata.video) throw new Error("video fixture missing");
+    metadata.video.dolbyVisionProfile = 8;
+    metadata.video.dolbyVisionCompatibilityId = 1;
+    metadata.audioTracks = [{ codecName: "eac3" }, { codecName: "truehd" }];
+    metadata.auxiliaryStreams = [{ streamType: "subtitle", codecName: "hdmv_pgs_subtitle" }];
+    const snapshot = buildSnapshot();
+    snapshot.video.preserveDolbyVisionMetadata = true;
+    snapshot.container = { format: "mp4" };
+
+    expect(getIssueIds(metadata, snapshot)).toEqual(expect.arrayContaining([
+      "dolby-vision-mp4-audio",
+      "dolby-vision-mp4-auxiliary",
+    ]));
+  });
+
   test("allows stream copy because it does not re-encode the HDR signal", () => {
     const snapshot = buildSnapshot();
     snapshot.video.codecFormat = "copy";

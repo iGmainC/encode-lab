@@ -130,7 +130,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 3. 全音轨白名单为 `-acodec`、`-ab`、`-ar`、`-ac`、`-sample_fmt`、`-channel_layout`、`-ch_layout`、`-audio_service_type`。
 4. 可限定音轨且允许追加数字索引（例如 `-b:a:0`）的白名单为 `-c:a`、`-codec:a`、`-b:a`、`-q:a`、`-qscale:a`、`-ar:a`、`-ac:a`、`-sample_fmt:a`、`-channel_layout:a`、`-ch_layout:a`、`-profile:a`、`-compression_level:a`、`-bsf:a`、`-frames:a`、`-disposition:a`、`-metadata:s:a`、`-tag:a`。
 5. 视频参数、`-i`、容器或输出控制参数、裸路径与额外输出均拒绝；原始 `-af` / `-filter:a` 也不开放，因为 FFmpeg filtergraph 可内嵌文件或网络 I/O。模板保存、任务校验和命令构建复用同一白名单，旧方案在复制或应用前重新校验。
-6. 当输出容器为 MP4 时，命令拼装追加 `-strict -2`，兼容 TrueHD 等 FFmpeg 标记为 experimental 的音频 copy 写入场景。
+6. 当输出容器为 MP4 时，普通命令拼装追加 `-strict -2`，兼容 FFmpeg 标记为 experimental 的音频 copy 写入场景；Dolby Vision 专用 MP4 路线不把 TrueHD 当作可交付能力，改为在入队前明确要求用户切换 MKV。
 
 ### 4.2.4 高级原始参数
 
@@ -162,7 +162,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 7. `bitrateMode=CRF` 且新编码器不支持时，自动改为 `CBR` 并提示用户确认。
 8. 预览与正式转码都复用同一能力矩阵，避免行为不一致。
 9. HDR10/HLG 重编码必须使用 10-bit 或更高像素格式，并保持 BT.2020/PQ 或 BT.2020/HLG 标签；正式任务不会复用预览专用 SDR tone map。
-10. Dolby Vision Profile 5 / compatibility 0 未开启 RPU 保留时禁止普通重编码；视频流复制不受该限制。开启 RPU 保留后 `audioMode` 必须为 `copy`，草稿和模板恢复时同步归一化，后端执行计划再次强制校验。
+10. Dolby Vision Profile 5 / compatibility 0 未开启 RPU 保留时禁止普通重编码；视频流复制不受该限制。开启 RPU 保留后 `audioMode` 必须为 `copy`，草稿和模板恢复时同步归一化，后端执行计划再次强制校验。容器可选 MKV（全轨归档）或 MP4（仅 Profile 8.1、AAC/AC-3/E-AC-3 Copy，E-AC-3 JOC Atmos 保持码流）；MP4 预检必须拒绝 TrueHD Atmos、字幕、附件和 data 流，不能静默丢弃。
 
 ## 4.3 任务预览（单播放器分割线对比）
 

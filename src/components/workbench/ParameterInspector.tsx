@@ -123,8 +123,8 @@ export function ParameterInspector({
     if (!draft.keepOriginalResolution) draft.setKeepOriginalResolution(true);
     if (!draft.keepOriginalFps) draft.setKeepOriginalFps(true);
     if (draft.formPixelFormat !== "yuv420p10le") draft.setFormPixelFormat("yuv420p10le");
-    if (draft.containerFormat !== "mkv") draft.setContainerFormat("mkv");
-    if (draft.containerFaststart) draft.setContainerFaststart(false);
+    // DV 保留允许 MP4 与 MKV；旧 MOV 模板切回 MKV，避免提交后才触发后端容器错误。
+    if (draft.containerFormat === "mov") draft.setContainerFormat("mkv");
     if (draft.clipStartSec !== 0) draft.setClipStartSec(0);
     if (draft.clipEndSec !== durationSec) draft.setClipEndSec(durationSec);
     if (draft.formColorPrimaries !== "bt2020") draft.setFormColorPrimaries("bt2020");
@@ -137,7 +137,6 @@ export function ParameterInspector({
     dolbyVisionStatus.available,
     draft.clipEndSec,
     draft.clipStartSec,
-    draft.containerFaststart,
     draft.containerFormat,
     draft.formCodec,
     draft.formColorPrimaries,
@@ -152,7 +151,6 @@ export function ParameterInspector({
     draft.preserveDolbyVisionMetadata,
     draft.setClipEndSec,
     draft.setClipStartSec,
-    draft.setContainerFaststart,
     draft.setContainerFormat,
     draft.setFormCodec,
     draft.setFormColorPrimaries,
@@ -710,12 +708,12 @@ function OutputInspector({ onPickOutputDirectory }: { onPickOutputDirectory: () 
       </InspectorSection>
       <InspectorSection title={t("parameterInspector.output.container")}>
         <InspectorField label="Format">
-          <Select value={draft.containerFormat} onValueChange={(value) => draft.setContainerFormat(value as "mp4" | "mkv" | "mov")} disabled={draft.preserveDolbyVisionMetadata}>
+          <Select value={draft.containerFormat} onValueChange={(value) => draft.setContainerFormat(value as "mp4" | "mkv" | "mov")}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="mp4">MP4</SelectItem>
               <SelectItem value="mkv">MKV</SelectItem>
-              <SelectItem value="mov">MOV</SelectItem>
+              <SelectItem value="mov" disabled={draft.preserveDolbyVisionMetadata}>MOV</SelectItem>
             </SelectContent>
           </Select>
         </InspectorField>
@@ -723,9 +721,12 @@ function OutputInspector({ onPickOutputDirectory }: { onPickOutputDirectory: () 
           label="Fast Start"
           description={t("parameterInspector.output.faststartHint")}
           checked={draft.containerFaststart}
-          disabled={draft.preserveDolbyVisionMetadata || draft.containerFormat !== "mp4"}
+          disabled={draft.containerFormat !== "mp4"}
           onCheckedChange={draft.setContainerFaststart}
         />
+        {draft.preserveDolbyVisionMetadata ? (
+          <DependencyHint tone="warning">{t("parameterInspector.output.dolbyVisionContainerHint")}</DependencyHint>
+        ) : null}
       </InspectorSection>
       <InspectorSection title={t("parameterInspector.output.clipRange")}>
         <div className="grid grid-cols-2 gap-3">

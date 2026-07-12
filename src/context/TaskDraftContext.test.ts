@@ -3,6 +3,7 @@ import {
   advanceSourceSelection,
   resolveClipRangeAfterMetadataRefresh,
   resolveDolbyVisionAudioMode,
+  resolveDolbyVisionContainerFormat,
   resolveDolbyVisionPreservationAfterMetadata,
 } from "./TaskDraftContext";
 import type { VideoMetadataResult } from "../types/workbench";
@@ -43,6 +44,14 @@ describe("Dolby Vision audio normalization", () => {
 
   test("keeps the requested mode outside the preservation pipeline", () => {
     expect(resolveDolbyVisionAudioMode(false, "custom")).toBe("custom");
+  });
+
+  test("keeps an explicit MP4 selection for the preservation pipeline", () => {
+    expect(resolveDolbyVisionContainerFormat(true, "mp4")).toBe("mp4");
+  });
+
+  test("migrates legacy MOV templates to MKV for the preservation pipeline", () => {
+    expect(resolveDolbyVisionContainerFormat(true, "mov")).toBe("mkv");
   });
 
   test("keeps preservation through a same-path Dolby Vision metadata refresh", () => {
