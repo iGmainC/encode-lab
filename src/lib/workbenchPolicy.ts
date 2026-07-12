@@ -6,8 +6,10 @@ import type {
 } from "../types/workbench";
 import type { TranslationKey } from "../i18n/translations";
 
-/** Dolby Vision MP4 兼容路线允许直接 Copy 的音频编码；E-AC-3 JOC Atmos 识别为 eac3。 */
-const DOLBY_VISION_MP4_COPY_AUDIO_CODECS = new Set(["aac", "ac3", "eac3"]);
+/** Dolby Vision MP4 路线允许直接 Copy 的常用音频编码；E-AC-3 JOC Atmos 识别为 eac3。 */
+const DOLBY_VISION_MP4_COPY_AUDIO_CODECS = new Set([
+  "aac", "ac3", "eac3", "alac", "flac", "mp3", "opus",
+]);
 
 /** 专业参数检查器的固定分组。 */
 export type InspectorTab = "video" | "audio" | "color" | "output";

@@ -109,12 +109,18 @@ describe("workbench HDR output policy", () => {
     expect(getIssueIds(metadata, snapshot)).toContain("dolby-vision-audio-mode");
   });
 
-  test("allows Profile 8.1 MP4 with copied E-AC-3 while preserving the Atmos bitstream", () => {
+  test("allows Profile 8.1 MP4 with common copied audio while preserving the Atmos bitstream", () => {
     const metadata = buildMetadata("DolbyVision");
     if (!metadata.video) throw new Error("video fixture missing");
     metadata.video.dolbyVisionProfile = 8;
     metadata.video.dolbyVisionCompatibilityId = 1;
-    metadata.audioTracks = [{ codecName: "eac3", channels: 6 }];
+    metadata.audioTracks = [
+      { codecName: "eac3", channels: 6 },
+      { codecName: "flac", channels: 2 },
+      { codecName: "alac", channels: 2 },
+      { codecName: "mp3", channels: 2 },
+      { codecName: "opus", channels: 2 },
+    ];
     const snapshot = buildSnapshot();
     snapshot.video.preserveDolbyVisionMetadata = true;
     snapshot.container = { format: "mp4", faststart: true };

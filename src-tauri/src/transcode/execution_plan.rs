@@ -16,9 +16,10 @@ use crate::{
     },
 };
 
-/// 首版 Dolby Vision MP4 兼容路线允许无损复制的音频编码。
+/// Dolby Vision MP4 路线允许直接 Copy 的常用音频编码。
 /// E-AC-3 JOC Atmos 仍显示为 eac3；Copy 模式不会解码或降级其对象元数据。
-const DOLBY_VISION_MP4_COPY_AUDIO_CODECS: [&str; 3] = ["aac", "ac3", "eac3"];
+const DOLBY_VISION_MP4_COPY_AUDIO_CODECS: [&str; 7] =
+    ["aac", "ac3", "eac3", "alac", "flac", "mp3", "opus"];
 
 /// 外部命令类型；执行器根据类型选择 bundled runtime 中的二进制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,7 +493,7 @@ fn validate_dolby_vision_mp4_audio(audio_tracks: &[AudioStreamMetadata]) -> Stor
         unsupported.join(", ")
     };
     Err(StorageError::InvalidPayload(format!(
-        "Dolby Vision MP4 output only supports AAC, AC-3 and E-AC-3 audio copy; found {labels}. Use MKV to preserve TrueHD Atmos or other audio tracks"
+        "Dolby Vision MP4 output only supports AAC, AC-3, E-AC-3, ALAC, FLAC, MP3 and Opus audio copy; found {labels}. Use MKV to preserve TrueHD Atmos, DTS, PCM or other audio tracks"
     )))
 }
 
@@ -976,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn mp4_dolby_vision_should_allow_eac3_and_reject_auxiliary_streams() {
+    fn mp4_dolby_vision_should_allow_common_audio_and_reject_auxiliary_streams() {
         validate_dolby_vision_mp4_audio(&[
             AudioStreamMetadata {
                 codec_name: Some("aac".to_string()),
@@ -993,8 +994,36 @@ mod tests {
                 bit_rate_kbps: None,
                 channel_layout: Some("5.1(side)".to_string()),
             },
+            AudioStreamMetadata {
+                codec_name: Some("flac".to_string()),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                bit_rate_kbps: None,
+                channel_layout: Some("stereo".to_string()),
+            },
+            AudioStreamMetadata {
+                codec_name: Some("alac".to_string()),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                bit_rate_kbps: None,
+                channel_layout: Some("stereo".to_string()),
+            },
+            AudioStreamMetadata {
+                codec_name: Some("mp3".to_string()),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                bit_rate_kbps: None,
+                channel_layout: Some("stereo".to_string()),
+            },
+            AudioStreamMetadata {
+                codec_name: Some("opus".to_string()),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                bit_rate_kbps: None,
+                channel_layout: Some("stereo".to_string()),
+            },
         ])
-        .expect("AAC and E-AC-3 are supported");
+        .expect("common MP4 audio tracks are supported");
 
         let error = validate_dolby_vision_mp4_auxiliary_streams(&[AuxiliaryStreamMetadata {
             stream_type: "subtitle".to_string(),

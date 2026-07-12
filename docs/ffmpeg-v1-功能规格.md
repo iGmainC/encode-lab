@@ -162,7 +162,7 @@ Encode Lab V1 面向视频转码参数调优与批量执行场景，核心价值
 7. `bitrateMode=CRF` 且新编码器不支持时，自动改为 `CBR` 并提示用户确认。
 8. 预览与正式转码都复用同一能力矩阵，避免行为不一致。
 9. HDR10/HLG 重编码必须使用 10-bit 或更高像素格式，并保持 BT.2020/PQ 或 BT.2020/HLG 标签；正式任务不会复用预览专用 SDR tone map。
-10. Dolby Vision Profile 5 / compatibility 0 未开启 RPU 保留时禁止普通重编码；视频流复制不受该限制。开启 RPU 保留后 `audioMode` 必须为 `copy`，草稿和模板恢复时同步归一化，后端执行计划再次强制校验。容器可选 MKV（全轨归档）或 MP4（仅 Profile 8.1、AAC/AC-3/E-AC-3 Copy，E-AC-3 JOC Atmos 保持码流）；MP4 预检必须拒绝 TrueHD Atmos、字幕、附件和 data 流，不能静默丢弃。
+10. Dolby Vision Profile 5 / compatibility 0 未开启 RPU 保留时禁止普通重编码；视频流复制不受该限制。开启 RPU 保留后 `audioMode` 必须为 `copy`，草稿和模板恢复时同步归一化，后端执行计划再次强制校验。容器可选 MKV（全轨归档）或 MP4（仅 Profile 8.1、AAC/AC-3/E-AC-3/ALAC/FLAC/MP3/Opus Copy，E-AC-3 JOC Atmos 保持码流）；MP4 预检必须拒绝 TrueHD Atmos、DTS、PCM、字幕、附件和 data 流，不能静默丢弃。
 
 ## 4.3 任务预览（单播放器分割线对比）
 
