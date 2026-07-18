@@ -176,6 +176,7 @@ function AppRoutes({
   error,
   onRefresh,
   onJobsChanged,
+  onSettingsChanged,
 }: {
   settings: AppSettings | null;
   jobs: JobHistory[];
@@ -187,6 +188,7 @@ function AppRoutes({
   error: string | null;
   onRefresh: () => void;
   onJobsChanged: () => void;
+  onSettingsChanged: (settings: AppSettings) => void;
 }) {
   const { t } = useI18n();
   const navigate = useNavigate();
@@ -448,7 +450,16 @@ function AppRoutes({
               />
             }
           />
-          <Route path="/settings" element={<SettingsPage settings={settings} ffmpegProbe={ffmpegProbe} />} />
+          <Route
+            path="/settings"
+            element={
+              <SettingsPage
+                settings={settings}
+                ffmpegProbe={ffmpegProbe}
+                onSettingsChanged={onSettingsChanged}
+              />
+            }
+          />
           <Route path="*" element={<Navigate to="/workbench" replace />} />
         </Routes>
       </div>
@@ -668,6 +679,7 @@ function WorkbenchApp() {
         error={error ?? listenerErrorText}
         onRefresh={() => void fetchAll()}
         onJobsChanged={() => void fetchAll()}
+        onSettingsChanged={setSettings}
       />
     </TaskDraftProvider>
   );

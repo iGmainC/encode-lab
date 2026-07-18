@@ -1,10 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   CheckCircle2,
   CircleAlert,
   Cpu,
   DownloadCloud,
+  FolderOpen,
   Gauge,
   HardDrive,
   Languages,
@@ -40,10 +43,27 @@ type Props = {
   settings: AppSettings | null;
   /** 桌面宿主对当前 FFmpeg 工具链的实时探测结果。 */
   ffmpegProbe: FfmpegProbeResult | null;
+  /** 设置保存成功后同步应用级快照，供顶栏和后续新任务立即读取。 */
+  onSettingsChanged: (settings: AppSettings) => void;
 };
 
 /** 更新检查和安装过程的前端状态。 */
 type UpdateState = "idle" | "checking" | "ready" | "latest" | "installing" | "unavailable" | "error";
+
+/** 执行设置保存过程的前端状态。 */
+type ExecutionSettingsState = "idle" | "saving" | "saved" | "error";
+
+/** 设置页允许修改的字段补丁，其他兼容字段始终沿用后端快照。 */
+type ExecutionSettingsPatch = Partial<Pick<AppSettings, "concurrencyN" | "defaultOutputDir">>;
+
+/** 后端更新设置命令的最小响应。 */
+type UpdateSettingsResponse = {
+  /** 后端是否已完成持久化和调度器更新。 */
+  ok: boolean;
+};
+
+/** V1 支持的本机并发范围，与后端校验保持一致。 */
+const CONCURRENCY_OPTIONS = Array.from({ length: 8 }, (_, index) => index + 1);
 
 /** 页面内补充文案；已有翻译 key 仍优先通过 t() 获取。 */
 type SettingsCopy = ReturnType<typeof getSettingsCopy>;
@@ -60,7 +80,9 @@ function getSettingsCopy(language: AppLanguage) {
       unavailable: "Unavailable",
       limited: "Limited",
       required: "Required",
-      readOnly: "Live snapshot",
+      editable: "Editable locally",
+      desktopSettingsBadge: "Desktop only",
+      desktopSettingsOnly: "Editing is available in the desktop app only.",
       bundledRuntime: "Bundled runtime",
       systemRuntime: "System PATH",
       unknownRuntime: "Runtime unresolved",
@@ -71,6 +93,15 @@ function getSettingsCopy(language: AppLanguage) {
       outputDescription: "Default output path for new tasks. It can still be overridden per task in the workbench.",
       outputConfigured: "New-task default",
       outputNotConfigured: "Not configured; new tasks can choose a directory in the workbench.",
+      chooseFolder: "Choose folder",
+      clearFolder: "Clear",
+      saveSettings: "Save execution settings",
+      resetSettings: "Reset",
+      savingSettings: "Saving settings...",
+      settingsSaved: "Execution settings saved. Concurrency changes apply immediately; the output directory applies to new tasks.",
+      settingsOperationFailed: "Unable to update execution settings",
+      unknownError: "Unknown error",
+      chooseFolderTitle: "Choose the default output directory",
       liveProbe: "Live probe",
       probePending: "Waiting for probe",
       coreToolchain: "Core toolchain",
@@ -96,7 +127,9 @@ function getSettingsCopy(language: AppLanguage) {
     unavailable: "不可用",
     limited: "受限",
     required: "必需",
-    readOnly: "实时快照",
+    editable: "本机可编辑",
+    desktopSettingsBadge: "仅桌面端",
+    desktopSettingsOnly: "仅桌面应用支持修改执行设置。",
     bundledRuntime: "随包 Runtime",
     systemRuntime: "系统 PATH",
     unknownRuntime: "Runtime 未解析",
@@ -107,6 +140,15 @@ function getSettingsCopy(language: AppLanguage) {
     outputDescription: "新任务的默认输出路径；进入工作台后仍可按任务覆盖。",
     outputConfigured: "新任务默认值",
     outputNotConfigured: "尚未配置；新任务可在工作台中单独选择目录。",
+    chooseFolder: "选择目录",
+    clearFolder: "清除",
+    saveSettings: "保存执行设置",
+    resetSettings: "撤销修改",
+    savingSettings: "正在保存设置...",
+    settingsSaved: "执行设置已保存；并发变更立即生效，默认目录用于后续新任务。",
+    settingsOperationFailed: "执行设置更新失败",
+    unknownError: "未知错误",
+    chooseFolderTitle: "选择默认输出目录",
     liveProbe: "实时探测",
     probePending: "等待探测",
     coreToolchain: "核心工具链",
@@ -155,7 +197,7 @@ function formatVersionSummary(version: string | undefined, fallback: string) {
 /**
  * 环境与设置页：以紧凑检查器呈现真实 Runtime、执行设置与高级能力。
  */
-export function SettingsPage({ settings, ffmpegProbe }: Props) {
+export function SettingsPage({ settings, ffmpegProbe, onSettingsChanged }: Props) {
   const { language, setLanguage, t } = useI18n();
   const { themeMode, setThemeMode } = useTheme();
   const copy = getSettingsCopy(language);
@@ -168,6 +210,14 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const [updateProgress, setUpdateProgress] = useState<UpdateInstallProgress | null>(null);
   const [updateError, setUpdateError] = useState("");
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(settings);
+  const [executionSettingsState, setExecutionSettingsState] = useState<ExecutionSettingsState>("idle");
+  const [executionSettingsError, setExecutionSettingsError] = useState("");
+
+  useEffect(() => {
+    // 后端刷新或保存回写后，以最新事实同步表单；保存反馈独立保留到下一次编辑。
+    setSettingsDraft(settings);
+  }, [settings]);
 
   useEffect(() => {
     if (!desktopRuntime) {
@@ -240,11 +290,70 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
     }
   }
 
+  /**
+   * 更新执行设置草稿，并清除上一轮保存反馈。
+   * @param patch 只允许修改当前页面开放的执行设置字段
+   */
+  function updateSettingsDraft(patch: ExecutionSettingsPatch) {
+    setSettingsDraft((current) => current ? { ...current, ...patch } : current);
+    setExecutionSettingsState("idle");
+    setExecutionSettingsError("");
+  }
+
+  /** 使用系统目录选择器更新默认输出目录。 */
+  async function chooseDefaultOutputDir() {
+    if (!desktopRuntime || !settingsDraft) {
+      return;
+    }
+
+    setExecutionSettingsError("");
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        defaultPath: settingsDraft.defaultOutputDir || undefined,
+        title: copy.chooseFolderTitle,
+      });
+      if (typeof selected === "string") {
+        updateSettingsDraft({ defaultOutputDir: selected });
+      }
+    } catch (error) {
+      setExecutionSettingsState("error");
+      setExecutionSettingsError(formatSettingsError(error, copy.unknownError));
+    }
+  }
+
+  /** 将执行设置持久化，并同步应用级快照。 */
+  async function saveExecutionSettings() {
+    if (!desktopRuntime || !settingsDraft || !hasExecutionSettingsChanges(settings, settingsDraft)) {
+      return;
+    }
+
+    setExecutionSettingsState("saving");
+    setExecutionSettingsError("");
+    try {
+      const response = await invoke<UpdateSettingsResponse>("update_settings", {
+        payload: settingsDraft,
+      });
+      if (!response.ok) {
+        throw new Error(copy.settingsOperationFailed);
+      }
+
+      // 后端已完成落盘和调度器刷新，再更新前端事实，避免出现保存失败但界面先成功的状态。
+      onSettingsChanged(settingsDraft);
+      setExecutionSettingsState("saved");
+    } catch (error) {
+      setExecutionSettingsState("error");
+      setExecutionSettingsError(formatSettingsError(error, copy.unknownError));
+    }
+  }
+
   const updatePercent =
     updateProgress?.contentLength && updateProgress.contentLength > 0
       ? Math.min(100, Math.round((updateProgress.downloadedBytes / updateProgress.contentLength) * 100))
       : null;
   const displayedAppVersion = updateResult?.currentVersion || currentVersion || (desktopRuntime ? "-" : copy.browserPreview);
+  const executionSettingsChanged = hasExecutionSettingsChanges(settings, settingsDraft);
 
   return (
     <div className="grid gap-4">
@@ -288,7 +397,11 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
             <SectionHeader
               title={t("settings.runtime.title")}
               description={t("settings.runtime.description")}
-              action={<Badge variant="secondary">{copy.readOnly}</Badge>}
+              action={
+                <Badge variant="secondary">
+                  {desktopRuntime ? copy.editable : copy.desktopSettingsBadge}
+                </Badge>
+              }
             />
             <div className="divide-y">
               <InspectorRow
@@ -309,9 +422,22 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
                 label={t("settings.concurrency")}
                 description={copy.concurrencyDescription}
               >
-                <div className="font-mono text-base font-semibold tabular-nums">
-                  {settings?.concurrencyN ?? "-"} <span className="text-xs font-normal text-muted-foreground">{copy.concurrentJobs}</span>
-                </div>
+                <Select
+                  value={settingsDraft ? String(settingsDraft.concurrencyN) : ""}
+                  disabled={!desktopRuntime || !settingsDraft || executionSettingsState === "saving"}
+                  onValueChange={(value) => updateSettingsDraft({ concurrencyN: Number(value) })}
+                >
+                  <SelectTrigger className="w-full sm:w-48" aria-label={t("settings.concurrency")}>
+                    <SelectValue placeholder="-" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CONCURRENCY_OPTIONS.map((value) => (
+                      <SelectItem key={value} value={String(value)}>
+                        {value} {copy.concurrentJobs}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </InspectorRow>
 
               <InspectorRow
@@ -319,15 +445,68 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
                 label={t("settings.defaultOutputDir")}
                 description={copy.outputDescription}
               >
-                <div className="min-w-0">
-                  <div className="break-all font-mono text-xs font-medium">
-                    {settings?.defaultOutputDir || t("settings.notSet")}
+                <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="break-all font-mono text-xs font-medium">
+                      {settingsDraft?.defaultOutputDir || t("settings.notSet")}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {settingsDraft?.defaultOutputDir ? copy.outputConfigured : copy.outputNotConfigured}
+                    </div>
                   </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {settings?.defaultOutputDir ? copy.outputConfigured : copy.outputNotConfigured}
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!desktopRuntime || !settingsDraft || executionSettingsState === "saving"}
+                      onClick={() => void chooseDefaultOutputDir()}
+                    >
+                      <FolderOpen data-icon="inline-start" aria-hidden="true" />
+                      {copy.chooseFolder}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={!desktopRuntime || !settingsDraft?.defaultOutputDir || executionSettingsState === "saving"}
+                      onClick={() => updateSettingsDraft({ defaultOutputDir: "" })}
+                    >
+                      {copy.clearFolder}
+                    </Button>
                   </div>
                 </div>
               </InspectorRow>
+            </div>
+            <div className="flex flex-col gap-3 border-t bg-muted/20 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-h-5 text-xs leading-5" aria-live="polite">
+                {!desktopRuntime ? (
+                  <span className="text-muted-foreground">{copy.desktopSettingsOnly}</span>
+                ) : executionSettingsState === "saved" ? (
+                  <span className="text-primary">{copy.settingsSaved}</span>
+                ) : executionSettingsState === "error" ? (
+                  <span className="text-destructive">
+                    {copy.settingsOperationFailed}: {executionSettingsError}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  disabled={!executionSettingsChanged || executionSettingsState === "saving"}
+                  onClick={() => {
+                    setSettingsDraft(settings);
+                    setExecutionSettingsState("idle");
+                    setExecutionSettingsError("");
+                  }}
+                >
+                  {copy.resetSettings}
+                </Button>
+                <Button
+                  disabled={!desktopRuntime || !executionSettingsChanged || executionSettingsState === "saving"}
+                  onClick={() => void saveExecutionSettings()}
+                >
+                  {executionSettingsState === "saving" ? copy.savingSettings : copy.saveSettings}
+                </Button>
+              </div>
             </div>
           </section>
 
@@ -489,6 +668,38 @@ export function SettingsPage({ settings, ffmpegProbe }: Props) {
       </div>
     </div>
   );
+}
+
+/**
+ * 判断页面开放的执行设置是否发生变化。
+ * @param persisted 后端已持久化的设置
+ * @param draft 当前页面草稿
+ * @returns 并发数或默认输出目录变化时返回 true
+ */
+export function hasExecutionSettingsChanges(
+  persisted: AppSettings | null,
+  draft: AppSettings | null,
+) {
+  if (!persisted || !draft) {
+    return false;
+  }
+
+  return persisted.concurrencyN !== draft.concurrencyN
+    || persisted.defaultOutputDir !== draft.defaultOutputDir;
+}
+
+/** 将未知的 Tauri 调用异常转换为用户可读详情。 */
+function formatSettingsError(error: unknown, fallback: string) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  return fallback;
 }
 
 /** 区块标题栏参数。 */
