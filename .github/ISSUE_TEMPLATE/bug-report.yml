@@ -1,0 +1,91 @@
+name: Bug report
+description: Report a reproducible Encode Lab defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Encode Lab. Do not include private media, full local paths, tokens, or signing material.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and release notes.
+          required: true
+        - label: I removed private media and identifying information from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Encode Lab version
+      description: Release tag or commit SHA
+      placeholder: v0.0.8-beta or 58866b8
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS Apple Silicon
+        - Linux x86_64
+        - Windows (unsupported build)
+        - Other source build
+    validations:
+      required: true
+
+  - type: input
+    id: platform-version
+    attributes:
+      label: Operating-system version
+      placeholder: macOS 15.5 or Ubuntu 22.04
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Import …
+        2. Select …
+        3. Start …
+        4. Observe …
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Redacted media metadata
+      description: Paste only the relevant, sanitized ffprobe format/stream information.
+      render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or command
+      description: Remove usernames, local paths, tokens, media titles, and other private information.
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, frequency, regression information, or a synthetic sample link.

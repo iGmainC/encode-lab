@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/iGmainC/encode-lab/security/advisories/new
+    about: Report vulnerabilities privately instead of opening a public issue.
+  - name: Latest release
+    url: https://github.com/iGmainC/encode-lab/releases/latest
+    about: Check the newest published binaries and release notes.

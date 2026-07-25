@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a user problem or workflow improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and the roadmap.
+          required: true
+        - label: This request describes a user problem, not only an implementation preference.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible today, and who experiences it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe what a successful user-visible result would look like.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing workarounds, tools, or narrower solutions you have tried.
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Media and platform scope
+      description: Relevant codecs, containers, HDR formats, platforms, or hardware encoders.
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Supporting evidence
+      description: Documentation, synthetic samples, screenshots, or reproducible commands. Do not attach private media.

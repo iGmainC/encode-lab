@@ -1,203 +1,180 @@
-# Encode Lab 开发 TODO（从 0 到可用版本）
+<p align="center">
+  <img src="./app-icon.svg" width="96" alt="Encode Lab icon" />
+</p>
 
-本清单用于跟踪 `Encode Lab` 从当前阶段到首个可用版本（V1）的实施进度。
+<h1 align="center">Encode Lab</h1>
 
-## 当前状态快照
+<p align="center">
+  A local-first desktop workbench for evidence-driven video transcoding.
+</p>
 
-- 技术栈：Tauri 2 + React + TypeScript + Rust
-- 存储策略：本地 JSON（含 schemaVersion）
-- 并发写控制：按文件独立锁 + 原子写（tmp + fsync + rename）
-- 当前阶段：`M3` 进行中（本地转码、预览、任务中心与模板基础闭环已接入，进入 V1 稳定性收口）
-- 专业工作台：`/workbench` 统一素材、参数检查器、单帧证据、输出校验和入队动作；旧分步路由仅保留兼容重定向。
-- 产品模块调整：见 [`docs/产品业务逻辑与功能模块调整.md`](./docs/产品业务逻辑与功能模块调整.md)
-- 前端偏好设置：内置轻量 i18n 与主题 Provider，当前支持 `zh-CN / en-US` 和 `浅色 / 深色 / 跟随系统`
-- 自动更新：接入 Tauri updater，Release tag 仅接受 `vx.x.x` / `vx.x.x-beta`，版本比较遵循 SemVer
-- 版本注入：发布构建通过 `bun run release:version` 从 tag 生成 Tauri `--config`，不要手动改多个版本文件发布
-- FFmpeg runtime：默认下载并校验 `iGmainC/encode-lab-ffmpeg` 发布的 `ffmpeg-8.1.1-rpu.6` runtime，其中固定包含 FFmpeg/FFprobe、x265 CLI 与 dovi_tool；当前分发基线为 macOS 15 Apple Silicon 和 glibc 2.35 Linux x64，运行时优先使用 bundled 路径，缺失时回退系统 PATH。
+<p align="center">
+  Configure with guardrails, compare actual encoded frames, then send verified jobs to a recoverable FFmpeg queue.
+</p>
 
-## 里程碑 TODO
+<p align="center">
+  <a href="https://github.com/iGmainC/encode-lab/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/iGmainC/encode-lab/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="https://github.com/iGmainC/encode-lab/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/iGmainC/encode-lab?include_prereleases&sort=semver" /></a>
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-0f766e.svg" /></a>
+  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" />
+  <img alt="Rust and React" src="https://img.shields.io/badge/Rust%20%2B%20React-local--first-111827" />
+</p>
 
-### M0 - 规格与基础工程
+<p align="center">
+  <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a> ·
+  <a href="https://github.com/iGmainC/encode-lab/releases/latest">Download</a> ·
+  <a href="./CONTRIBUTING.md">Contributing</a>
+</p>
 
-- [x] 输出完整 V1 功能规格文档（PRD + 技术规格）
-- [x] 明确关键约束（并发 N、2-pass 预览降级、模板库、本地 JSON）
-- [x] 补充编码器能力联动规则（如 `h265 + hevc_nvenc` 禁用 2-pass）
-- [x] 补充分割线横纵切换要求
-- [x] 补充 V2+ 后期展望（Server-Worker）并保持不影响 V1
+> [!IMPORTANT]
+> Encode Lab is beta software. Keep the source media until you have inspected the output, and test important workflows on short clips before processing irreplaceable footage.
 
-### M1 - 本地数据底座与联调基础
+![Encode Lab workbench](./design-qa-artifacts/pro-inspector-implementation-pass-6.jpg)
 
-#### Rust 数据模型与存储层
-- [x] 建立 `models/ storage/ commands/` 分层模块
-- [x] 实现 `TaskConfig / Template / AppSettings / JobHistory` 模型
-- [x] JSON envelope 结构：`schemaVersion + updatedAt + data`
-- [x] 文件路径管理：`settings.json / tasks.json / templates.json / jobs-history.json`
-- [x] 写入原子化：临时文件写入 + `flush/sync_all` + `rename`
-- [x] 并发写锁：按文件独立锁（`HashMap<PathBuf, Arc<Mutex<()>>>`）
-- [x] 实现 repository：`settings/tasks/templates/jobs_history`
-- [x] 轻量错误模型（`NotFound/SchemaVersionUnsupported/AtomicWriteFailed` 等）
+## Why Encode Lab?
 
-#### Tauri 命令（CRUD）
-- [x] `create_task`
-- [x] `update_task`
-- [x] `list_tasks`
-- [x] `save_template`
-- [x] `update_template`
-- [x] `delete_template`
-- [x] `duplicate_template`
-- [x] `list_templates`
-- [x] `get_settings`
-- [x] `update_settings`
+Most FFmpeg frontends stop at exposing parameters. Encode Lab focuses on the decision that comes before a long transcode:
 
-#### 测试与验证
-- [x] repository smoke tests（初始化、并发写同文件、并发写不同文件）
-- [x] `cargo test` 通过
-- [x] 前端基础联调页面可用
-- [x] 前端对接 `get_settings / list_tasks / list_templates`
-- [x] 浏览器设计 QA 使用只读示例态，写操作显示明确的 Tauri 宿主边界
-- [x] `bun run build` 通过
+1. Understand the source and the capabilities of the current machine.
+2. Configure an output with codec, container, audio, HDR, and stream-preservation guardrails.
+3. Encode a real frame and compare it with the source instead of showing a cosmetic filter preview.
+4. Review deterministic output facts before queueing.
+5. Observe, cancel, recover, and inspect the result from one local workflow.
 
-### M1.5 - 命令与数据校验补强（建议尽快）
+The application runs locally. Source paths, task history, templates, preview frames, and command output are not uploaded to a hosted Encode Lab service.
 
-- [x] 在 Rust 命令层增加 payload 校验（字段范围、联动规则）
-- [x] 将 `StorageError` 统一映射为结构化前端错误码
-- [x] 增加 schemaVersion 升级钩子占位（`migrate_v1_to_v2`）
-- [x] 增加 JSON 文件损坏恢复策略（备份回滚）
-- [x] 补充集成测试：连续写入 + 读写竞争 + 异常中断恢复
+## Highlights
 
-### M2 - 转码引擎与队列调度
+- **One professional workbench** — source inspection, video/audio/HDR controls, frame comparison, output validation, and queueing stay in one context.
+- **Evidence before execution** — the preview path encodes a single frame with the selected parameters, decodes it, and presents a source/output split comparison.
+- **Capability-aware configuration** — available encoders and incompatible combinations are derived from the detected runtime rather than presented as promises.
+- **Recoverable local queue** — FIFO scheduling, configurable concurrency, progress metrics, cancellation, interrupted-job recovery, and atomic final-output publication.
+- **Dolby Vision-aware boundaries** — dedicated RPU-preservation routes validate the source, container, streams, output metadata, frame counts, and per-frame RPU semantics before publication.
+- **Deterministic runtime** — official builds bundle a checksummed FFmpeg/FFprobe, x265 CLI, and dovi_tool runtime for supported platforms, with a system-runtime fallback for development.
+- **Local reusable plans** — save parameter snapshots without binding them to one source file or output directory.
+- **Light and dark themes** with Simplified Chinese and English UI.
 
-#### 环境探测与命令拼装
-- [x] 实现 `detect_ffmpeg`
-- [x] 实现编码器能力探测（至少覆盖当前平台可用编码器）
-- [x] 编码器注册表扩展：加入 `AV1/VP9` 能力项（可用性探测 + 基础能力标记）
-- [x] 编码器说明元数据 JSON 化维护（展示名、描述、平台提示、能力备注）
-- [x] 实现任务参数 -> ffmpeg 命令拼装器
-- [x] 实现冲突参数处理和提示（结构化参数优先）；`audio.customArgs` 仅允许音频输出白名单，禁止视频、输入、路径和额外输出参数
-- [x] `advancedArgs` 仅接受专业面板生成的安全 option/value 白名单，未知、无值、filtergraph 与嵌套 I/O 参数在持久化前拒绝
-- [x] 细化 `AV1/VP9` 的参数策略（码率模式、preset 适配、硬件能力差异提示）
-- [x] 参数策略细化扩展到全部编码器（CRF/CBR-ABR 约束、preset 合法集、硬件差异提示）
-- [x] 专业工作台重构：素材摘要、视频/音频/色彩/输出检查器、单帧预览、输出校验和常驻入队动作
+## Supported platforms
 
-#### 队列与进程生命周期
-- [x] 实现全局并发 `N` + FIFO 调度
-- [x] 实现基础任务状态机：`queued -> running -> completed|failed|canceled|interrupted`
-- [x] 实现 `cancel` 控制（排队任务移除、运行中 FFmpeg 进程终止）
-- [ ] 实现 `pause/resume`（macOS 信号控制）
-- [x] 实现任务指标采样（`progress/fps/speed/eta/time`）
-- [x] 实现 stderr 尾部摘要落盘
-- [ ] 实现退出码落盘
+| Platform | Official release target | Bundled runtime | Notes |
+| --- | --- | --- | --- |
+| macOS 15+ on Apple Silicon | Yes | Yes | Ad-hoc signed unless a notarized build is explicitly announced. |
+| Linux x86_64, glibc 2.35+ | Yes | Yes | AppImage, Debian, and RPM bundles are produced by the release workflow. |
+| Windows | Not in the current release matrix | No | Source-level portability remains, but Windows is not currently a supported binary target. |
+| Intel macOS | Not in the current release matrix | No | The current runtime baseline is Apple Silicon. |
 
-#### 命令接口扩展
-- [x] `enqueue_transcode_job`
-- [x] `list_jobs`
-- [x] 通过 `job:metrics` 事件推送运行指标，并用稳定 `stepCode` 交给前端按当前语言渲染阶段名称
-- [x] `control_job`（当前支持 `cancel`）
-- [x] `delete_job`
+Installers, updater signatures, and a `SHA256SUMS` manifest are published on the [GitHub Releases page](https://github.com/iGmainC/encode-lab/releases/latest).
 
-### M2.5 - 预览能力
+### macOS first launch
 
-- [x] 实现单播放器分割线对比渲染（同一播放器）
-- [x] 分割线方向切换：`vertical/horizontal`
-- [x] 分割线位置拖拽同步（`splitterPosition`）
-- [x] 参数变更防抖刷新（当前后端最小渲染间隔 500ms）
-- [x] 预览会话状态机（`idle/warming/running/updating/stopped/error`）
-- [x] `2-pass` 任务在预览中自动降级 `1-pass`
-- [x] 仅显示实际单帧生成速度，不伪造整片转码耗时或体积预测
-- [x] 独立系统全屏预览窗口，并透传源帧率以复用主窗口的片尾安全区
-- [x] 替换素材时立即失效旧元数据；重复选择同一路径也会重新读取，并在入队处理器内复核参数策略
-- [x] 视频流 Copy 的正式命令保持流复制且不混入重编码参数；单帧预览使用 FFV1 无损临时运输层生成画面证据
-- [x] Dolby Vision RPU 保留链路强制音频 Copy，并在草稿、模板恢复和后端执行计划中统一校验；MKV 作为全轨归档输出，MP4 开放 Profile 8.1 + AAC/AC-3/E-AC-3/ALAC/FLAC/MP3/Opus（含 E-AC-3 JOC Atmos）Copy 路线，TrueHD Atmos、DTS、PCM、字幕和附件需使用 MKV
+Current community builds use an ad-hoc signature and are not notarized. macOS may therefore require an explicit approval from **System Settings → Privacy & Security** after the first launch.
 
-### M3 - 模板闭环与稳定性
-
-- [x] 模板页面基础操作（搜索、应用、复制、删除）
-- [x] 工作台内联保存当前参数为方案，并剥离素材、截取范围和输出目录
-- [ ] 模板页面完整编辑能力
-- [ ] 模板标签筛选
-- [x] 方案应用到统一工作台，并保留当前任务级素材、名称、截取范围和输出目录
-- [x] 任务中心基础信息面板（命令、错误、输入输出、状态与指标）
-- [ ] 转码中缩略图抓取与展示
-- [x] 输出重名自动改名规则落地（输出校验展示 jobId 短后缀与可选冲突序号占位；入队后写入真实值且不覆盖旧文件）
-- [ ] 日志滚动与导出（排障用）
-- [x] 已完成任务 VMAF 质量评估命令
-
-### M4 - 验收与发布
-
-- [ ] 对齐规格文档验收条目并逐项打勾
-- [ ] 完成 E2E 回归（核心流程 + 失败场景）
-- [x] 打包发布与自动更新链路（GitHub Release + Tauri updater 签名）
-- [ ] 发布说明与已知问题清单
-
-## V2+ 后期展望（不纳入 V1 验收）
-
-- [ ] Server 调度原型
-- [ ] Worker 注册与心跳
-- [ ] 混合调度（拉取/推送）
-- [ ] 混合媒资策略（共享存储/中转）
-
-## V1 收口验收清单
-
-本清单用于把当前阶段从“功能已接入”推进到“可发布、可验证、可维护”。勾选必须以代码、命令输出、Release 产物或真实运行结果为依据。
-
-### 发布前本地检查
-
-- [x] `git status --short --branch` 确认只包含本次计划内改动。
-- [x] `bun run build` 通过。
-- [x] `cd src-tauri && cargo test` 通过。
-- [x] `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/release.yml")'` 通过。
-- [x] `git diff --check` 无空白错误。
-- [x] 版本 tag 使用 `vx.x.x` 或 `vx.x.x-beta`，并通过 `bun run release:version` 生成 Tauri 发布配置。
-
-### v0.0.8-beta 发布检查
-
-- [x] `v0.0.8-beta` tag 位于 `main` 历史上。
-- [x] GitHub Actions `Release` workflow 全部 job 成功。
-- [x] Release 包含 `latest.json`、安装包和对应 `.sig` 签名资产。
-- [x] `https://github.com/iGmainC/encode-lab/releases/latest/download/latest.json` 可匿名访问。
-- [x] `latest.json.version` 等于 `0.0.8-beta`。
-- [x] `latest.json.platforms` 中每个平台都有非空 `signature`。
-- [x] `latest.json.platforms` 中每个 `url` 都指向 `iGmainC/encode-lab` 主仓库 Release，并且可匿名访问。
-- [x] 新安装包内置 updater endpoint 指向主仓库，不再依赖 `iGmainC/encode-lab-releases`。
-
-### V1 主链路人工验收
-
-- [ ] 选择本地视频后能读取元数据、时长、分辨率、HDR/编码标签。
-- [ ] 调整编码器、码率模式、分辨率、FPS、2-pass 时，UI 联动和禁用规则符合能力矩阵。
-- [ ] 工作台能生成源帧和转码后帧，分割线横纵切换与拖拽方向一致。
-- [ ] 启用 2-pass 的任务在预览中显示降级提示，正式转码仍执行完整两遍。
-- [ ] 入队后任务中心能看到 `queued/running/completed|failed|canceled|interrupted` 状态变化。
-- [ ] 转码中能看到 `progress/fps/speed/eta/time` 指标更新。
-- [ ] `cancel` 能取消排队任务和运行中的 FFmpeg 进程，并回写任务历史。
-- [ ] 输出文件默认带 jobId 短后缀；重名冲突时自动追加序号，不覆盖旧文件。
-- [ ] 任务完成后能查看命令、输入输出、错误或体积变化信息。
-- [ ] 模板能保存、搜索、应用、复制、删除；应用模板会更新 `lastUsedAt`。
-- [ ] HDR10/HLG 的位深与色彩标签不安全时阻止入队；Profile 5 未开启 RPU 保留时阻止普通重编码。
-- [ ] 时间轴定位到片尾时回退到安全编码样本窗口，真实素材仍能生成预览帧。
-- [ ] 已完成任务可运行 VMAF 质量评估，并返回平均分、帧数、日志路径和实际命令。
-- [ ] 缺失 FFmpeg 或 FFprobe 时给出可操作错误，不出现静默失败。
-
-### 当前未完成但不阻塞 v0.0.8-beta
-
-- [ ] `pause/resume` 信号控制。
-- [ ] 退出码结构化落盘。
-- [ ] 转码中缩略图抓取与展示。
-- [ ] 模板页面完整编辑与标签筛选。
-- [ ] 日志滚动与导出。
-- [ ] 完整 E2E 自动化回归。
-
-## 常用命令
+### Linux AppImage
 
 ```bash
-# 前端构建
-bun run build
+chmod +x ./<downloaded-file>.AppImage
+./<downloaded-file>.AppImage
+```
 
-# 下载当前平台 FFmpeg runtime
-bun run prepare:ffmpeg
+## Dolby Vision scope
 
-# Tauri Rust 测试
-cd src-tauri && cargo test
+Encode Lab does not claim that every Dolby Vision source can be safely re-encoded.
 
-# 本地开发
+The current dedicated preservation pipeline is intentionally narrow:
+
+- single-layer Profile 5 / compatibility ID 0, or Profile 8 / compatibility ID 1;
+- base layer plus RPU, with no enhancement layer;
+- 10-bit constant-frame-rate HEVC;
+- no crop, resize, frame-rate conversion, trimming, or two-pass encode;
+- MKV for full-stream archival semantics;
+- MP4 only for the validated Profile 8.1 route and compatible copied audio, without subtitles, attachments, data streams, TrueHD, DTS, or PCM.
+
+Unsupported combinations are rejected before queueing. The complete checkout-specific policy is documented in [the V1 specification](./docs/ffmpeg-v1-%E5%8A%9F%E8%83%BD%E8%A7%84%E6%A0%BC.md).
+
+## Development
+
+### Prerequisites
+
+- [Bun](https://bun.sh/) matching the version declared in `package.json`
+- current stable [Rust](https://www.rust-lang.org/tools/install)
+- platform build dependencies required by [Tauri 2](https://v2.tauri.app/start/prerequisites/)
+- internet access on the first desktop build to download the checksummed Encode Lab FFmpeg runtime
+
+### Start the desktop app
+
+```bash
+git clone https://github.com/iGmainC/encode-lab.git
+cd encode-lab
+bun install --frozen-lockfile
 bun run tauri dev
 ```
+
+The browser-only development server is also useful for UI work:
+
+```bash
+bun run dev -- --host localhost
+```
+
+Browser mode uses clearly marked example data and does not expose desktop-only writes, native window management, or real queue execution.
+
+### Validate a change
+
+```bash
+bun run check
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+GitHub Actions repeats the frontend checks and Rust tests on pull requests and pushes to `main`.
+
+## Architecture
+
+```text
+React + TypeScript
+  ├─ workbench and validation policy
+  ├─ frame comparison and local UI state
+  └─ Tauri command/event boundary
+               │
+Rust + Tauri
+  ├─ media probing and capability detection
+  ├─ preview process lifecycle
+  ├─ command and preservation-plan construction
+  ├─ FIFO job manager and crash recovery
+  └─ atomic JSON repositories
+               │
+Bundled command-line runtime
+  └─ FFmpeg · FFprobe · x265 · dovi_tool
+```
+
+Persistent application data is stored under the platform application-data directory. Disposable preview frames, evaluation logs, pass logs, partial outputs, and multistage workspaces are placed under the system temporary directory and are actively reclaimed.
+
+## Release process
+
+Releases are built from SemVer tags matching `vX.Y.Z` or `vX.Y.Z-beta`.
+
+```bash
+bun run release:version -- v0.1.0-beta
+git tag -s v0.1.0-beta -m "Encode Lab v0.1.0-beta"
+git push origin v0.1.0-beta
+```
+
+The release workflow verifies that the tag belongs to `main`, runs the quality gate, builds the supported native bundles, signs updater artifacts, generates release notes, and verifies `latest.json`, signatures, and anonymous asset downloads. Maintainer setup and rollback instructions live in [docs/releasing.md](./docs/releasing.md).
+
+## Project documentation
+
+- [Product flow and module boundaries](./docs/%E4%BA%A7%E5%93%81%E4%B8%9A%E5%8A%A1%E9%80%BB%E8%BE%91%E4%B8%8E%E5%8A%9F%E8%83%BD%E6%A8%A1%E5%9D%97%E8%B0%83%E6%95%B4.md)
+- [V1 product and technical specification](./docs/ffmpeg-v1-%E5%8A%9F%E8%83%BD%E8%A7%84%E6%A0%BC.md)
+- [Development roadmap and acceptance checklist](./docs/development-roadmap.md)
+- [Distributed transcoding exploration](./docs/%E8%8A%82%E7%82%B9%E6%8B%93%E5%B1%95%E4%B8%8E%E5%88%86%E5%B8%83%E5%BC%8F%E8%BD%AC%E7%A0%81%E8%AE%BE%E8%AE%A1.md)
+
+## Contributing and security
+
+Issues and pull requests are welcome. Start with [CONTRIBUTING.md](./CONTRIBUTING.md), and use GitHub's private vulnerability reporting flow described in [SECURITY.md](./SECURITY.md) for security-sensitive reports.
+
+Please do not upload private source media, full local paths, signing keys, or unredacted FFmpeg logs to public issues.
+
+## License
+
+Encode Lab source code is available under the [MIT License](./LICENSE).
+
+Official application bundles include separately licensed command-line tools. In particular, the bundled FFmpeg runtime enables GPL components. See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) and the reproducible [encode-lab-ffmpeg](https://github.com/iGmainC/encode-lab-ffmpeg) build repository for the applicable terms and source references.

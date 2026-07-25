@@ -6,7 +6,11 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,20 +19,22 @@ jobs:
   verify-tag:
     name: Verify release tag
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       tag_name: ${{ steps.release_tag.outputs.tag_name }}
       app_version: ${{ steps.release_tag.outputs.app_version }}
       tauri_config: ${{ steps.release_tag.outputs.tauri_config }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - name: Install release script dependencies
         run: bun install --frozen-lockfile
@@ -44,10 +50,73 @@ jobs:
           git fetch origin main --depth=1
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
+  quality-gate:
+    name: Release quality gate
+    needs: verify-tag
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        shell: bash
+        run: |
+          # Release 前同时验证前端产物和 Tauri Rust 层。
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Bun downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test and build frontend
+        run: bun run check
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+
   build-tauri:
     name: Build ${{ matrix.platform.name }}
-    needs: verify-tag
+    needs: [verify-tag, quality-gate]
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +130,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Linux system dependencies
         if: matrix.platform.name == 'Linux'
@@ -80,12 +151,12 @@ jobs:
             file
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # 缓存 Bun 下载包，node_modules 仍由 lockfile 重新展开，避免跨平台产物污染。
           path: ~/.bun/install/cache
@@ -94,10 +165,10 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # 缓存 Cargo registry/git 与 Tauri release target，显著减少重复 tag 构建时间。
           workspaces: "./src-tauri -> target"
@@ -106,7 +177,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build and publish Tauri release
-        uses: tauri-apps/tauri-action@v0.6.2
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -114,12 +185,15 @@ jobs:
         with:
           tagName: ${{ needs.verify-tag.outputs.tag_name }}
           releaseName: Encode Lab ${{ needs.verify-tag.outputs.tag_name }}
-          releaseBody: See the assets to download this version and install.
+          releaseBody: |
+            Download the installer for your platform from the assets below.
+
+            Encode Lab is beta software. Keep your source media until you have verified the output.
           releaseDraft: false
           # updater 使用 GitHub latest 端点；beta 也必须作为普通 Release 才能被 latest.json 发现。
           prerelease: false
           generateReleaseNotes: true
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           tauriScript: bun run tauri
           args: ${{ matrix.platform.args }} --config '${{ needs.verify-tag.outputs.tauri_config }}'
 
@@ -128,6 +202,9 @@ jobs:
     needs: [verify-tag, build-tauri]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - name: Stop when build failed
         if: needs.build-tauri.result != 'success'
@@ -178,4 +255,19 @@ jobs:
             fi
           done < <(jq -r '.platforms[].url' /tmp/latest.json | sort -u)
 
-          exit "$failed"
+          if [[ "$failed" -ne 0 ]]; then
+            exit "$failed"
+          fi
+
+          # 为人工下载提供独立校验清单；updater 自身仍以 Tauri 签名作为信任边界。
+          checksum_dir="$(mktemp -d)"
+          gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --dir "$checksum_dir"
+          (
+            cd "$checksum_dir"
+            find . -maxdepth 1 -type f ! -name "SHA256SUMS" -printf "%P\0" \
+              | sort -z \
+              | xargs -0 sha256sum >SHA256SUMS
+          )
+          gh release upload "$TAG_NAME" "$checksum_dir/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
