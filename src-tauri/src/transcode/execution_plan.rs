@@ -703,7 +703,7 @@ fn resolve_vbv_kbps(video: &VideoStreamMetadata) -> u32 {
     }
 }
 
-fn partial_output_path(output_file: &str, job_id: &str) -> StorageResult<PathBuf> {
+pub(crate) fn partial_output_path(output_file: &str, job_id: &str) -> StorageResult<PathBuf> {
     let output = Path::new(output_file);
     let parent = output.parent().ok_or_else(|| {
         StorageError::InvalidPayload("output path must have a parent directory".to_string())

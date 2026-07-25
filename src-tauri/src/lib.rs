@@ -9,10 +9,11 @@ mod storage;
 mod transcode;
 
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -33,6 +34,8 @@ pub struct AppState {
     pub(crate) transcode_manager: TranscodeManager,
     /** 应用运行期目录；正式转码的多阶段临时产物按 job id 隔离。 */
     pub(crate) runtime_dir: PathBuf,
+    /** 主窗口与独立预览窗口之间的进程内快照，禁止落盘。 */
+    pub(crate) detached_preview_payload: Arc<Mutex<Option<String>>>,
     pub(crate) allow_exit: Arc<AtomicBool>,
     pub(crate) open_jobs_on_next_activate: Arc<AtomicBool>,
 }
@@ -42,23 +45,56 @@ fn build_state<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<AppState, Stora
         .path()
         .app_data_dir()
         .map_err(|_| StorageError::PathResolveFailed)?;
-    let runtime_dir = build_runtime_dir(&app_data_dir);
+    let runtime_dir = build_runtime_dir();
+
+    // 旧版本曾把可丢弃的运行产物写入 Application Support；迁移后主动清理，避免永久残留。
+    cleanup_legacy_runtime_dir(&app_data_dir);
+    let storage = storage::AppStorage::new(app_data_dir);
+    transcode::job_manager::recover_stale_transcode_state(&storage, &runtime_dir)?;
+    commands::evaluation::cleanup_stale_evaluation_runtime();
 
     Ok(AppState {
-        storage: storage::AppStorage::new(app_data_dir),
+        storage,
         preview_manager: PreviewManager::new(runtime_dir.clone()),
         transcode_manager: TranscodeManager::new(),
         runtime_dir,
+        detached_preview_payload: Arc::new(Mutex::new(None)),
         allow_exit: Arc::new(AtomicBool::new(false)),
         open_jobs_on_next_activate: Arc::new(AtomicBool::new(false)),
     })
 }
 
-fn build_runtime_dir(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join("runtime")
+/** 构建应用运行期目录；预览和转码中间产物必须进入系统临时目录。 */
+fn build_runtime_dir() -> PathBuf {
+    std::env::temp_dir().join("encode-lab").join("runtime")
+}
+
+/** 清理旧版本位于持久化应用数据目录中的运行期产物。 */
+fn cleanup_legacy_runtime_dir(app_data_dir: &Path) {
+    let _ = fs::remove_dir_all(app_data_dir.join("runtime"));
 }
 
 const TRAY_ID: &str = "encode-lab-tray"; // 托盘图标固定 id，用于任务状态变化时定位并刷新菜单。
+const DETACHED_PREVIEW_WINDOW_LABEL: &str = "preview-detached"; // 独立预览窗口的固定 label。
+
+/** 独立预览窗口销毁后回收邮箱和当前帧 pin。 */
+fn cleanup_detached_preview_state(state: &AppState) {
+    let frame_pin_id = state
+        .detached_preview_payload
+        .lock()
+        .ok()
+        .and_then(|mut payload| payload.take())
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(&payload).ok())
+        .and_then(|payload| {
+            payload
+                .get("framePinId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    if let Some(frame_pin_id) = frame_pin_id {
+        let _ = state.preview_manager.release_frame_pin(&frame_pin_id);
+    }
+}
 
 fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let menu = build_tray_menu(app)?;
@@ -243,6 +279,8 @@ fn mark_exit_allowed_and_quit<R: Runtime>(app_handle: AppHandle<R>) {
     if let Some(state) = app_handle.try_state::<AppState>() {
         // 二次确认通过后允许本次退出，避免 ExitRequested 再次拦截。
         state.allow_exit.store(true, Ordering::SeqCst);
+        // 预览的三个 FFmpeg 阶段都是独立子进程，退出前必须统一终止并删除运行目录。
+        state.preview_manager.shutdown();
         // 退出前统一中断排队/运行中的任务，并回写 history，避免下次启动误判。
         state
             .transcode_manager
@@ -273,7 +311,13 @@ fn should_confirm_exit<R: Runtime>(app_handle: &AppHandle<R>) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    // 必须最先注册：第二个进程在进入 setup 和运行期垃圾回收前就会退出。
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        show_main_window(app);
+    }));
+    let builder = builder
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
@@ -304,6 +348,12 @@ pub fn run() {
             commands::preview::start_preview,
             commands::preview::update_preview,
             commands::preview::stop_preview,
+            commands::preview::pin_preview_frame,
+            commands::preview::release_preview_frame,
+            commands::preview::set_detached_preview_payload,
+            commands::preview::get_detached_preview_payload,
+            commands::preview::clear_detached_preview_payload,
+            commands::preview::close_detached_preview_window,
             commands::evaluation::run_quality_evaluation,
             commands::transcode::build_ffmpeg_command,
             commands::transcode::control_job,
@@ -334,10 +384,32 @@ pub fn run() {
             } if label == "main" => {
                 open_jobs_if_requested(app_handle);
             }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } if label == DETACHED_PREVIEW_WINDOW_LABEL => {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    cleanup_detached_preview_state(&state);
+                }
+            }
             tauri::RunEvent::ExitRequested { api, .. } if should_confirm_exit(app_handle) => {
                 // 处理 Cmd+Q 等系统退出路径，和托盘退出保持同一套二次确认。
                 api.prevent_exit();
                 confirm_exit_with_running_jobs(app_handle.clone());
+            }
+            tauri::RunEvent::ExitRequested { .. } => {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    // 没有运行任务的系统退出不会走确认回调，仍需要回收预览管线。
+                    state.preview_manager.shutdown();
+                }
+            }
+            tauri::RunEvent::Exit => {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    // macOS 系统菜单和快捷键可能直接结束事件循环；最终退出事件必须再次幂等回收。
+                    state.preview_manager.shutdown();
+                    state.transcode_manager.shutdown(app_handle, &state.storage);
+                }
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
@@ -346,4 +418,90 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        sync::{atomic::AtomicBool, Arc, Mutex},
+    };
+
+    use uuid::Uuid;
+
+    use super::{
+        build_runtime_dir, cleanup_detached_preview_state, cleanup_legacy_runtime_dir,
+        preview::PreviewManager, storage::AppStorage, transcode::job_manager::TranscodeManager,
+        AppState,
+    };
+
+    #[test]
+    fn runtime_dir_should_use_system_temp_directory() {
+        assert_eq!(
+            build_runtime_dir(),
+            std::env::temp_dir().join("encode-lab").join("runtime")
+        );
+    }
+
+    #[test]
+    fn legacy_runtime_cleanup_should_preserve_persistent_data() {
+        let app_data_dir =
+            std::env::temp_dir().join(format!("encode-lab-legacy-runtime-test-{}", Uuid::new_v4()));
+        let runtime_dir = app_data_dir.join("runtime");
+        fs::create_dir_all(&runtime_dir).expect("create legacy runtime directory");
+        fs::write(runtime_dir.join("preview.png"), b"preview")
+            .expect("write legacy runtime artifact");
+        fs::write(app_data_dir.join("settings.json"), b"settings")
+            .expect("write persistent settings");
+
+        cleanup_legacy_runtime_dir(&app_data_dir);
+
+        assert!(!runtime_dir.exists());
+        assert!(app_data_dir.join("settings.json").is_file());
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn detached_window_cleanup_should_release_payload_frame_pin() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "encode-lab-detached-cleanup-test-{}",
+            Uuid::new_v4()
+        ));
+        let runtime_dir = base_dir.join("runtime");
+        let preview_manager = PreviewManager::new(runtime_dir.clone());
+        let session_dir = runtime_dir.join("preview").join("session-a");
+        fs::create_dir_all(&session_dir).expect("create detached cleanup session");
+        let source_path = session_dir.join("source-2.png");
+        let preview_path = session_dir.join("preview-2.png");
+        fs::write(&source_path, b"source").expect("write detached source frame");
+        fs::write(&preview_path, b"preview").expect("write detached preview frame");
+        let pinned = preview_manager
+            .pin_frame(
+                &source_path.to_string_lossy(),
+                &preview_path.to_string_lossy(),
+            )
+            .expect("pin detached preview frame");
+        let state = AppState {
+            storage: AppStorage::new(base_dir.join("data")),
+            preview_manager,
+            transcode_manager: TranscodeManager::new(),
+            runtime_dir: runtime_dir.clone(),
+            detached_preview_payload: Arc::new(Mutex::new(Some(
+                serde_json::json!({ "framePinId": pinned.frame_pin_id }).to_string(),
+            ))),
+            allow_exit: Arc::new(AtomicBool::new(false)),
+            open_jobs_on_next_activate: Arc::new(AtomicBool::new(false)),
+        };
+
+        cleanup_detached_preview_state(&state);
+
+        assert!(state
+            .detached_preview_payload
+            .lock()
+            .expect("detached payload lock")
+            .is_none());
+        assert!(!std::path::Path::new(&pinned.source_image_path).exists());
+        assert!(!std::path::Path::new(&pinned.preview_image_path).exists());
+        let _ = fs::remove_dir_all(base_dir);
+    }
 }

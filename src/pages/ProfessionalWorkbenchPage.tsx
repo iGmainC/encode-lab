@@ -19,6 +19,9 @@ import { useI18n } from "../i18n/I18nProvider";
 import {
   DETACHED_PREVIEW_UPDATE_EVENT,
   buildDetachedPreviewPayload,
+  clearDetachedPreviewPayload,
+  pinDetachedPreviewFrame,
+  releaseDetachedPreviewFrame,
   type DetachedPreviewPayload,
   writeDetachedPreviewPayload,
 } from "../lib/detachedPreview";
@@ -89,6 +92,7 @@ export function ProfessionalWorkbenchPage({
   const [compareOrder, setCompareOrder] = useState<CompareImageOrder>("source-first");
   const [previewRuntime, setPreviewRuntime] = useState(INITIAL_PREVIEW_RUNTIME);
   const previewRuntimeRef = useRef(INITIAL_PREVIEW_RUNTIME);
+  const detachedPreviewOpeningRef = useRef(false);
   const [detachedPreviewError, setDetachedPreviewError] = useState<string | null>(null);
   const [isEnqueuing, setIsEnqueuing] = useState(false);
   const [enqueueError, setEnqueueError] = useState<string | null>(null);
@@ -132,32 +136,47 @@ export function ProfessionalWorkbenchPage({
       return;
     }
 
-    const latestRuntime = runtimeOverride ?? previewRuntimeRef.current;
-    const payload: DetachedPreviewPayload = buildDetachedPreviewPayload({
-      sourceFile: draft.sourceFilePath,
-      sourceDurationSec: draft.videoMetadata?.durationSec,
-      sourceFps: draft.videoMetadata?.video?.fps,
-      sourceHdrType: draft.videoMetadata?.video?.hdrType,
-      sourceColorPrimaries: draft.videoMetadata?.video?.colorPrimaries,
-      sourceColorTransfer: draft.videoMetadata?.video?.colorTransfer,
-      sourceColorSpace: draft.videoMetadata?.video?.colorSpace,
-      sourceColorRange: draft.videoMetadata?.video?.colorRange,
-      taskDraftSnapshot: draft.taskDraftSnapshot,
-      splitMode,
-      splitterPosition,
-      compareOrder,
-      currentTimeSec: latestRuntime.currentTimeSec,
-      currentFrame: latestRuntime.currentFrame,
-    });
+    if (detachedPreviewOpeningRef.current) {
+      return;
+    }
+    detachedPreviewOpeningRef.current = true;
 
-    setDetachedPreviewError(null);
-    writeDetachedPreviewPayload(payload);
+    const latestRuntime = runtimeOverride ?? previewRuntimeRef.current;
+    let ownedFramePinId: string | undefined;
+    let detachedPayloadTransferred = false;
+    let windowCreationPending = false;
 
     try {
+      const pinnedFrame = await pinDetachedPreviewFrame(latestRuntime.currentFrame);
+      ownedFramePinId = pinnedFrame.framePinId;
+      const payload: DetachedPreviewPayload = buildDetachedPreviewPayload({
+        sourceFile: draft.sourceFilePath,
+        sourceDurationSec: draft.videoMetadata?.durationSec,
+        sourceFps: draft.videoMetadata?.video?.fps,
+        sourceHdrType: draft.videoMetadata?.video?.hdrType,
+        sourceColorPrimaries: draft.videoMetadata?.video?.colorPrimaries,
+        sourceColorTransfer: draft.videoMetadata?.video?.colorTransfer,
+        sourceColorSpace: draft.videoMetadata?.video?.colorSpace,
+        sourceColorRange: draft.videoMetadata?.video?.colorRange,
+        taskDraftSnapshot: draft.taskDraftSnapshot,
+        splitMode,
+        splitterPosition,
+        compareOrder,
+        currentTimeSec: latestRuntime.currentTimeSec,
+        currentFrame: pinnedFrame.currentFrame,
+        framePinId: pinnedFrame.framePinId,
+      });
+
+      setDetachedPreviewError(null);
+      await writeDetachedPreviewPayload(payload);
+
       const existingWindow = await WebviewWindow.getByLabel(DETACHED_PREVIEW_WINDOW_LABEL);
       if (existingWindow) {
         // 已存在的独立窗口只同步快照并切回系统全屏，避免重复创建窗口。
         await existingWindow.emit(DETACHED_PREVIEW_UPDATE_EVENT, payload);
+        // emit 成功后由独立窗口接管 pin 生命周期。
+        detachedPayloadTransferred = true;
+        ownedFramePinId = undefined;
         await existingWindow.setFocus();
         await lockDetachedPreviewWindow(existingWindow);
         return;
@@ -184,17 +203,64 @@ export function ProfessionalWorkbenchPage({
         maximized: true,
         fullscreen: true,
       });
+      windowCreationPending = true;
+      let windowCreationSettled = false;
+
+      /**
+       * 回收创建失败时仍由主窗口持有的资源。
+       * @param error 窗口创建或监听失败原因
+       */
+      const handleWindowCreationError = async (error: unknown) => {
+        if (windowCreationSettled) {
+          return;
+        }
+        windowCreationSettled = true;
+        await releaseDetachedPreviewFrame(ownedFramePinId);
+        await clearDetachedPreviewPayload();
+        ownedFramePinId = undefined;
+        detachedPreviewOpeningRef.current = false;
+        setDetachedPreviewError(
+          t("preview.detached.createFailed", { message: String(error) }),
+        );
+      };
 
       void previewWindow.once("tauri://created", () => {
-        // 窗口创建成功后再补发一次快照，覆盖 localStorage 读取时序差异。
-        void previewWindow.emit(DETACHED_PREVIEW_UPDATE_EVENT, payload);
+        if (windowCreationSettled) {
+          return;
+        }
+        windowCreationSettled = true;
+        // 窗口创建成功后，邮箱与 pin 生命周期正式转交给独立窗口。
+        detachedPayloadTransferred = true;
+        ownedFramePinId = undefined;
+        // 窗口创建成功后再补发一次快照，覆盖进程内邮箱首次读取的时序差异。
+        void previewWindow
+          .emit(DETACHED_PREVIEW_UPDATE_EVENT, payload)
+          .catch((error) => {
+            setDetachedPreviewError(error instanceof Error ? error.message : String(error));
+          })
+          .finally(() => {
+            detachedPreviewOpeningRef.current = false;
+          });
         void lockDetachedPreviewWindow(previewWindow);
+      }).catch((error) => {
+        void handleWindowCreationError(error);
       });
       void previewWindow.once("tauri://error", (event) => {
-        setDetachedPreviewError(t("preview.detached.createFailed", { message: String(event.payload) }));
+        void handleWindowCreationError(event.payload);
+      }).catch((error) => {
+        void handleWindowCreationError(error);
       });
     } catch (error) {
+      if (!detachedPayloadTransferred) {
+        await releaseDetachedPreviewFrame(ownedFramePinId);
+        await clearDetachedPreviewPayload();
+      }
       setDetachedPreviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      // 新建窗口需等 created/error 事件完成；其余路径在本次调用结束时即可解锁。
+      if (!windowCreationPending) {
+        detachedPreviewOpeningRef.current = false;
+      }
     }
   }
 

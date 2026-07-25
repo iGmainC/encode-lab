@@ -16,6 +16,8 @@ use crate::{
     AppState,
 };
 
+const MAX_RETAINED_VMAF_LOGS: usize = 20; // 当前进程最多保留的可追溯 VMAF 日志数。
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunQualityEvaluationRequest {
@@ -123,7 +125,16 @@ fn run_vmaf_evaluation(
         return Err(CommandError::new("evaluation_run_failed", stderr));
     }
 
-    let (score, frame_count) = parse_vmaf_log(&log_path)?;
+    let (score, frame_count) = match parse_vmaf_log(&log_path) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = std::fs::remove_file(&log_path);
+            return Err(error);
+        }
+    };
+    if let Some(log_dir) = log_path.parent() {
+        cleanup_old_vmaf_logs(log_dir, &log_path, MAX_RETAINED_VMAF_LOGS);
+    }
 
     Ok(RunQualityEvaluationResponse {
         evaluation_id,
@@ -231,6 +242,40 @@ fn build_vmaf_log_path(evaluation_id: &str) -> CommandResult<PathBuf> {
     Ok(dir.join(format!("{evaluation_id}-vmaf.json")))
 }
 
+/** 应用启动时清理上一进程留下的 VMAF 临时日志。 */
+pub(crate) fn cleanup_stale_evaluation_runtime() {
+    let dir = std::env::temp_dir().join("encode-lab").join("evaluations");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/** 保留当前日志与最近的有界历史，删除其余 VMAF JSON。 */
+fn cleanup_old_vmaf_logs(dir: &Path, current_log: &Path, retained_count: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with("-vmaf.json"))
+                && path != current_log
+        })
+        .collect::<Vec<_>>();
+    logs.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+
+    let retained_history_count = retained_count.saturating_sub(1);
+    let remove_count = logs.len().saturating_sub(retained_history_count);
+    for path in logs.into_iter().take(remove_count) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn shell_join(args: &[String]) -> String {
     args.iter()
         .map(|item| shell_quote(item))
@@ -256,8 +301,10 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{completed_job_files, is_completed_status};
+    use super::{cleanup_old_vmaf_logs, completed_job_files, is_completed_status};
     use crate::models::JobHistory;
+    use std::fs;
+    use uuid::Uuid;
 
     #[test]
     fn completed_job_files_should_reject_non_completed_job() {
@@ -294,5 +341,34 @@ mod tests {
         assert!(is_completed_status("completed"));
         assert!(is_completed_status("Completed"));
         assert!(!is_completed_status("running"));
+    }
+
+    #[test]
+    fn vmaf_log_cleanup_should_keep_current_log_and_bound_history() {
+        let dir =
+            std::env::temp_dir().join(format!("encode-lab-vmaf-retention-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create VMAF retention test directory");
+        let current_log = dir.join("current-vmaf.json");
+        fs::write(&current_log, b"current").expect("write current VMAF log");
+        for index in 0..4 {
+            fs::write(dir.join(format!("history-{index}-vmaf.json")), b"history")
+                .expect("write historical VMAF log");
+        }
+
+        cleanup_old_vmaf_logs(&dir, &current_log, 2);
+
+        let retained_logs = fs::read_dir(&dir)
+            .expect("read retained VMAF logs")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with("-vmaf.json"))
+            })
+            .count();
+        assert_eq!(retained_logs, 2);
+        assert!(current_log.is_file());
+        let _ = fs::remove_dir_all(dir);
     }
 }

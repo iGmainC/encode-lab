@@ -6,6 +6,7 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { useI18n } from "../i18n/I18nProvider";
+import { requestConfirmation } from "../lib/confirmation";
 import { isTauriRuntime } from "../lib/tauriRuntime";
 import type {
   ApplyTemplateResponse,
@@ -116,7 +117,7 @@ export function TemplatesPage({ templates, onTemplatesChanged, onApplyTemplate }
    * @param templateId 参数方案 id
    */
   async function deleteTemplate(templateId: string) {
-    if (!window.confirm(t("presets.confirmDelete"))) {
+    if (!(await requestConfirmation(t("presets.confirmDelete")))) {
       return;
     }
 

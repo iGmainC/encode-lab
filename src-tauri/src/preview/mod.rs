@@ -4,7 +4,10 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -110,6 +113,23 @@ pub struct StopPreviewResponse {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PinPreviewFrameResponse {
+    /** 独立窗口持有的临时帧副本 id。 */
+    pub frame_pin_id: String,
+    /** 已固定的源图路径。 */
+    pub source_image_path: String,
+    /** 已固定的预览图路径。 */
+    pub preview_image_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleasePreviewFrameResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreviewFrameEvent {
     pub preview_session_id: String,
     pub time_ms: u64,
@@ -179,8 +199,19 @@ struct PreviewSdrTonemapSupport {
 #[derive(Clone)]
 struct RunningPreviewProcess {
     seq: u64,
-    child: Arc<Mutex<Option<Child>>>,
+    state: Arc<Mutex<PreviewProcessState>>,
+    source_path: PathBuf,
     encoded_path: PathBuf,
+    output_path: PathBuf,
+}
+
+/** 单次预览渲染的可取消进程状态；三个 FFmpeg 阶段复用同一状态槽。 */
+#[derive(Default)]
+struct PreviewProcessState {
+    /** 当前正在运行的 FFmpeg 子进程。 */
+    child: Option<Child>,
+    /** 一旦取消即保持为 true，阻止后续阶段继续启动。 */
+    canceled: bool,
 }
 
 struct RenderRequest {
@@ -199,6 +230,7 @@ pub struct PreviewManager {
     sessions: Arc<Mutex<HashMap<String, PreviewSession>>>,
     processes: Arc<Mutex<HashMap<String, RunningPreviewProcess>>>,
     runtime_dir: Arc<Mutex<Option<PathBuf>>>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl PreviewManager {
@@ -209,6 +241,34 @@ impl PreviewManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             processes: Arc::new(Mutex::new(HashMap::new())),
             runtime_dir: Arc::new(Mutex::new(Some(runtime_dir))),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /** 停止全部预览进程并删除本次运行期预览目录。 */
+    pub fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.clear();
+        }
+
+        let process_ids = self
+            .processes
+            .lock()
+            .map(|processes| processes.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for process_id in process_ids {
+            self.cancel_process(&process_id);
+        }
+
+        if let Some(preview_dir) = self
+            .runtime_dir
+            .lock()
+            .ok()
+            .and_then(|runtime_dir| runtime_dir.clone())
+            .map(|runtime_dir| runtime_dir.join("preview"))
+        {
+            let _ = fs::remove_dir_all(preview_dir);
         }
     }
 
@@ -217,6 +277,7 @@ impl PreviewManager {
         _app: AppHandle<R>,
         payload: PreviewConfig,
     ) -> CommandResult<StartPreviewResponse> {
+        self.ensure_running()?;
         validate_preview_input(&payload)?;
 
         let degraded_from_two_pass = payload.task_config_snapshot.video.enable_two_pass;
@@ -255,6 +316,7 @@ impl PreviewManager {
         preview_session_id: &str,
         patch: PreviewUpdatePatch,
     ) -> CommandResult<UpdatePreviewResponse> {
+        self.ensure_running()?;
         let render_request = {
             let mut sessions = self.sessions.lock().map_err(|_| {
                 CommandError::new("preview_lock_failed", "preview session lock poisoned")
@@ -322,15 +384,104 @@ impl PreviewManager {
         Ok(StopPreviewResponse { ok: true })
     }
 
+    /** 为独立窗口复制一对受控临时帧，避免主 session 清理后路径失效。 */
+    pub fn pin_frame(
+        &self,
+        source_image_path: &str,
+        preview_image_path: &str,
+    ) -> CommandResult<PinPreviewFrameResponse> {
+        self.ensure_running()?;
+        let preview_root = self.preview_runtime_dir()?;
+        let source_path = validate_preview_frame_path(&preview_root, source_image_path)?;
+        let preview_path = validate_preview_frame_path(&preview_root, preview_image_path)?;
+        let frame_pin_id = Uuid::new_v4().to_string();
+        let pin_dir = preview_root.join("pins").join(&frame_pin_id);
+        fs::create_dir_all(&pin_dir)
+            .map_err(|err| CommandError::new("preview_pin_failed", err.to_string()))?;
+        let pinned_source_path = pin_dir.join("source.png");
+        let pinned_preview_path = pin_dir.join("preview.png");
+
+        let copy_result = (|| {
+            fs::copy(&source_path, &pinned_source_path)
+                .map_err(|err| CommandError::new("preview_pin_failed", err.to_string()))?;
+            fs::copy(&preview_path, &pinned_preview_path)
+                .map_err(|err| CommandError::new("preview_pin_failed", err.to_string()))?;
+            Ok::<(), CommandError>(())
+        })();
+        if let Err(error) = copy_result {
+            let _ = fs::remove_dir_all(pin_dir);
+            return Err(error);
+        }
+
+        Ok(PinPreviewFrameResponse {
+            frame_pin_id,
+            source_image_path: pinned_source_path.to_string_lossy().to_string(),
+            preview_image_path: pinned_preview_path.to_string_lossy().to_string(),
+        })
+    }
+
+    /** 释放独立窗口不再使用的临时帧副本；重复释放保持幂等。 */
+    pub fn release_frame_pin(
+        &self,
+        frame_pin_id: &str,
+    ) -> CommandResult<ReleasePreviewFrameResponse> {
+        Uuid::parse_str(frame_pin_id)
+            .map_err(|_| CommandError::new("invalid_payload", "framePinId is invalid"))?;
+        let pin_dir = self.preview_runtime_dir()?.join("pins").join(frame_pin_id);
+        let _ = fs::remove_dir_all(pin_dir);
+        Ok(ReleasePreviewFrameResponse { ok: true })
+    }
+
+    /** 拒绝在应用退出清理开始后创建或更新预览任务。 */
+    fn ensure_running(&self) -> CommandResult<()> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(CommandError::new(
+                "preview_shutting_down",
+                "preview manager is shutting down",
+            ));
+        }
+        Ok(())
+    }
+
+    /** 返回预览运行目录。 */
+    fn preview_runtime_dir(&self) -> CommandResult<PathBuf> {
+        self.runtime_dir
+            .lock()
+            .map_err(|_| {
+                CommandError::new("preview_runtime_failed", "preview runtime lock poisoned")
+            })?
+            .clone()
+            .map(|runtime_dir| runtime_dir.join("preview"))
+            .ok_or_else(|| {
+                CommandError::new("preview_runtime_failed", "preview runtime dir missing")
+            })
+    }
+
     fn schedule_render<R: Runtime>(
         &self,
         app: AppHandle<R>,
         session: PreviewSession,
         transition: PreviewState,
     ) -> CommandResult<()> {
-        let (session, process) = self.spawn_preview_process_with_sdr_fallback(session)?;
+        self.ensure_running()?;
         let manager = self.clone();
         std::thread::spawn(move || {
+            // 源图、编码和解码全部在工作线程启动，Tauri IPC 可立即返回并处理取消/退出。
+            let requested_session = session.clone();
+            let (session, process) = match manager.spawn_preview_process_with_sdr_fallback(session)
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    let latest_seq = manager.sessions.lock().ok().and_then(|sessions| {
+                        sessions.get(&requested_session.id).map(|item| item.seq)
+                    });
+                    if latest_seq == Some(requested_session.seq) {
+                        let _ = emit_preview_error(&app, requested_session, error);
+                    }
+                    return;
+                }
+            };
+
             let _ = app.emit(
                 "preview:state",
                 PreviewStateEvent {
@@ -482,6 +633,7 @@ impl PreviewManager {
         &self,
         session: &PreviewSession,
     ) -> Result<RunningPreviewProcess, CommandError> {
+        self.ensure_running()?;
         let runtime_dir = self
             .runtime_dir
             .lock()
@@ -492,6 +644,17 @@ impl PreviewManager {
             .ok_or_else(|| {
                 CommandError::new("preview_runtime_failed", "preview runtime dir missing")
             })?;
+
+        let is_current_session = self
+            .sessions
+            .lock()
+            .map_err(|_| CommandError::new("preview_lock_failed", "preview session lock poisoned"))?
+            .get(&session.id)
+            .map(|current| current.seq == session.seq)
+            .unwrap_or(false);
+        if !is_current_session {
+            return Err(preview_cancelled_error());
+        }
 
         let session_dir = runtime_dir.join("preview").join(&session.id);
         fs::create_dir_all(&session_dir)
@@ -507,6 +670,7 @@ impl PreviewManager {
                 source_path.as_path(),
                 encoded_path.as_path(),
             ],
+            session.seq,
         );
 
         let time_ms = session
@@ -534,55 +698,63 @@ impl PreviewManager {
         .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
         source_args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
 
-        // 源图用作左侧基准层，避免 WebView 直接解码用户原始文件失败。
-        run_blocking_ffmpeg_args(source_args, &source_path)?;
-
-        let mut args = build_preview_encoded_frame_command_args(
-            &session.config.task_config_snapshot,
-            &session.config.input_file,
-            &encoded_path.to_string_lossy(),
-            PreviewCommandOptions {
-                time_sec: time_ms as f64 / 1000.0,
-                render_scale: session.config.render_scale,
-                sdr_tonemap_mode: session.sdr_tonemap_mode,
-                source_color: Some(source_color_from_preview_config(&session.config)),
-            },
-        )
-        .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
-
-        // 先编码单帧再解码为 PNG，避免 WebView 播放目标编码格式，同时保留编码质量差异。
-        args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
-
-        let child = ffmpeg_command()
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
-
-        let child_slot = Arc::new(Mutex::new(Some(child)));
         let process = RunningPreviewProcess {
             seq: session.seq,
-            child: child_slot.clone(),
-            encoded_path,
+            state: Arc::new(Mutex::new(PreviewProcessState::default())),
+            source_path: source_path.clone(),
+            encoded_path: encoded_path.clone(),
+            output_path: output_path.clone(),
         };
 
-        match self.processes.lock() {
-            Ok(mut processes) => {
-                processes.insert(session.id.clone(), process.clone());
-            }
-            Err(_) => {
-                if let Ok(mut slot) = child_slot.lock() {
-                    if let Some(mut child) = slot.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
+        let replaced_process = {
+            let sessions = self.sessions.lock().map_err(|_| {
+                CommandError::new("preview_lock_failed", "preview session lock poisoned")
+            })?;
+            let current_seq = sessions.get(&session.id).map(|current| current.seq);
+            if current_seq != Some(session.seq) {
+                drop(sessions);
+                if current_seq.is_none() {
+                    // stop 可能发生在首次校验与目录创建之间；此时归还刚重建的空 session 目录。
+                    let _ = fs::remove_dir_all(&session_dir);
                 }
-                return Err(CommandError::new(
-                    "preview_lock_failed",
-                    "preview process lock poisoned",
-                ));
+                return Err(preview_cancelled_error());
             }
+            let mut processes = self.processes.lock().map_err(|_| {
+                CommandError::new("preview_lock_failed", "preview process lock poisoned")
+            })?;
+            processes.insert(session.id.clone(), process.clone())
+        };
+        if let Some(replaced_process) = replaced_process {
+            // 并发更新可能交错到达；新渲染接管时必须终止旧管线。
+            cancel_running_preview_process(&replaced_process);
+        }
+
+        let prepare_result = (|| {
+            // 源图用作左侧基准层，也必须纳入 session 取消管理。
+            run_tracked_ffmpeg_args(&process, source_args, &source_path)?;
+
+            let mut args = build_preview_encoded_frame_command_args(
+                &session.config.task_config_snapshot,
+                &session.config.input_file,
+                &encoded_path.to_string_lossy(),
+                PreviewCommandOptions {
+                    time_sec: time_ms as f64 / 1000.0,
+                    render_scale: session.config.render_scale,
+                    sdr_tonemap_mode: session.sdr_tonemap_mode,
+                    source_color: Some(source_color_from_preview_config(&session.config)),
+                },
+            )
+            .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
+
+            // 先编码单帧再解码为 PNG，避免 WebView 播放目标编码格式，同时保留编码质量差异。
+            args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
+            start_tracked_ffmpeg_args(&process, args)
+        })();
+
+        if let Err(error) = prepare_result {
+            self.remove_process_if_current(&session.id, session.seq);
+            cancel_running_preview_process(&process);
+            return Err(error);
         }
 
         Ok(process)
@@ -608,53 +780,28 @@ impl PreviewManager {
         let output_path = session_dir.join(format!("preview-{}.png", session.seq));
         let source_path = session_dir.join(format!("source-{}.png", session.seq));
 
-        loop {
-            let mut child_guard = process.child.lock().map_err(|_| {
-                CommandError::new("preview_lock_failed", "preview process lock poisoned")
-            })?;
-            let Some(child) = child_guard.as_mut() else {
-                return Err(CommandError::new(
-                    "preview_render_cancelled",
-                    "preview render process was cancelled",
-                ));
-            };
+        let render_result = (|| {
+            wait_tracked_ffmpeg(&process, &process.encoded_path)?;
 
-            match child
-                .try_wait()
-                .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?
-            {
-                Some(status) => {
-                    let mut stderr = String::new();
-                    if let Some(mut pipe) = child.stderr.take() {
-                        let _ = pipe.read_to_string(&mut stderr);
-                    }
-                    child_guard.take();
-                    drop(child_guard);
-                    self.remove_process_if_current(&session.id, session.seq);
+            let mut decode_args = build_preview_decode_frame_command_args(
+                &process.encoded_path.to_string_lossy(),
+                &output_path.to_string_lossy(),
+            )
+            .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
+            decode_args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
 
-                    if !status.success() {
-                        let _ = fs::remove_file(&output_path);
-                        let _ = fs::remove_file(&process.encoded_path);
-                        return Err(CommandError::new("preview_render_failed", stderr));
-                    }
+            // 解码阶段继续复用同一进程状态，stop/update 可以终止完整管线。
+            run_tracked_ffmpeg_args(&process, decode_args, &output_path)
+        })();
 
-                    let mut decode_args = build_preview_decode_frame_command_args(
-                        &process.encoded_path.to_string_lossy(),
-                        &output_path.to_string_lossy(),
-                    )
-                    .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
-                    decode_args.splice(1..1, ["-loglevel".to_string(), "error".to_string()]);
-                    run_blocking_ffmpeg_args(decode_args, &output_path)?;
-                    let _ = fs::remove_file(&process.encoded_path);
-
-                    break;
-                }
-                None => {
-                    drop(child_guard);
-                    thread::sleep(Duration::from_millis(50));
-                }
-            }
+        self.remove_process_if_current(&session.id, session.seq);
+        let _ = fs::remove_file(&process.encoded_path);
+        if let Err(error) = render_result {
+            cleanup_preview_process_files(&process);
+            return Err(error);
         }
+        // 当前帧交付前保留上一个成功帧，避免 WebView 切换图片时短暂读到失效路径。
+        cleanup_old_preview_images(&session_dir, 2);
 
         let time_ms = session
             .config
@@ -688,12 +835,7 @@ impl PreviewManager {
             .and_then(|mut processes| processes.remove(preview_session_id));
 
         if let Some(process) = process {
-            if let Ok(mut child_slot) = process.child.lock() {
-                if let Some(mut child) = child_slot.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-            }
+            cancel_running_preview_process(&process);
         }
     }
 
@@ -742,23 +884,132 @@ impl PreviewManager {
     }
 }
 
-fn run_blocking_ffmpeg_args(args: Vec<String>, output_path: &Path) -> Result<(), CommandError> {
-    let output = ffmpeg_command()
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
+/** 构造统一的预览取消错误。 */
+fn preview_cancelled_error() -> CommandError {
+    CommandError::new(
+        "preview_render_cancelled",
+        "preview render process was cancelled",
+    )
+}
 
-    if !output.status.success() {
-        let _ = fs::remove_file(output_path);
+/** 启动一个受 session 生命周期管理的 FFmpeg 阶段。 */
+fn start_tracked_ffmpeg_args(
+    process: &RunningPreviewProcess,
+    args: Vec<String>,
+) -> Result<(), CommandError> {
+    let mut state = process
+        .state
+        .lock()
+        .map_err(|_| CommandError::new("preview_lock_failed", "preview process lock poisoned"))?;
+    if state.canceled {
+        return Err(preview_cancelled_error());
+    }
+    if state.child.is_some() {
         return Err(CommandError::new(
-            "preview_render_failed",
-            String::from_utf8_lossy(&output.stderr).to_string(),
+            "preview_process_busy",
+            "preview process stage is already running",
         ));
     }
 
+    // 持锁完成 spawn 和登记，确保并发 stop 不会漏过刚启动的子进程。
+    let child = ffmpeg_command()
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?;
+    state.child = Some(child);
     Ok(())
+}
+
+/** 等待当前 FFmpeg 阶段完成，并在失败时删除该阶段的不完整输出。 */
+fn wait_tracked_ffmpeg(
+    process: &RunningPreviewProcess,
+    output_path: &Path,
+) -> Result<(), CommandError> {
+    loop {
+        let mut state = process.state.lock().map_err(|_| {
+            CommandError::new("preview_lock_failed", "preview process lock poisoned")
+        })?;
+        if state.canceled {
+            return Err(preview_cancelled_error());
+        }
+        let Some(child) = state.child.as_mut() else {
+            return Err(CommandError::new(
+                "preview_process_missing",
+                "preview process stage is missing",
+            ));
+        };
+
+        match child
+            .try_wait()
+            .map_err(|err| CommandError::new("preview_render_failed", err.to_string()))?
+        {
+            Some(status) => {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                state.child.take();
+                drop(state);
+
+                if !status.success() {
+                    let _ = fs::remove_file(output_path);
+                    return Err(CommandError::new("preview_render_failed", stderr));
+                }
+                return Ok(());
+            }
+            None => {
+                drop(state);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/** 启动并等待一个受控 FFmpeg 阶段。 */
+fn run_tracked_ffmpeg_args(
+    process: &RunningPreviewProcess,
+    args: Vec<String>,
+    output_path: &Path,
+) -> Result<(), CommandError> {
+    start_tracked_ffmpeg_args(process, args)?;
+    wait_tracked_ffmpeg(process, output_path)
+}
+
+/** 删除单次预览渲染尚未交付给前端的全部文件。 */
+fn cleanup_preview_process_files(process: &RunningPreviewProcess) {
+    let _ = fs::remove_file(&process.source_path);
+    let _ = fs::remove_file(&process.encoded_path);
+    let _ = fs::remove_file(&process.output_path);
+}
+
+/** 取消单次预览的当前及后续阶段，并回收尚未交付的文件。 */
+fn cancel_running_preview_process(process: &RunningPreviewProcess) {
+    if let Ok(mut state) = process.state.lock() {
+        state.canceled = true;
+        if let Some(mut child) = state.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    cleanup_preview_process_files(process);
+}
+
+/** 校验需要固定的帧确实来自受控预览目录，防止复制任意本地文件。 */
+fn validate_preview_frame_path(preview_root: &Path, value: &str) -> CommandResult<PathBuf> {
+    let canonical_root = fs::canonicalize(preview_root)
+        .map_err(|err| CommandError::new("preview_pin_failed", err.to_string()))?;
+    let canonical_path = fs::canonicalize(value)
+        .map_err(|err| CommandError::new("preview_pin_failed", err.to_string()))?;
+    let is_png = canonical_path.extension().and_then(|value| value.to_str()) == Some("png");
+    if !canonical_path.starts_with(&canonical_root) || !canonical_path.is_file() || !is_png {
+        return Err(CommandError::new(
+            "invalid_payload",
+            "preview frame must be a PNG inside the preview runtime directory",
+        ));
+    }
+    Ok(canonical_path)
 }
 
 fn validate_preview_input(payload: &PreviewConfig) -> CommandResult<()> {
@@ -1081,7 +1332,7 @@ fn estimate_dimensions(config: &PreviewConfig) -> (u32, u32) {
     (0, 0)
 }
 
-fn cleanup_old_preview_media(session_dir: &Path, active_files: &[&Path]) {
+fn cleanup_old_preview_media(session_dir: &Path, active_files: &[&Path], active_seq: u64) {
     let entries = match fs::read_dir(session_dir) {
         Ok(value) => value,
         Err(_) => return,
@@ -1091,13 +1342,74 @@ fn cleanup_old_preview_media(session_dir: &Path, active_files: &[&Path]) {
         let path = entry.path();
         let is_preview_media = matches!(
             path.extension().and_then(|value| value.to_str()),
-            // PNG/JPG 可能已被独立预览窗口复用；保留到 session 结束，避免路径失效。
+            // 编码中间媒体不对前端暴露；仅当前阶段文件可继续保留。
             Some("mp4") | Some("mkv")
         );
-        if is_preview_media && !active_files.iter().any(|active_file| path == *active_file) {
+        let belongs_to_newer_render = preview_media_sequence(&path)
+            .map(|sequence| sequence > active_seq)
+            .unwrap_or(false);
+        if is_preview_media
+            && !belongs_to_newer_render
+            && !active_files.iter().any(|active_file| path == *active_file)
+        {
+            // 迟到的旧工作线程只能清理自身及更旧文件，不能破坏已启动的新序号渲染。
             let _ = fs::remove_file(path);
         }
     }
+}
+
+/** 从 `preview-<seq>.mkv/mp4` 取出中间媒体序号。 */
+fn preview_media_sequence(path: &Path) -> Option<u64> {
+    if !matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("mp4") | Some("mkv")
+    ) {
+        return None;
+    }
+    path.file_stem()?
+        .to_str()?
+        .strip_prefix("preview-")?
+        .parse()
+        .ok()
+}
+
+/** 仅保留 session 内最近若干个成功帧的源图与预览图。 */
+fn cleanup_old_preview_images(session_dir: &Path, retained_frame_count: usize) {
+    let entries = match fs::read_dir(session_dir) {
+        Ok(value) => value
+            .flatten()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let mut frame_sequences = entries
+        .iter()
+        .filter_map(|path| preview_image_sequence(path))
+        .collect::<Vec<_>>();
+    frame_sequences.sort_unstable_by(|left, right| right.cmp(left));
+    frame_sequences.dedup();
+    frame_sequences.truncate(retained_frame_count);
+
+    for path in entries {
+        let Some(sequence) = preview_image_sequence(&path) else {
+            continue;
+        };
+        if !frame_sequences.contains(&sequence) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/** 从 `source-<seq>.png` 或 `preview-<seq>.png` 取出帧序号。 */
+fn preview_image_sequence(path: &Path) -> Option<u64> {
+    if path.extension().and_then(|value| value.to_str()) != Some("png") {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    stem.strip_prefix("source-")
+        .or_else(|| stem.strip_prefix("preview-"))?
+        .parse()
+        .ok()
 }
 
 fn cleanup_stale_preview_runtime(runtime_dir: &Path) {
@@ -1116,15 +1428,23 @@ mod tests {
     };
     use crate::transcode::command_builder::PreviewSdrTonemapMode;
 
-    use std::time::{Duration, Instant};
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+    use uuid::Uuid;
 
     use super::{
-        build_preview_filter, build_render_request, ffmpeg_filters_support_preview_sdr_tonemap,
-        is_current_deferred_render, preview_error_is_sdr_tonemap_runtime_failure,
-        preview_source_supports_sdr_tonemap, resolve_preview_sdr_tonemap_with_support,
-        sanitize_preview_config, should_degrade_dolby_vision_preview,
-        should_retry_without_sdr_tonemap, should_tone_map_preview_to_sdr, CompareOrientation,
-        PreviewConfig, PreviewSdrTonemapSupport, RenderDecision,
+        build_preview_filter, build_render_request, cancel_running_preview_process,
+        cleanup_old_preview_images, cleanup_old_preview_media,
+        ffmpeg_filters_support_preview_sdr_tonemap, is_current_deferred_render,
+        preview_error_is_sdr_tonemap_runtime_failure, preview_source_supports_sdr_tonemap,
+        resolve_preview_sdr_tonemap_with_support, sanitize_preview_config,
+        should_degrade_dolby_vision_preview, should_retry_without_sdr_tonemap,
+        should_tone_map_preview_to_sdr, start_tracked_ffmpeg_args, CompareOrientation,
+        PreviewConfig, PreviewManager, PreviewProcessState, PreviewSdrTonemapSupport,
+        RenderDecision, RunningPreviewProcess,
     };
     use crate::commands::error::CommandError;
 
@@ -1446,5 +1766,142 @@ mod tests {
 
         assert!(!is_current_deferred_render(&session, 2));
         assert!(is_current_deferred_render(&session, 3));
+    }
+
+    #[test]
+    fn canceled_process_should_reject_followup_stage_and_remove_files() {
+        let dir =
+            std::env::temp_dir().join(format!("encode-lab-preview-cancel-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create preview process test directory");
+        let source_path = dir.join("source.png");
+        let encoded_path = dir.join("preview.mkv");
+        let output_path = dir.join("preview.png");
+        for path in [&source_path, &encoded_path, &output_path] {
+            fs::write(path, b"artifact").expect("write preview process artifact");
+        }
+        let process = RunningPreviewProcess {
+            seq: 1,
+            state: Arc::new(Mutex::new(PreviewProcessState::default())),
+            source_path: source_path.clone(),
+            encoded_path: encoded_path.clone(),
+            output_path: output_path.clone(),
+        };
+
+        cancel_running_preview_process(&process);
+        let error = start_tracked_ffmpeg_args(&process, vec!["-version".to_string()])
+            .expect_err("canceled process must reject followup stage");
+
+        assert_eq!(error.code, "preview_render_cancelled");
+        assert!(!source_path.exists());
+        assert!(!encoded_path.exists());
+        assert!(!output_path.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manager_shutdown_should_remove_preview_runtime() {
+        let runtime_dir = std::env::temp_dir().join(format!(
+            "encode-lab-preview-shutdown-test-{}",
+            Uuid::new_v4()
+        ));
+        let manager = PreviewManager::new(runtime_dir.clone());
+        let session_dir = runtime_dir.join("preview").join("session-a");
+        fs::create_dir_all(&session_dir).expect("create preview session directory");
+        fs::write(session_dir.join("source.png"), b"preview").expect("write preview artifact");
+
+        manager.shutdown();
+
+        assert!(!runtime_dir.join("preview").exists());
+        let _ = fs::remove_dir_all(runtime_dir);
+    }
+
+    #[test]
+    fn preview_image_cleanup_should_keep_latest_two_successful_frames() {
+        let session_dir = std::env::temp_dir().join(format!(
+            "encode-lab-preview-retention-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&session_dir).expect("create preview retention test directory");
+        for sequence in [2, 4, 5] {
+            fs::write(
+                session_dir.join(format!("source-{sequence}.png")),
+                b"source",
+            )
+            .expect("write source preview frame");
+            fs::write(
+                session_dir.join(format!("preview-{sequence}.png")),
+                b"preview",
+            )
+            .expect("write encoded preview frame");
+        }
+
+        cleanup_old_preview_images(&session_dir, 2);
+
+        assert!(!session_dir.join("source-2.png").exists());
+        assert!(!session_dir.join("preview-2.png").exists());
+        for sequence in [4, 5] {
+            assert!(session_dir.join(format!("source-{sequence}.png")).is_file());
+            assert!(session_dir
+                .join(format!("preview-{sequence}.png"))
+                .is_file());
+        }
+        let _ = fs::remove_dir_all(session_dir);
+    }
+
+    #[test]
+    fn stale_preview_cleanup_should_preserve_newer_render_media() {
+        let session_dir = std::env::temp_dir().join(format!(
+            "encode-lab-preview-media-retention-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&session_dir).expect("create preview media retention test directory");
+        let active_path = session_dir.join("preview-2.mkv");
+        for sequence in [1, 2, 3] {
+            fs::write(
+                session_dir.join(format!("preview-{sequence}.mkv")),
+                b"media",
+            )
+            .expect("write preview media");
+        }
+
+        cleanup_old_preview_media(&session_dir, &[active_path.as_path()], 2);
+
+        assert!(!session_dir.join("preview-1.mkv").exists());
+        assert!(active_path.is_file());
+        assert!(session_dir.join("preview-3.mkv").is_file());
+        let _ = fs::remove_dir_all(session_dir);
+    }
+
+    #[test]
+    fn pinned_frame_should_survive_session_cleanup_until_release() {
+        let runtime_dir =
+            std::env::temp_dir().join(format!("encode-lab-preview-pin-test-{}", Uuid::new_v4()));
+        let manager = PreviewManager::new(runtime_dir.clone());
+        let session_dir = runtime_dir.join("preview").join("session-a");
+        fs::create_dir_all(&session_dir).expect("create preview pin test directory");
+        let source_path = session_dir.join("source-2.png");
+        let preview_path = session_dir.join("preview-2.png");
+        fs::write(&source_path, b"source").expect("write source preview frame");
+        fs::write(&preview_path, b"preview").expect("write encoded preview frame");
+
+        let pinned = manager
+            .pin_frame(
+                &source_path.to_string_lossy(),
+                &preview_path.to_string_lossy(),
+            )
+            .expect("pin preview frame");
+        fs::remove_dir_all(session_dir).expect("remove original preview session");
+
+        assert!(std::path::Path::new(&pinned.source_image_path).is_file());
+        assert!(std::path::Path::new(&pinned.preview_image_path).is_file());
+        manager
+            .release_frame_pin(&pinned.frame_pin_id)
+            .expect("release preview frame pin");
+        assert!(!runtime_dir
+            .join("preview")
+            .join("pins")
+            .join(pinned.frame_pin_id)
+            .exists());
+        let _ = fs::remove_dir_all(runtime_dir);
     }
 }

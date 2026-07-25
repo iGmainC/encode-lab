@@ -7,6 +7,7 @@ import { Button } from "../components/ui/button";
 import { formatPathName } from "../components/common/FilePathActions";
 import { JobDetailPanel } from "../components/workbench/JobDetailPanel";
 import { useI18n } from "../i18n/I18nProvider";
+import { requestConfirmation } from "../lib/confirmation";
 import { isTauriRuntime } from "../lib/tauriRuntime";
 import type {
   ControlJobResponse,
@@ -100,7 +101,7 @@ export function JobsPage({ jobs, jobMetrics, onJobsChanged }: Props) {
   async function deleteJob(jobId: string) {
     const job = sortedJobs.find((item) => item.id === jobId);
     const jobName = job?.name?.trim() || formatPathName(job?.outputFile ?? "") || jobId;
-    const confirmed = window.confirm(t("jobs.action.deleteConfirm", { name: jobName }));
+    const confirmed = await requestConfirmation(t("jobs.action.deleteConfirm", { name: jobName }));
     if (!confirmed) {
       return;
     }

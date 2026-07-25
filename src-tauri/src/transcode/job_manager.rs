@@ -14,6 +14,7 @@ use serde::de::{DeserializeSeed, SeqAccess, Visitor};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Runtime};
+use uuid::Uuid;
 
 use crate::{
     ffmpeg_runtime::{dovi_tool_command, ffmpeg_command},
@@ -23,9 +24,10 @@ use crate::{
         read_constant_frame_count, read_video_metadata, read_video_track_size_bytes,
     },
     refresh_tray_menu,
-    storage::AppStorage,
+    storage::{errors::StorageResult, AppStorage},
     transcode::execution_plan::{
-        DolbyVisionVerification, ProcessStep, RuntimeProgram, TranscodePlan, TranscodeStep,
+        partial_output_path, DolbyVisionVerification, ProcessStep, RuntimeProgram, TranscodePlan,
+        TranscodeStep,
     },
 };
 
@@ -111,6 +113,51 @@ struct TranscodeManagerInner {
 #[derive(Clone)]
 pub struct TranscodeManager {
     inner: Arc<Mutex<TranscodeManagerInner>>,
+}
+
+/**
+ * 应用启动时收敛上次异常退出留下的任务状态和临时产物。
+ * @param storage 持久化仓库
+ * @param runtime_dir 当前系统临时运行目录
+ * @returns 被标记为 interrupted 的任务数
+ */
+pub(crate) fn recover_stale_transcode_state(
+    storage: &AppStorage,
+    runtime_dir: &Path,
+) -> StorageResult<usize> {
+    let mut jobs = storage.jobs_history.list()?;
+    let mut recovered_count = 0;
+
+    for job in jobs
+        .iter_mut()
+        .filter(|job| matches!(job.status.as_str(), "queued" | "running"))
+    {
+        let mut cleanup_paths = Vec::new();
+        if Uuid::parse_str(&job.id).is_ok() {
+            // history 属于持久化输入；只有应用生成的 UUID 才能参与路径推导。
+            cleanup_paths.push(runtime_dir.join("transcode").join(&job.id));
+            if let Ok(partial_output) = partial_output_path(&job.output_file, &job.id) {
+                cleanup_paths.push(partial_output);
+            }
+        }
+        cleanup_transient_paths(&cleanup_paths);
+
+        job.status = "interrupted".to_string();
+        job.error = Some("应用在任务结束前异常退出，启动时已回收临时文件。".to_string());
+        job.ended_at = Some(Utc::now().to_rfc3339());
+        recovered_count += 1;
+    }
+
+    // 历史记录可能已损坏或被删除；整个工作区在新进程启动前都没有合法所有者。
+    let _ = fs::remove_dir_all(runtime_dir.join("transcode"));
+    if let Some(runtime_root) = runtime_dir.parent() {
+        // 两遍编码日志与 runtime 同属应用专用临时根；启动时可整体回收孤儿前缀。
+        let _ = fs::remove_dir_all(runtime_root.join("passlog"));
+    }
+    if recovered_count > 0 {
+        storage.jobs_history.save_all(&jobs)?;
+    }
+    Ok(recovered_count)
 }
 
 impl TranscodeManager {
@@ -1416,9 +1463,11 @@ fn tail_text(value: &str) -> String {
 mod tests {
     use super::{
         claim_terminal_outcome, cleanup_transient_paths, digest_rpu_json, finalize_output,
-        finalize_output_with_terminal_claim, ChildState, StepError,
+        finalize_output_with_terminal_claim, recover_stale_transcode_state, ChildState, StepError,
     };
-    use crate::models::JobHistory;
+    use crate::{
+        models::JobHistory, storage::AppStorage, transcode::execution_plan::partial_output_path,
+    };
     use std::{
         fs,
         path::Path,
@@ -1601,5 +1650,66 @@ mod tests {
                 .and_then(|path| path.parent())
                 .expect("cleanup root"),
         );
+    }
+
+    #[test]
+    fn startup_recovery_should_interrupt_jobs_and_remove_owned_artifacts() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "encode-lab-startup-recovery-test-{}",
+            Uuid::new_v4()
+        ));
+        let data_dir = base_dir.join("data");
+        let runtime_dir = base_dir.join("runtime");
+        fs::create_dir_all(&data_dir).expect("create recovery data directory");
+        let storage = AppStorage::new(data_dir);
+        let input = base_dir.join("input.mkv");
+        let output = base_dir.join("output.mkv");
+        let mut stale_job = job(&input, &output);
+        stale_job.id = Uuid::new_v4().to_string();
+        storage
+            .jobs_history
+            .append(stale_job.clone())
+            .expect("append stale job");
+        let mut invalid_id_job = job(&input, &output);
+        invalid_id_job.id = "../../protected".to_string();
+        storage
+            .jobs_history
+            .append(invalid_id_job.clone())
+            .expect("append invalid id job");
+        let protected_file = base_dir.join("protected").join("keep.txt");
+        fs::create_dir_all(protected_file.parent().expect("protected parent"))
+            .expect("create protected directory");
+        fs::write(&protected_file, b"keep").expect("write protected file");
+
+        let workspace = runtime_dir.join("transcode").join(&stale_job.id);
+        fs::create_dir_all(&workspace).expect("create stale transcode workspace");
+        fs::write(workspace.join("source.hevc"), b"workspace")
+            .expect("write stale workspace artifact");
+        let partial_output = partial_output_path(&stale_job.output_file, &stale_job.id)
+            .expect("build stale partial output path");
+        fs::write(&partial_output, b"partial").expect("write stale partial output");
+        let passlog_file = base_dir.join("passlog").join("orphan-passlog-0.log");
+        fs::create_dir_all(passlog_file.parent().expect("passlog parent"))
+            .expect("create passlog directory");
+        fs::write(&passlog_file, b"passlog").expect("write stale passlog");
+
+        let recovered = recover_stale_transcode_state(&storage, &runtime_dir)
+            .expect("recover stale transcode state");
+
+        assert_eq!(recovered, 2);
+        let recovered_job = storage
+            .jobs_history
+            .list()
+            .expect("list recovered jobs")
+            .into_iter()
+            .find(|item| item.id == stale_job.id)
+            .expect("recovered job");
+        assert_eq!(recovered_job.status, "interrupted");
+        assert!(recovered_job.ended_at.is_some());
+        assert!(!runtime_dir.join("transcode").exists());
+        assert!(!partial_output.exists());
+        assert!(!passlog_file.exists());
+        assert!(protected_file.is_file());
+        let _ = fs::remove_dir_all(base_dir);
     }
 }

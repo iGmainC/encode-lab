@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ComparePreviewPlayer } from "../components/workbench/ComparePreviewPlayer";
 import {
+  clearDetachedPreviewPayload,
   DETACHED_PREVIEW_UPDATE_EVENT,
   readDetachedPreviewPayload,
+  releaseDetachedPreviewFrame,
+  resolveDetachedPreviewPayload,
   type DetachedPreviewPayload,
 } from "../lib/detachedPreview";
 import { useI18n } from "../i18n/I18nProvider";
@@ -41,7 +45,11 @@ async function lockCurrentPreviewWindow(currentWindow: ReturnType<typeof getCurr
  */
 export function DetachedPreviewPage() {
   const { t } = useI18n();
-  const [payload, setPayload] = useState<DetachedPreviewPayload | null>(() => readDetachedPreviewPayload());
+  const [payload, setPayload] = useState<DetachedPreviewPayload | null>(null);
+  const payloadRef = useRef<DetachedPreviewPayload | null>(null);
+  const activeFramePinIdRef = useRef<string | undefined>(undefined);
+  const pendingFramePinIdsRef = useRef(new Set<string>());
+  const isClosingWindowRef = useRef(false);
   const [splitMode, setSplitMode] = useState<"vertical" | "horizontal">(
     () => payload?.splitMode ?? "vertical",
   );
@@ -50,6 +58,67 @@ export function DetachedPreviewPage() {
     () => payload?.compareOrder ?? "source-first",
   );
   const [, setRuntime] = useState<ComparePreviewRuntime>(emptyRuntime);
+
+  /**
+   * 合并异步邮箱和窗口事件，并立即释放被乱序规则拒绝的帧 pin。
+   * @param incoming 新读取或事件到达的快照
+   */
+  const applyDetachedPreviewPayload = useCallback((incoming: DetachedPreviewPayload) => {
+    if (isClosingWindowRef.current) {
+      // 关窗期间迟到的邮箱读取或窗口事件不能重新取得资源所有权。
+      void releaseDetachedPreviewFrame(incoming.framePinId);
+      return;
+    }
+    const current = payloadRef.current;
+    const selection = resolveDetachedPreviewPayload(current, incoming);
+    if (selection.rejectedFramePinId) {
+      // 被拒绝的事件不会进入 React 提交阶段，必须在这里直接归还独占副本。
+      void releaseDetachedPreviewFrame(selection.rejectedFramePinId);
+    }
+    if (selection.payload === current) {
+      return;
+    }
+
+    payloadRef.current = selection.payload;
+    if (selection.payload.framePinId) {
+      // React 可能合并连续 setState；先登记 pin，提交后统一判断哪些快照从未真正展示。
+      pendingFramePinIdsRef.current.add(selection.payload.framePinId);
+    }
+    setPayload(selection.payload);
+  }, []);
+
+  /**
+   * 释放已提交帧和尚未进入 effect 的最新帧，覆盖关窗与 React 提交之间的竞态。
+   */
+  const releaseWindowFramePins = useCallback(async () => {
+    const framePinIds = new Set(
+      [
+        activeFramePinIdRef.current,
+        payloadRef.current?.framePinId,
+        ...pendingFramePinIdsRef.current,
+      ].filter(
+        (framePinId): framePinId is string => Boolean(framePinId),
+      ),
+    );
+    activeFramePinIdRef.current = undefined;
+    pendingFramePinIdsRef.current.clear();
+    payloadRef.current = null;
+    await Promise.all([...framePinIds].map((framePinId) => releaseDetachedPreviewFrame(framePinId)));
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void readDetachedPreviewPayload()
+      .then((initialPayload) => {
+        if (!disposed && initialPayload) {
+          applyDetachedPreviewPayload(initialPayload);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+    };
+  }, [applyDetachedPreviewPayload]);
 
   useEffect(() => {
     if (!payload) {
@@ -63,6 +132,24 @@ export function DetachedPreviewPage() {
   }, [payload]);
 
   useEffect(() => {
+    const previousFramePinId = activeFramePinIdRef.current;
+    activeFramePinIdRef.current = payload?.framePinId;
+    const releasableFramePinIds = new Set(pendingFramePinIdsRef.current);
+    pendingFramePinIdsRef.current.clear();
+    if (payload?.framePinId) {
+      // 当前提交真正使用的 pin 必须继续保留，其他 pending pin 均为 React 合并掉的快照。
+      releasableFramePinIds.delete(payload.framePinId);
+    }
+    if (previousFramePinId && previousFramePinId !== payload?.framePinId) {
+      releasableFramePinIds.add(previousFramePinId);
+    }
+    for (const framePinId of releasableFramePinIds) {
+      // 新快照已完成 React 提交，此时才能释放上一对图片和未展示的中间快照。
+      void releaseDetachedPreviewFrame(framePinId);
+    }
+  }, [payload?.framePinId]);
+
+  useEffect(() => {
     const currentWindow = getCurrentWebviewWindow();
     let isLockingWindow = false;
 
@@ -70,7 +157,7 @@ export function DetachedPreviewPage() {
      * 串行恢复窗口约束，避免 resize 事件连续触发时重复调用系统窗口 API。
      */
     const enforceWindowLock = async () => {
-      if (isLockingWindow) {
+      if (isLockingWindow || isClosingWindowRef.current) {
         return;
       }
 
@@ -85,11 +172,12 @@ export function DetachedPreviewPage() {
     let disposed = false;
     let unlistenPayload: (() => void) | undefined;
     let unlistenResize: (() => void) | undefined;
+    let unlistenClose: (() => void) | undefined;
     const setupListener = async () => {
       const disposePayload = await currentWindow.listen<DetachedPreviewPayload>(
         DETACHED_PREVIEW_UPDATE_EVENT,
         (event) => {
-          setPayload(event.payload);
+          applyDetachedPreviewPayload(event.payload);
         },
       );
       if (disposed) {
@@ -104,6 +192,15 @@ export function DetachedPreviewPage() {
       });
       if (disposed) disposeResize();
       else unlistenResize = disposeResize;
+
+      const disposeClose = await currentWindow.onCloseRequested(() => {
+        // 关窗会先退出系统全屏并触发 resize；必须停止全屏恢复，避免抵消关闭过程。
+        isClosingWindowRef.current = true;
+        void releaseWindowFramePins();
+        void clearDetachedPreviewPayload();
+      });
+      if (disposed) disposeClose();
+      else unlistenClose = disposeClose;
     };
 
     void setupListener().catch(() => {
@@ -114,14 +211,19 @@ export function DetachedPreviewPage() {
       disposed = true;
       unlistenPayload?.();
       unlistenResize?.();
+      unlistenClose?.();
     };
-  }, []);
+  }, [applyDetachedPreviewPayload, releaseWindowFramePins]);
 
   /**
    * 关闭独立预览窗口。
    */
   const closeDetachedWindow = async () => {
-    await getCurrentWebviewWindow().close().catch(() => {});
+    isClosingWindowRef.current = true;
+    await releaseWindowFramePins();
+    await clearDetachedPreviewPayload();
+    // 通过 Rust 主进程关窗，避免 WebView 核心窗口权限在动态窗口中静默拒绝。
+    await invoke("close_detached_preview_window").catch(() => {});
   };
 
   if (!payload?.sourceFile) {

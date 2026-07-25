@@ -420,6 +420,8 @@ function usePreviewFrameSession({
   imageLoadFailedText: string;
 }) {
   const sessionIdRef = useRef<string | null>(null);
+  const sessionStartPromiseRef = useRef<Promise<string | null> | null>(null);
+  const sessionGenerationRef = useRef(0);
   const desiredRenderKeyRef = useRef(desiredRenderKey);
   const lastSubmittedRenderKeyRef = useRef<string | null>(null);
   const lastFrameSeqRef = useRef(0);
@@ -471,14 +473,18 @@ function usePreviewFrameSession({
   }, []);
 
   /**
-   * 停止当前后端预览 session。
+   * 停止当前后端预览 session，并使正在启动的旧请求失效。
    */
   const stopSession = useCallback(() => {
-    if (!sessionIdRef.current) {
+    // generation 先递增；即使 start_preview 尚未返回，晚到 session 也会被立即回收。
+    sessionGenerationRef.current += 1;
+    sessionStartPromiseRef.current = null;
+    const previewSessionId = sessionIdRef.current;
+    if (!previewSessionId) {
       return;
     }
 
-    void invoke("stop_preview", { previewSessionId: sessionIdRef.current }).catch(() => {});
+    void invoke("stop_preview", { previewSessionId }).catch(() => {});
     sessionIdRef.current = null;
     setSessionId(null);
   }, []);
@@ -492,6 +498,9 @@ function usePreviewFrameSession({
     async (timeMs: number) => {
       if (sessionIdRef.current) {
         return sessionIdRef.current;
+      }
+      if (sessionStartPromiseRef.current) {
+        return sessionStartPromiseRef.current;
       }
       if (!listenersReady || !sourceFile) {
         return null;
@@ -510,21 +519,43 @@ function usePreviewFrameSession({
         taskConfigSnapshot: taskDraftSnapshot,
       };
 
+      const generation = sessionGenerationRef.current;
+      const startPromise = invoke<StartPreviewResponse>("start_preview", { payload })
+        .then(async (result) => {
+          if (generation !== sessionGenerationRef.current) {
+            // 素材已更换或组件已卸载；后端刚创建的迟到 session 不能留为孤儿。
+            await invoke("stop_preview", { previewSessionId: result.previewSessionId }).catch(
+              () => {},
+            );
+            return null;
+          }
+
+          sessionIdRef.current = result.previewSessionId;
+          setSessionId(result.previewSessionId);
+          setPreviewState("warming");
+          setPreviewError(undefined);
+          setDegradedFromTwoPass(Boolean(result.degradedFromTwoPass));
+          setDegradedFromDolbyVision(Boolean(result.degradedFromDolbyVision));
+          setDegradedFromSdrTonemap(Boolean(result.degradedFromSdrTonemap));
+          lastFrameSeqRef.current = 0;
+          return result.previewSessionId;
+        })
+        .catch((err) => {
+          if (generation === sessionGenerationRef.current) {
+            setPreviewState("error");
+            setPreviewError(formatPreviewInvokeError(err));
+          }
+          return null;
+        });
+      sessionStartPromiseRef.current = startPromise;
+
       try {
-        const result = await invoke<StartPreviewResponse>("start_preview", { payload });
-        sessionIdRef.current = result.previewSessionId;
-        setSessionId(result.previewSessionId);
-        setPreviewState("warming");
-        setPreviewError(undefined);
-        setDegradedFromTwoPass(Boolean(result.degradedFromTwoPass));
-        setDegradedFromDolbyVision(Boolean(result.degradedFromDolbyVision));
-        setDegradedFromSdrTonemap(Boolean(result.degradedFromSdrTonemap));
-        lastFrameSeqRef.current = 0;
-        return result.previewSessionId;
-      } catch (err) {
-        setPreviewState("error");
-        setPreviewError(formatPreviewInvokeError(err));
-        return null;
+        return await startPromise;
+      } finally {
+        // 旧 promise 结束时不能清空后来素材已创建的新启动请求。
+        if (sessionStartPromiseRef.current === startPromise) {
+          sessionStartPromiseRef.current = null;
+        }
       }
     },
     [listenersReady, sourceFile, sourceColorContext, splitMode, splitterPosition, taskDraftSnapshot],
@@ -558,7 +589,7 @@ function usePreviewFrameSession({
       }
 
       const previewSessionId = await ensureSession(timeMs);
-      if (!previewSessionId) {
+      if (!previewSessionId || sessionIdRef.current !== previewSessionId) {
         return;
       }
 
